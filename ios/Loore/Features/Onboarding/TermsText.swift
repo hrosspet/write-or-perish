@@ -73,7 +73,7 @@ enum TermsText {
         .paragraph("**Who can see your content (visibility):**"),
         .plainList([
             "Private (default) — Only you",
-            "Circles — Shared with specific groups *(coming soon — not yet functional)*",
+            "Circles: shared with the people you choose.",
             "Public — Anyone can see it",
         ]),
         .paragraph("**How AI can use your content:**"),

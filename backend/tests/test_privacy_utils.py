@@ -122,15 +122,17 @@ class TestCanUserAccessNode:
 
         assert can_user_access_node(node, user_id=2) is True
 
-    def test_circles_not_yet_implemented(self):
-        """Test that circles privacy level denies access (not yet implemented)."""
+    def test_circles_without_an_audience_is_private(self):
+        """A "circles" node nobody was chosen for (old rows, old clients)
+        is read by its owner only. The audience rules themselves are in
+        test_circles.py."""
         node = MagicMock(deleted_at=None)
         node.user_id = 1
+        node.human_owner_id = 1
         node.privacy_level = PrivacyLevel.CIRCLES
+        node.audience_root_id = None
 
-        # Owner can still access
         assert can_user_access_node(node, user_id=1) is True
-        # Others cannot (circles not implemented yet)
         assert can_user_access_node(node, user_id=2) is False
 
     @patch('backend.utils.privacy.current_user')

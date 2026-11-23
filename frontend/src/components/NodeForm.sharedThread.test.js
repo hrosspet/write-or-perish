@@ -125,7 +125,10 @@ test('a refused publish opens the dialog naming the quoted entry', async () => {
 test('quotesNotPublicError reads only that refusal', () => {
   expect(quotesNotPublicError({ response: { status: 409, data: { code: 'other' } } })).toBeNull();
   expect(quotesNotPublicError({ response: { status: 409, data: { code: 'quotes_not_public', error: 'x', quoted: [{ id: 1 }] } } }))
-    .toEqual({ message: 'x', quoted: [{ id: 1 }] });
+    .toEqual({ message: 'x', quoted: [{ id: 1 }], shared: false });
+  // Circles: the same refusal for a share with a circle.
+  expect(quotesNotPublicError({ response: { status: 409, data: { code: 'quotes_not_shared', error: 'y', quoted: [{ id: 2 }] } } }))
+    .toEqual({ message: 'y', quoted: [{ id: 2 }], shared: true });
 });
 
 

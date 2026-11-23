@@ -673,6 +673,22 @@ def init_streaming():
         return err
     privacy_level = data.get("privacy_level", "private")
     ai_usage = data.get("ai_usage", "none")
+    from backend.utils.privacy import validate_privacy_level
+    if not validate_privacy_level(privacy_level):
+        return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
+    # A recording under a shared node is read by the thread's audience
+    # (Circles), as a typed reply is.
+    if parent_id:
+        from backend.utils import circles as cz
+        parent = Node.query.get(int(parent_id))
+        if cz.reply_requires_circles(parent, privacy_level,
+                                     current_user.id):
+            privacy_level = "circles"
+        # In someone else's shared thread, wherever the parent sits in it,
+        # never Everyone: refused before the session (and the mic) starts.
+        refused = cz.new_reply_refusal(parent, privacy_level, current_user)
+        if refused is not None:
+            return refused
     # Payments on (#438): no transcription without the paid set, dictation
     # included, so the mic never opens for a recording nobody would turn
     # into text. Typing works as before.
@@ -1689,7 +1705,10 @@ def save_streaming_as_node(session_id):
                                  // or, under a parent with no agentic prompt
                                  // above it, one attached under the parent
                                  // (like POST /textmode/from-node); a no-op
-                                 // inside an agentic thread
+                                 // inside an agentic thread, and for a
+                                 // reply that joins a shared thread
+                                 // (Circles), which stays directly under
+                                 // the parent
         "auto_generate": false,  // create + enqueue an LLM reply after the
                                  // entry (spend cap honored, like /textmode/start)
         "model": "optional model id for auto_generate",
@@ -1754,6 +1773,18 @@ def save_streaming_as_node(session_id):
                 "error": "Replies under public posts are public.",
                 "code": "public_reply_required",
             }), 400
+    # The same check as a typed reply (circles.new_reply_refusal), for the
+    # level that would be stored, the form's (any level, Everyone
+    # included) or the one the recording started with (the node may have
+    # been shared since): under a shared node only "circles", and in
+    # someone else's shared thread, wherever the parent sits in it, never
+    # Everyone. Nothing is saved otherwise; the session stays.
+    if draft.parent_id:
+        from backend.utils import circles as cz
+        refused = cz.new_reply_refusal(Node.query.get(draft.parent_id),
+                                       privacy_level, current_user)
+        if refused is not None:
+            return refused
 
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
@@ -1783,13 +1814,34 @@ def save_streaming_as_node(session_id):
         if model_id not in current_app.config["SUPPORTED_MODELS"]:
             return jsonify({"error": f"Unsupported model: {model_id}"}), 400
 
+    # The entry, under the node the recording replies to (or none: a new
+    # thread). Circles: a recorded reply into a shared thread joins its
+    # audience (the explicit act) and stays directly under the node, where
+    # the thread's people read it, as a typed reply under a Glean does
+    # (POST /textmode/from-node): no Text-mode prompt is attached between,
+    # since a prompt node is never read by them.
+    node = Node(
+        user_id=current_user.id,
+        human_owner_id=current_user.id,
+        parent_id=draft.parent_id,
+        node_type="user",
+        privacy_level=privacy_level,
+        ai_usage=ai_usage,
+        transcription_status="completed",
+        streaming_transcription=True  # Mark as having chunked audio
+    )
+    joined = False
+    if draft.parent_id is not None:
+        from backend.utils import circles as cz
+        joined = cz.join_reply(
+            node, Node.query.get(draft.parent_id), current_user.id)
+
     # Agentic new thread: system node with the textmode prompt pinned,
     # mirroring textmode.start_conversation. The user's entry then hangs
     # under it so the thread is an agentic session (tools, profile, todo
     # context) from its first turn.
-    user_parent_id = draft.parent_id
     system_node = None
-    if agentic and draft.parent_id is not None:
+    if agentic and draft.parent_id is not None and not joined:
         # A recorded reply inside an existing thread (the reply box under
         # a read reply, #323): the textmode prompt goes under the parent
         # when no agentic prompt sits above it, as POST /textmode/from-node
@@ -1801,8 +1853,8 @@ def save_streaming_as_node(session_id):
         system_node = attach_agentic_prompt_under(
             parent_node, current_user.id, "textmode", privacy_level, ai_usage)
         if system_node is not None:
-            user_parent_id = system_node.id
-    elif agentic:
+            node.parent_id = system_node.id
+    elif agentic and draft.parent_id is None:
         from backend.utils.prompts import get_user_prompt_record
         from backend.utils.context_artifacts import attach_context_artifacts
         prompt_record = get_user_prompt_record(current_user.id, "textmode")
@@ -1822,19 +1874,9 @@ def save_streaming_as_node(session_id):
         # Started from the Glean card (#435): every turn offers Glean.
         from backend.utils.glean import stamp_glean_entry
         stamp_glean_entry(system_node, current_user, data.get("entry"))
-        user_parent_id = system_node.id
+        node.parent_id = system_node.id
+    user_parent_id = node.parent_id
 
-    # Create the node
-    node = Node(
-        user_id=current_user.id,
-        human_owner_id=current_user.id,
-        parent_id=user_parent_id,
-        node_type="user",
-        privacy_level=privacy_level,
-        ai_usage=ai_usage,
-        transcription_status="completed",
-        streaming_transcription=True  # Mark as having chunked audio
-    )
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
@@ -1846,6 +1888,17 @@ def save_streaming_as_node(session_id):
             current_user.id, content)
     db.session.add(node)
     db.session.flush()
+    # A recorded reply that joined a shared thread quotes only nodes all
+    # of the thread's people can read (Peter, 2026-11-12, as for a
+    # public entry above); the session stays, so the text can be changed
+    # and saved again.
+    if node.privacy_level == "circles":
+        from backend.utils.publish_quotes import circle_share_refusal
+        refusal = circle_share_refusal(
+            [(node, content, set(), None)], current_user.id)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
     # Per-node cap: split very long transcripts into a serial chain
     # (audio stays on this head node). An LLM reply chains after the
     # tip so its context walk sees the whole transcript (as the Voice

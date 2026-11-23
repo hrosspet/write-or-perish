@@ -37,9 +37,18 @@ struct UpdatesSheet: View {
                     .foregroundStyle(LooreColor.textMuted)
 
                 ForEach(notifications) { notification in
-                    NotificationItemView(notification: notification,
-                                         onDone: { notifications.removeAll { $0.id == notification.id } },
-                                         onCloseAndOpen: closeAndOpen)
+                    if notification.isCircleShare {
+                        CircleShareItemView(
+                            notification: notification,
+                            onDoneFrom: { name in
+                                notifications.removeAll { $0.isCircleShare && $0.actorUsername == name }
+                            },
+                            onCloseAndOpen: closeAndOpen)
+                    } else {
+                        NotificationItemView(notification: notification,
+                                             onDone: { notifications.removeAll { $0.id == notification.id } },
+                                             onCloseAndOpen: closeAndOpen)
+                    }
                 }
                 ForEach(polls) { poll in
                     PollItemView(poll: poll, onDone: { polls.removeAll { $0.id == poll.id } })
@@ -199,6 +208,69 @@ private struct NotificationItemView: View {
             Router.openOutsideApp(url)
         } else {
             onCloseAndOpen(link)
+        }
+    }
+}
+
+/// A note about a shared entry (Circles): "<name> shared an entry with you."
+/// with its two actions. "Read it" opens the entry and settles the note;
+/// "Don't show <name>'s entries" stops both the notes and the entries from
+/// that person (the server settles their waiting notes), and the sender is
+/// never told. Closing the sheet leaves the note for the next visit.
+private struct CircleShareItemView: View {
+    let notification: UpdateNotification
+    let onDoneFrom: (String) -> Void
+    let onCloseAndOpen: (String) -> Void
+    @Environment(AppState.self) private var app
+    @State private var busy = false
+
+    private var name: String { notification.actorUsername ?? "" }
+
+    static func notTold(_ name: String) -> String { "\(CirclesWording.at(name)) is not told what you choose." }
+    static func hideLabel(_ name: String) -> String { "Don't show \(CirclesWording.possessive(name)) entries" }
+
+    var body: some View {
+        ItemContainer {
+            Text(notification.title)
+                .font(itemTitleFont)
+                .foregroundStyle(LooreColor.textPrimary)
+                .padding(.top, 6)
+            if let body = notification.body, !body.isEmpty {
+                Text(body)
+                    .font(LooreFont.sans(16, .light))
+                    .foregroundStyle(LooreColor.textPrimary)
+                    .lineSpacing(4)
+                    .padding(.top, 14)
+            }
+            Text(Self.notTold(name))
+                .font(LooreFont.sans(14, .light))
+                .foregroundStyle(LooreColor.textSecondary)
+                .padding(.top, 10)
+            FlowLayout(spacing: 10, lineSpacing: 10) {
+                Button(Self.hideLabel(name), action: hide)
+                    .buttonStyle(UpdatesButtonStyle())
+                    .accessibilityIdentifier("updates.circleHide")
+                Button("Read it", action: readIt)
+                    .buttonStyle(UpdatesButtonStyle(accent: true))
+                    .accessibilityIdentifier("updates.circleRead")
+            }
+            .disabled(busy)
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.top, 16)
+        }
+    }
+
+    private func readIt() {
+        app.api.fireAndForget(APIRequest(.post, APIPath.notification(notification.id, action: "read")))
+        onCloseAndOpen(notification.link ?? notification.nodeId.map { "/node/\($0)" } ?? "/shared")
+    }
+
+    private func hide() {
+        busy = true
+        Task {
+            _ = try? await app.api.post(APIPath.circlesMutes, json: .object(["username": .string(name)]),
+                                        as: EmptyResponse.self)
+            onDoneFrom(name)
         }
     }
 }

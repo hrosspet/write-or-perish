@@ -50,8 +50,13 @@ def _is_llm(node):
 def _quoted_by_others(text, user_id, depth, path, ext_ids):
     """True when a {quote:ID} in *text* (the requester's own) resolves to
     a node another person wrote, at any depth the resolver follows: the
-    quoted node is readable by the requester, alive and AI-readable, as
-    resolve_quotes requires before it shows a quote's text. *path* holds
+    quoted node is readable by the requester's model, alive and
+    AI-readable, as resolve_quotes requires before it shows a quote's
+    text. The access check is the resolver's own (get_quote_data with
+    as_ai): another person's circle-shared entry, which a model acting
+    for the requester never reads outside its thread, is not resolved
+    and does not count; a reply in the requester's own shared thread,
+    which the model reads, does. *path* holds
     the ids quoted on the way here: only a quote back into it is passed
     over (the resolver's cycle rule, its _seen_ids), so a node quoted
     again elsewhere is followed again, as the message builder does. The
@@ -66,7 +71,7 @@ def _quoted_by_others(text, user_id, depth, path, ext_ids):
         if (quoted is None or quoted.deleted_at is not None
                 or owner_hidden(quoted)
                 or quoted.ai_usage not in AI_ALLOWED
-                or not can_user_access_node(quoted, user_id)):
+                or not can_user_access_node(quoted, user_id, as_ai=True)):
             continue
         if not written_by(quoted, user_id):
             return True

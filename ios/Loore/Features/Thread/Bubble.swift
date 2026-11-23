@@ -68,6 +68,8 @@ struct BubbleData: Identifiable, Equatable {
     var inaccessible = false
     var username: String = ""
     var llmModel: String?
+    /// "<model name> via @<requester>" on an AI reply in a shared thread.
+    var llmLabel: String?
     var humanOwnerUsername: String?
     var origin: String?
     var createdAt: Date?
@@ -87,21 +89,24 @@ struct BubbleData: Identifiable, Equatable {
 extension BubbleData {
     init(_ n: AncestorNode) {
         self.init(id: n.id, content: n.content, preview: n.preview, deleted: n.deleted,
-                  username: n.username ?? "", llmModel: n.llmModel, createdAt: n.createdAt,
+                  username: n.username ?? "", llmModel: n.llmModel, llmLabel: n.llmLabel,
+                  humanOwnerUsername: n.humanOwnerUsername, createdAt: n.createdAt,
                   childCount: n.childCount, promptKey: n.systemPrompt.promptKey,
                   isPublic: n.privacyLevel == .public)
     }
 
     init(_ n: TreeNode) {
         self.init(id: n.id, content: n.content, deleted: n.deleted, inaccessible: n.inaccessible,
-                  username: n.username ?? "", llmModel: n.llmModel, origin: n.origin, createdAt: n.createdAt,
+                  username: n.username ?? "", llmModel: n.llmModel, llmLabel: n.llmLabel,
+                  humanOwnerUsername: n.humanOwnerUsername, origin: n.origin, createdAt: n.createdAt,
                   childCount: n.childCount, promptKey: n.systemPrompt.promptKey,
                   isPublic: n.privacyLevel == .public)
     }
 
     init(_ card: LogCard) {
         self.init(id: card.id, preview: card.preview, threadName: card.threadName, username: card.username,
-                  llmModel: card.llmModel, humanOwnerUsername: card.humanOwnerUsername, origin: card.origin,
+                  llmModel: card.llmModel, llmLabel: card.llmLabel, humanOwnerUsername: card.humanOwnerUsername,
+                  origin: card.origin,
                   createdAt: card.createdAt, childCount: card.childCount, pinned: card.pinnedAt != nil,
                   promptKey: card.promptKey, hasOriginalAudio: card.hasOriginalAudio)
     }
@@ -209,7 +214,8 @@ struct BubbleView: View {
     private var nodeFooter: some View {
         NodeFooterView(
             username: data.username, createdAt: data.createdAt, childCount: data.childCount,
-            humanOwnerUsername: data.humanOwnerUsername, llmModel: data.llmModel, origin: data.origin,
+            humanOwnerUsername: data.humanOwnerUsername, llmModel: data.llmModel, llmLabel: data.llmLabel,
+            origin: data.origin,
             isPublic: data.isPublic,
             onReply: data.isPlaceholder ? nil : actions.first(where: { $0.kind == .reply })?.action)
     }
@@ -312,6 +318,8 @@ struct NodeFooterView<Extras: View>: View {
     let childCount: Int
     var humanOwnerUsername: String?
     var llmModel: String?
+    /// The server's label for an AI reply in a shared thread; replaces the model id.
+    var llmLabel: String?
     var origin: String?
     var isPublic = false
     var onReply: (() -> Void)?
@@ -322,9 +330,11 @@ struct NodeFooterView<Extras: View>: View {
 
     var body: some View {
         Group {
-            if typeSize.isAccessibilitySize {
-                // One row cannot hold author, date and the icons at these sizes:
-                // author (and origin) on top, the rest wrapping below.
+            if stacked {
+                // One row cannot hold author, date and the icons at these sizes,
+                // nor the label of an AI reply in a shared thread ("<model> via
+                // @<name>", which must be read in full): author (and origin) on
+                // top, the rest wrapping below.
                 VStack(alignment: .leading, spacing: 4) {
                     author
                     if let origin, !origin.isEmpty { originText(origin) }
@@ -357,9 +367,14 @@ struct NodeFooterView<Extras: View>: View {
         .padding(.top, 12)
     }
 
+    /// Author on its own line: at accessibility sizes, and for a labelled AI reply.
+    private var stacked: Bool {
+        typeSize.isAccessibilitySize || !(llmLabel ?? "").isEmpty
+    }
+
     private var author: some View {
         Button(action: openAuthor) {
-            Text(displayName).lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+            Text(displayName).lineLimit(stacked ? 2 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -395,13 +410,9 @@ struct NodeFooterView<Extras: View>: View {
         .accessibilityLabel(childCount == 1 ? "1 reply" : "\(childCount) replies")
     }
 
-    /// Model id for AI replies; "model · via human" on public nodes.
     private var displayName: String {
-        if let llmModel, !llmModel.isEmpty {
-            if isPublic, let human = humanOwnerUsername, !human.isEmpty { return "\(llmModel) · via \(human)" }
-            return llmModel
-        }
-        return username
+        NodeFooterText.author(username: username, llmModel: llmModel, llmLabel: llmLabel,
+                        humanOwnerUsername: humanOwnerUsername, isPublic: isPublic)
     }
 
     private func openAuthor() {
@@ -416,9 +427,26 @@ struct NodeFooterView<Extras: View>: View {
 
 extension NodeFooterView where Extras == EmptyView {
     init(username: String, createdAt: Date?, childCount: Int, humanOwnerUsername: String? = nil,
-         llmModel: String? = nil, origin: String? = nil, isPublic: Bool = false, onReply: (() -> Void)? = nil) {
+         llmModel: String? = nil, llmLabel: String? = nil, origin: String? = nil, isPublic: Bool = false,
+         onReply: (() -> Void)? = nil) {
         self.init(username: username, createdAt: createdAt, childCount: childCount,
-                  humanOwnerUsername: humanOwnerUsername, llmModel: llmModel, origin: origin,
+                  humanOwnerUsername: humanOwnerUsername, llmModel: llmModel, llmLabel: llmLabel, origin: origin,
                   isPublic: isPublic, onReply: onReply, extras: { EmptyView() })
+    }
+}
+
+/// The footer's author text, apart from the view so it can be tested.
+enum NodeFooterText {
+    /// The author's name; for an AI reply the server's label when it sends one
+    /// (a shared thread: "<model name> via @<requester>"), else the model id,
+    /// with "· via human" on public nodes.
+    static func author(username: String, llmModel: String?, llmLabel: String?, humanOwnerUsername: String?,
+                       isPublic: Bool) -> String {
+        if let llmLabel, !llmLabel.isEmpty { return llmLabel }
+        if let llmModel, !llmModel.isEmpty {
+            if isPublic, let human = humanOwnerUsername, !human.isEmpty { return "\(llmModel) · via \(human)" }
+            return llmModel
+        }
+        return username
     }
 }
