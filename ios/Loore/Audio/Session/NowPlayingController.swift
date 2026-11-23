@@ -9,7 +9,8 @@ import SwiftUI
 /// |---|---|---|
 /// | recording | `Recording m:ss` / `Paused m:ss` | play = resume, pause = pause, next = stop and send |
 /// | thinking | `Voice…` | none (#397: the web's next = cancel read as "next track" and only saved a TTS call) |
-/// | playback | `Voice`, or `Listening` for an entry read aloud | play/pause, ±10 s, seek, rate |
+/// | playback, phone unlocked | the entry's title (`Voice` for a Voice reply) + the heading being read | play/pause, ±10 s, seek, rate |
+/// | playback, phone locked | `Voice`, or `Listening` for an entry read aloud (`DeviceLockState`) | the same |
 ///
 /// The recording row is the fallback for when the voice Live Activity is not shown.
 /// "Next track" has a handler only while that row uses it, so iOS has no reason to
@@ -57,10 +58,17 @@ final class NowPlayingController {
         return paused ? "Paused \(time)" : "Recording \(time)"
     }
 
-    /// The lock-screen title while audio plays: the same words for every entry.
-    /// What the entry is called, and the heading being read, show in the app only.
+    /// The title while audio plays and the phone is locked: the same words for
+    /// every entry.
     nonisolated static func playbackTitle(voice: Bool) -> String {
         voice ? "Voice" : "Listening"
+    }
+
+    /// The title while audio plays and the phone is unlocked: what the entry is
+    /// called and, when it has several headings, the one being read.
+    nonisolated static func playbackTitle(entry: String, chapter: String?) -> String {
+        let title = entry.isEmpty ? "Loore" : entry
+        return chapter.map { title + " — " + $0 } ?? title
     }
 
     func update(_ newPhase: Phase) {

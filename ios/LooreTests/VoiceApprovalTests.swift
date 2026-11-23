@@ -554,24 +554,110 @@ final class VoiceApprovalAppTests: StubbedAppTestCase {
         XCTAssertEqual(queued, [Self.reply])
     }
 
-    func testTheLockScreenTitleIsTheSameForEveryEntry() {
+    // Now Playing's title (Peter, 2026-11-23): the entry's title and heading while
+    // the phone is unlocked, a fixed title while it is locked.
+
+    private var nowPlayingTitle: String? {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String
+    }
+
+    private static let headings = [QueueChapter(title: "First heading", chunkIndex: 0, startTime: 0),
+                                   QueueChapter(title: "Second heading", chunkIndex: 1, startTime: 6)]
+
+    /// Files of their own: these tests load and seek in quick succession, and in
+    /// the simulator the test that came next could then not play the same files.
+    private static let first = silence("heading-one", seconds: 6)
+    private static let second = silence("heading-two", seconds: 4.5)
+
+    private func loadEntry() {
+        app.audio.player.load(urls: [Self.first, Self.second], durations: [6, 4.5], title: "A morning entry",
+                              source: .node(77), chapters: Self.headings, autoplay: false)
+    }
+
+    private func loadVoiceReply() {
+        app.audio.player.load(urls: [Self.first, Self.second], durations: [6, 4.5], title: "Voice", source: .voice,
+                              chapters: Self.headings, autoplay: false)
+    }
+
+    func testLockedTheTitleIsTheSameForEveryEntryAndEveryKindOfPlayback() {
+        let lock = FakeLockState(locked: true)
+        app.audio.lockState = lock
         let player = app.audio.player
-        let lockScreenTitle = { MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyTitle] as? String }
-        let chapters = [QueueChapter(title: "First heading", chunkIndex: 0, startTime: 0),
-                        QueueChapter(title: "Second heading", chunkIndex: 1, startTime: 6)]
-        player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "A morning entry", source: .node(77),
-                    chapters: chapters, autoplay: false)
-        app.audio.refreshNowPlaying()
-        XCTAssertEqual(lockScreenTitle(), "Listening")
+
+        loadEntry()
+        XCTAssertEqual(nowPlayingTitle, "Listening")
         XCTAssertEqual(player.title, "A morning entry", "the app's own player keeps the entry's title")
         XCTAssertEqual(player.chapters.map(\.title), ["First heading", "Second heading"])
         XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPMediaItemPropertyPlaybackDuration] as? Double,
                        10.5)
 
-        player.load(urls: [Self.reply, Self.clip], durations: [6, 4.5], title: "Voice", source: .voice,
-                    chapters: chapters, autoplay: false)
-        app.audio.refreshNowPlaying()
-        XCTAssertEqual(lockScreenTitle(), "Voice")
+        for source in [ChunkQueuePlayer.Source.profile(3), .item(5)] {
+            player.load(urls: [Self.first, Self.second], durations: [6, 4.5], title: "A title of its own", source: source,
+                        chapters: Self.headings, autoplay: false)
+            XCTAssertEqual(nowPlayingTitle, "Listening", "\(source)")
+        }
+
+        loadVoiceReply()
+        XCTAssertEqual(nowPlayingTitle, "Voice")
+    }
+
+    func testUnlockedTheTitleIsTheEntryAndTheHeadingBeingRead() {
+        app.audio.lockState = FakeLockState(locked: false)
+        loadEntry()
+        XCTAssertEqual(nowPlayingTitle, "A morning entry — First heading")
+        app.audio.player.seek(to: 7)
+        XCTAssertEqual(nowPlayingTitle, "A morning entry — Second heading")
+
+        loadVoiceReply()
+        XCTAssertEqual(nowPlayingTitle, "Voice — First heading")
+
+        app.audio.player.load(urls: [Self.first], durations: [6], title: "", source: .node(78), autoplay: false)
+        XCTAssertEqual(nowPlayingTitle, "Loore", "an entry with no title and no headings")
+    }
+
+    func testANewHeadingWhileLockedLeavesTheFixedTitle() {
+        app.audio.lockState = FakeLockState(locked: true)
+        loadEntry()
+        XCTAssertEqual(nowPlayingTitle, "Listening")
+        app.audio.player.seek(to: 7)
+        XCTAssertEqual(app.audio.player.currentChapterIndex, 1)
+        XCTAssertEqual(nowPlayingTitle, "Listening")
+
+        loadVoiceReply()
+        app.audio.player.seek(to: 7)
+        XCTAssertEqual(nowPlayingTitle, "Voice")
+    }
+
+    func testLockingAndUnlockingChangeTheTitleAtOnce() {
+        let lock = FakeLockState(locked: false)
+        app.audio.lockState = lock
+        loadEntry()
+        XCTAssertEqual(nowPlayingTitle, "A morning entry — First heading")
+
+        lock.set(locked: true)
+        XCTAssertEqual(nowPlayingTitle, "Listening")
+        app.audio.player.seek(to: 7)
+        XCTAssertEqual(nowPlayingTitle, "Listening")
+
+        lock.set(locked: false)
+        XCTAssertEqual(nowPlayingTitle, "A morning entry — Second heading", "the heading reached while locked")
+    }
+
+    func testPlaybackThatStartsWhileLockedHasTheFixedTitleFromItsFirstUpdate() {
+        let lock = FakeLockState(locked: true)
+        app.audio.lockState = lock
+        var titles: [String?] = []
+        let previous = app.audio.player.onStateChange
+        app.audio.player.onStateChange = { [unowned self] in
+            previous?()
+            titles.append(self.nowPlayingTitle)
+        }
+        loadVoiceReply()
+        loadEntry()
+        XCTAssertFalse(titles.isEmpty)
+        XCTAssertTrue(titles.allSatisfy { $0 == "Voice" || $0 == "Listening" }, "\(titles)")
+        XCTAssertEqual(nowPlayingTitle, "Listening")
+        XCTAssertEqual(lock.playing.last, false, "the lock state hears whether audio plays")
     }
 
     func testDropTrailingTakesOffOnlyThatLastChunk() {
