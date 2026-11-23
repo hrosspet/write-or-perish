@@ -982,6 +982,12 @@ class Node(db.Model):
             "human_owner_id", "source_key",
             name="uq_node_human_owner_source_key",
         ),
+        # The public listings (Commons feed, sitemap, a person's public
+        # page) read the public nodes, newest first, and keep the tops of
+        # threads (utils/public_threads). Public nodes are a small part
+        # of the table: with this index those queries read only them.
+        db.Index("ix_node_public_created_at", "created_at",
+                 postgresql_where=db.text("privacy_level = 'public'")),
     )
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
