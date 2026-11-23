@@ -13,6 +13,10 @@ from backend.utils.encryption import prefetch_deks
 from backend.utils.privacy import can_user_edit_node, train_refused
 
 
+# How open a level is; an unknown one counts as private.
+_OPENNESS = {"private": 0, "circles": 1, "public": 2}
+
+
 def _prompt_entry_ids(nodes):
     """Ids of the prompt entries among *nodes*: those stamped with a
     prompt key, and those from before that column that only link a
@@ -40,10 +44,11 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     (fetched through the X API, #689) and appends them to
     *kept_from_train* (a list), so the caller can say so.
 
-    A change of privacy to a level above private leaves the prompt
-    entries below *root* as they are: a prompt entry is shared only when
-    its owner sets its level on the entry itself (Peter, 2026-11-23). A
-    change to private applies to them like to any reply.
+    A change of privacy never opens a prompt entry below *root* further
+    than it is: a prompt entry is shared only when its owner sets its
+    level on the entry itself (Peter, 2026-11-23). A change to a level
+    less open than the entry's own (private < circles < public) applies
+    to it like to any reply.
 
     Level-batched walk (one query per depth), no row locks: a reply that
     races in during the walk simply keeps the settings it was created
@@ -74,8 +79,15 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # usage: unwrap first, then the checks below are cache hits.
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
     from backend.utils.llm_nodes import reply_in_progress
-    kept_prompts = (_prompt_entry_ids(editable)
-                    if privacy_level not in (None, "private") else set())
+    # Prompt entries the new level would open further than they are.
+    kept_prompts = set()
+    if privacy_level not in (None, "private"):
+        prompt_ids = _prompt_entry_ids(editable)
+        kept_prompts = {
+            n.id for n in editable
+            if n.id in prompt_ids
+            and _OPENNESS.get(privacy_level, 0)
+            > _OPENNESS.get(n.privacy_level, 0)}
     changed = []
     for n in editable:
         touched = False

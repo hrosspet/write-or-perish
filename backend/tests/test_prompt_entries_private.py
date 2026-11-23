@@ -424,6 +424,41 @@ def test_lowering_a_threads_level_applies_to_its_prompt_entries(app):
         assert _get(node.id).privacy_level == "private"
 
 
+@pytest.mark.parametrize("level", ["private", "circles"])
+def test_lowering_a_threads_level_lowers_a_public_prompt_entry_inside_it(
+        app, level):
+    """A prompt entry its owner had set public, in a public thread set
+    to a less open level with all replies: the entry takes that level."""
+    entry = _node("anna", "anna entry", privacy="public")
+    gleaning = _ai_reply("anna", entry, "public")
+    prompt, message = _stored_prompt_entry("anna", gleaning, "public")
+    earlier, _ = _stored_prompt_entry(
+        "anna", gleaning, "public", stamped=False)
+
+    resp = _put(app, "anna", entry.id, content="anna entry",
+                privacy_level=level, apply_to_descendants=True)
+
+    assert resp.status_code == 200, resp.get_json()
+    for node in (entry, gleaning, prompt, message, earlier):
+        assert _get(node.id).privacy_level == level, node.id
+
+
+def test_raising_to_the_middle_level_keeps_private_prompt_entries_and_lowers_public_ones(
+        app):
+    entry = _node("anna", "anna entry")
+    private_prompt, m1 = _stored_prompt_entry("anna", entry, "private")
+    public_prompt, m2 = _stored_prompt_entry("anna", entry, "public")
+
+    resp = _put(app, "anna", entry.id, content="anna entry",
+                privacy_level="circles", apply_to_descendants=True)
+
+    assert resp.status_code == 200, resp.get_json()
+    assert _get(private_prompt.id).privacy_level == "private"
+    assert _get(public_prompt.id).privacy_level == "circles"
+    assert _get(m1.id).privacy_level == "circles"
+    assert _get(m2.id).privacy_level == "circles"
+
+
 def test_a_change_of_ai_usage_still_applies_to_prompt_entries(app):
     entry = _node("anna", "anna entry")
     prompt, message = _stored_prompt_entry("anna", entry, "private")
