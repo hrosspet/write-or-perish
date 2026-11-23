@@ -2939,9 +2939,13 @@ class TestGpt62AstraIsOpenAIsChatDefault:
         _db.session.expire_all()
         assert User.query.get(alice.id).preferred_model == "gpt-6-astra"
 
-    def test_a_thread_on_gpt_6_astra_stays_on_it(self, app_shipped):
-        """A thread's model is the thread's: a conversation on GPT-6 Astra
-        goes on on GPT-6 Astra, whatever the account's model."""
+    def test_a_text_reply_in_a_gpt_6_astra_thread_stays_on_it(
+            self, app_shipped):
+        """A text reply keeps the thread's model: in a thread on GPT-6
+        Astra, a reply asked for with no model runs on GPT-6 Astra,
+        whatever the account's model. A Voice turn sends the account's
+        model and runs on it (#784; TestVoiceTurnUsesTheAccountsModel in
+        test_spend_cap_recording.py)."""
         from backend.utils.llm_nodes import resolve_chat_model
         client = app_shipped.test_client()
         for name, saved in (("bob", None), ("carol", "gpt-5.5"),

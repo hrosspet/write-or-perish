@@ -77,8 +77,11 @@ class Config:
     # validate_default_model).
     # OpenAI's is GPT-6.2 Astra since 2026-11-23 (Peter: "Astra 6.2 should
     # become the new OpenAI chat default"; it was GPT-6 Astra). Moving it
-    # rewrites no saved value: an account or thread on GPT-6 Astra stays
-    # on GPT-6 Astra, which is still offered.
+    # rewrites no saved value: an account that saved GPT-6 Astra keeps it
+    # (still offered), and a text reply in a thread on GPT-6 Astra stays
+    # on it. A Voice turn runs on the account's model, as for every
+    # account (#784), so for an account whose saved OpenAI model is
+    # retired it now runs on GPT-6.2 Astra, also in such a thread.
     CHAT_MODEL_ANTHROPIC = (os.environ.get("CHAT_MODEL_ANTHROPIC")
                             or "claude-opus-5.5")
     CHAT_MODEL_OPENAI = (os.environ.get("CHAT_MODEL_OPENAI")

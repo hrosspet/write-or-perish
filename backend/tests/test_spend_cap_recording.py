@@ -663,3 +663,70 @@ class TestFinalizeWait:
 
         assert result["status"] == "draft_deleted"
         assert len(sleeps) == 1
+
+
+# ── A Voice turn runs on the account's model (#784, #775 review) ─────────
+
+class TestVoiceTurnUsesTheAccountsModel:
+    """Both Voice clients send the account's model with every turn, also
+    one that continues a thread: the web's VoicePage sends
+    user.preferred_model, the iPhone's AudioCenter user.preferredModel,
+    both the dashboard's effective_preferred_model. The chain keeps a
+    chat model it is sent. So a Voice turn in a thread on GPT-6 Astra runs
+    on the account's model, and the text replies after it follow; text
+    replies alone keep the thread's model. This holds for every account
+    (#784). With GPT-6.2 Astra as OpenAI's default (#775), an account
+    whose saved OpenAI model is retired sends GPT-6.2 Astra; one that
+    saved GPT-6 Astra sends GPT-6 Astra."""
+
+    @pytest.mark.parametrize("saved, sent", [
+        ("gpt-5.5", "gpt-6.2-astra"),
+        ("gpt-6-astra", "gpt-6-astra"),
+    ])
+    def test_a_voice_turn_in_a_gpt_6_astra_thread(self, st, saved, sent):
+        from backend.config import Config
+        from backend.utils.llm_nodes import (
+            effective_preferred_model, resolve_chat_model)
+        st.flask_app.config.update(
+            SUPPORTED_MODELS=Config.SUPPORTED_MODELS,
+            DEFAULT_LLM_MODEL="claude-opus-5.5",
+            CHAT_MODEL_ANTHROPIC=Config.CHAT_MODEL_ANTHROPIC,
+            CHAT_MODEL_OPENAI=Config.CHAT_MODEL_OPENAI)
+        user = User(username="speaker", preferred_model=saved,
+                    approved=True, plan="alpha")
+        _db.session.add(user)
+        _db.session.flush()
+        root = Node(user_id=user.id, human_owner_id=user.id,
+                    node_type="user", ai_usage="chat")
+        root.set_content("a thought")
+        _db.session.add(root)
+        _db.session.flush()
+        reply = Node(user_id=user.id, human_owner_id=user.id,
+                     parent_id=root.id, node_type="llm",
+                     llm_model="gpt-6-astra", ai_usage="chat")
+        reply.set_content("an answer")
+        _db.session.add(reply)
+        draft = _recording(user, "sess-voice", [], st._test_root)
+        _db.session.commit()
+        # A text reply here keeps the thread's model.
+        assert resolve_chat_model(reply, user) == ("gpt-6-astra",
+                                                   "predecessor")
+        # What both Voice clients send: the account's model.
+        assert effective_preferred_model(user) == sent
+        saved_llm = sys.modules.get("backend.tasks.llm_completion")
+        sys.modules["backend.tasks.llm_completion"] = MagicMock()
+        try:
+            st._start_server_side_llm_chain(
+                draft, "sess-voice", "and then?", user.id,
+                reply.id, sent, "Voice")
+        finally:
+            if saved_llm is None:
+                sys.modules.pop("backend.tasks.llm_completion", None)
+            else:
+                sys.modules["backend.tasks.llm_completion"] = saved_llm
+        _db.session.refresh(draft)
+        voice_reply = _db.session.get(Node, draft.llm_node_id)
+        assert voice_reply.llm_model == sent
+        # The text replies after it follow the Voice turn.
+        assert resolve_chat_model(voice_reply, user) == (sent, "predecessor")
+        assert _db.session.get(User, user.id).preferred_model == saved
