@@ -72,6 +72,9 @@ TASK_QUEUES = {
     # month's first run but for new accounts.
     "backend.tasks.spend_monitor.roll_carries": _B,
     "backend.tasks.spend_monitor.check_trials": _B,
+    # Hourly: subscriptions whose stored period has ended, read again
+    # from Stripe (utils/period_reread).
+    "backend.tasks.spend_monitor.reread_periods": _B,
 
     # Profiles, recent context, intentions, digests, poll drafts.
     "backend.tasks.exports.update_user_profile": _B,

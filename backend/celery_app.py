@@ -140,6 +140,15 @@ celery.conf.update(
             'task': 'backend.tasks.spend_monitor.check_trials',
             'schedule': schedules.crontab(minute=22),  # hourly, at :22 UTC
         },
+        # A subscription whose stored period has ended is read again from
+        # Stripe and settled as its event would be (utils/period_reread):
+        # a renewal whose event is late still starts the next period. A
+        # fixed minute, so a deploy does not put the run off. Nothing
+        # while payments are off.
+        'reread-ended-periods': {
+            'task': 'backend.tasks.spend_monitor.reread_periods',
+            'schedule': schedules.crontab(minute=37),  # hourly, at :37 UTC
+        },
         # Poll drafts ride the Batch API (#207); no-op when none pending.
         'collect-poll-draft-batches': {
             'task': 'backend.tasks.poll_draft.collect_poll_draft_batches',
