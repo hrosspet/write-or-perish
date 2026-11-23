@@ -1465,7 +1465,7 @@ def test_the_script_reports_without_writing(app):
         p.id for p, _ in (thread, unstamped, inside, circles))
     assert sorted(counts["slug_ids"]) == sorted(
         [thread[1].id, unstamped[1].id])
-    assert (counts["slugs_given"], counts["slugs_moved"]) == (2, 0)
+    assert counts["slugs_given"] == 2
     assert _levels(thread, unstamped, inside, circles, private) == [
         "public", "public", "public", "circles", "private"]
     assert _get(thread[1].id).public_slug is None
@@ -1482,17 +1482,16 @@ def test_the_script_sets_them_private_and_a_second_run_finds_nothing(app):
     counts = _script().run(_later(), apply=True, pause=0, batch_size=2)
 
     assert counts["set_private"] == 4 and counts["stamped"] == 1
-    assert (counts["slugs_given"], counts["slugs_moved"]) == (2, 0)
+    assert counts["slugs_given"] == 2
     assert _levels(thread, unstamped, inside, circles, private) == [
         "private"] * 5
     assert _get(unstamped[0].id).prompt_key == "textmode"
     assert _get(thread[1].id).public_slug == "earlier-thread"
     assert _get(unstamped[1].id).public_slug == "before-the-key"
-    # The messages keep their level; the one inside a thread and the
-    # circles one get no slug.
+    # The messages keep their level; the one inside a thread gets no
+    # slug.
     assert _get(thread[1].id).privacy_level == "public"
     assert _get(inside[1].id).public_slug is None
-    assert _get(circles[1].id).public_slug is None
     assert {n.id: n.updated_at for n in Node.query.all()} == stamps
     # Each thread is listed once, from its message, with its permalink.
     listed = _listed_ids(app)["share"]
@@ -1536,34 +1535,90 @@ def test_the_script_leaves_sessions_that_were_private_before_as_they_are(
     assert "/@anna" not in _body(_client(app).get("/sitemap.xml"))
 
 
-def test_the_script_moves_a_roots_permalink_and_pin_to_the_message(app):
+def test_the_script_gives_the_message_a_slug_of_its_own_and_moves_the_pin(
+        app):
+    """A root whose slug was made from the prompt's text: the slug is
+    dropped, the message gets one made from its own first line, and the
+    root's pin moves to the message."""
     from datetime import datetime
     prompt, message = _stored_prompt_entry(
         "anna", None, "public", text="# Earlier thread\n\nbody")
-    prompt.public_slug = "the-old-address"
+    prompt.public_slug = "anna-prompt-text-anna-typed-into-prompt"
     pinned_at = datetime(2026, 10, 1, 12, 0, 0)
     prompt.pinned_at, prompt.pinned_by = pinned_at, _user("anna").id
     _db.session.commit()
-    assert _client(app).get("/@anna/the-old-address").status_code == 200
-    share = _client(app).get("/api/share/public/anna").get_json()["shares"]
-    assert [(i["id"], i["pinned"]) for i in share] == [(prompt.id, True)]
+    old = "/@anna/anna-prompt-text-anna-typed-into-prompt"
+    assert _client(app).get(old).status_code == 200
 
     counts = _script().run(_later(), apply=True, pause=0)
 
-    assert (counts["slugs_given"], counts["slugs_moved"],
-            counts["pins_moved"]) == (0, 1, 1)
+    assert (counts["slugs_given"], counts["root_slugs_dropped"],
+            counts["pins_moved"]) == (1, 1, 1)
     assert _get(prompt.id).public_slug is None
     assert _get(prompt.id).pinned_at is None
     message = _get(message.id)
-    assert message.public_slug == "the-old-address"
+    assert message.public_slug == "earlier-thread"
     assert (message.pinned_at, message.pinned_by) == (
         pinned_at, _user("anna").id)
-    page = _client(app).get("/@anna/the-old-address")
+    assert _client(app).get(old).status_code == 404
+    page = _client(app).get("/@anna/earlier-thread")
     assert page.status_code == 200
     assert "<h1>Earlier thread</h1>" in _body(page)
     _no_prompt_text(_body(page))
     share = _client(app).get("/api/share/public/anna").get_json()["shares"]
     assert [(i["id"], i["pinned"]) for i in share] == [(message.id, True)]
+    for url in ("/@anna", "/@anna/feed.xml", "/sitemap.xml",
+                "/api/share/public/anna"):
+        assert "anna-prompt-text" not in _body(_client(app).get(url)), url
+
+
+def test_the_script_drops_the_slug_of_a_root_whose_message_has_its_own(app):
+    prompt, message = _stored_prompt_entry("anna", None, "public")
+    prompt.public_slug = "from-the-prompt"
+    message.public_slug = "the-message"
+    _db.session.commit()
+
+    counts = _script().run(_later(), apply=True, pause=0)
+
+    assert (counts["slugs_given"], counts["root_slugs_dropped"]) == (0, 1)
+    assert _get(prompt.id).public_slug is None
+    assert _get(message.id).public_slug == "the-message"
+    assert _listed_ids(app)["share"] == [message.id]
+
+
+def test_the_script_gives_no_slug_under_a_root_stored_at_the_circles_level(
+        app):
+    prompt, message = _stored_prompt_entry(
+        "anna", None, "circles", message_privacy="public",
+        text="# Shared with a circle\n\nbody")
+    assert _listed_ids(app) == {"feed": [], "share": []}
+
+    counts = _script().run(_later(), apply=True, pause=0)
+
+    assert counts["circles_roots_without_slug"] == 1
+    assert counts["slugs_given"] == 0 and counts["slug_ids"] == []
+    assert _get(prompt.id).privacy_level == "private"
+    assert _get(message.id).public_slug is None
+    assert _listed_ids(app) == {"feed": [], "share": []}
+    assert _client(app).get(f"/node/{message.id}").status_code == 200
+
+
+def test_a_deleted_or_private_slugged_entry_does_not_keep_the_slug_from_the_message(
+        app):
+    from datetime import datetime
+    prompt, message = _stored_prompt_entry(
+        "anna", None, "public", text="# The living one\n\nbody")
+    gone = _node("anna", "gone", parent=prompt, privacy="public",
+                 slug="gone")
+    gone.deleted_at = datetime.utcnow()
+    _node("anna", "kept private", parent=prompt, slug="kept-private")
+    _db.session.commit()
+
+    counts = _script().run(_later(), apply=True, pause=0)
+
+    assert counts["slug_ids"] == [message.id]
+    assert _get(message.id).public_slug == "the-living-one"
+    assert _listed_ids(app)["share"] == [message.id]
 
 
 def test_the_script_leaves_an_entry_with_another_persons_reply_under_it(app):
@@ -1619,7 +1674,8 @@ def test_the_script_encrypts_text_an_entry_holds_itself(app, monkeypatch):
     assert _get(prompt.id).get_content().startswith("ANNA-EDITED-IN-THREAD")
 
 
-def test_the_script_leaves_entries_changed_after_the_given_time(app):
+def test_the_script_leaves_and_counts_entries_changed_after_the_given_time(
+        app):
     from datetime import datetime, timedelta
     old = _stored_prompt_entry("anna", None, "public")
     chosen = _stored_prompt_entry("anna", None, "public")
@@ -1634,12 +1690,26 @@ def test_the_script_leaves_entries_changed_after_the_given_time(app):
     counts = _script().run(deploy, apply=True, pause=0)
 
     assert counts["set_private"] == 1
+    assert counts["changed_since"] == [chosen[0].id]
     assert _levels(old, chosen) == ["private", "public"]
     assert _get(chosen[1].id).public_slug is None
 
 
+def test_the_script_reads_the_time_with_z_or_an_offset_as_utc(app):
+    from datetime import datetime
+    read = _script()._utc_time
+    assert read("2026-11-24T10:00:00") == datetime(2026, 11, 24, 10)
+    assert read("2026-11-24T10:00:00Z") == datetime(2026, 11, 24, 10)
+    assert read("2026-11-24T11:00:00+01:00") == datetime(2026, 11, 24, 10)
+    assert read("2026-11-24 10:00:00") == datetime(2026, 11, 24, 10)
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError):
+        read("tomorrow")
+
+
 def test_the_script_needs_the_time_to_write_and_prints_ids_and_counts_only(
         app, capsys, monkeypatch):
+    from datetime import datetime, timedelta
     thread, unstamped, inside, circles, private = _earlier_state(app)
     bens_under, _ = _stored_prompt_entry("anna", None, "public")
     _node("ben", "BEN-REPLY on the prompt", parent=bens_under,
@@ -1648,15 +1718,22 @@ def test_the_script_needs_the_time_to_write_and_prints_ids_and_counts_only(
     import backend
     monkeypatch.setattr(backend, "create_app", lambda: app)
 
-    with pytest.raises(SystemExit):
-        script.main(["--apply", "--pause", "0"])
+    for refused in (["--apply"],
+                    ["--apply", "--before", _later().isoformat()],
+                    ["--apply", "--before", "tomorrow"]):
+        with pytest.raises(SystemExit):
+            script.main(refused + ["--pause", "0"])
     capsys.readouterr()
     assert _levels(thread) == ["public"]
 
     assert script.main(["--pause", "0"]) == 0
     dry = capsys.readouterr().out
     assert _levels(thread) == ["public"]
-    when = _later().isoformat()
+    # A moment from now, with an offset: every entry above is older.
+    when = (datetime.utcnow() + timedelta(hours=1, seconds=-3599)
+            ).isoformat() + "+00:00"
+    import time
+    time.sleep(1.1)
     assert script.main(["--apply", "--pause", "0", "--before", when]) == 0
     applied = capsys.readouterr().out
     assert script.main(["--apply", "--pause", "0", "--before", when]) == 0
@@ -1664,11 +1741,14 @@ def test_the_script_needs_the_time_to_write_and_prints_ids_and_counts_only(
 
     assert "No --before given" in dry and "Dry run" in dry
     assert "would be set to private: 4 (circles: 1, public: 3)" in dry
-    assert "would be given to a thread's first public message: 2" in dry
-    assert "would be moved from the root to it: 0" in dry
-    assert "would be moved from the root to that message: 0" in dry
+    assert ("would be given to a thread's first public message, made "
+            "from the message: 2") in dry
+    assert "permalinks of prompt roots would be dropped" in dry
+    assert "pins would be moved from the root to that message: 0" in dry
+    assert "roots at the circles level would be set private" in dry
     assert "directly under them: 1" in dry
     assert f"left public: node ids {bens_under.id}" in dry
+    assert "changed at or after --before: 0" in dry
     assert "set to private: 4 (circles: 1, public: 3)" in applied
     assert "set to private: 0 (none)" in again
     for out in (dry, applied, again):

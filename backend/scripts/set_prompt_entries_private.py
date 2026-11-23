@@ -19,36 +19,41 @@ What it does, one entry at a time, each batch in one transaction:
   itself (one edited inside its thread). An entry from before the
   ``prompt_key`` column gets the key of the prompt it links.
   ``updated_at`` is not touched.
-- When the entry is the root of a thread, the first public message of
-  its owner directly under it gets a permalink slug in the same
-  transaction, unless a message under it has one already: the public
+- When the entry is the root of a thread and was PUBLIC, the first
+  public message of its owner directly under it gets a permalink slug
+  in the same transaction, made from the message's own first line,
+  unless a living public message under it has one already: the public
   pages list a thread with a private prompt root from the message that
-  has the slug (utils/public_threads). The root's own slug moves to the
-  message when it had one, so an address that worked keeps working, and
-  so does the root's pin on the public profile. Only roots this run sets
-  private get a slug: a root that was private before (every Voice and
-  Glean root, a Text root whose message alone was made public) is not
-  looked at, so nothing that was read by its link only becomes listed.
+  has the slug (utils/public_threads). The root's pin on the public
+  profile moves to that message. A slug the root had is dropped, never
+  carried over: it was made from the prompt's text, and the root's own
+  address stops answering once it is private in any case. Only public
+  roots this run sets private get a slug: a root that was private
+  before (every Voice and Glean root, a Text root whose message alone
+  was made public) is not looked at, and a root stored at the circles
+  level is set private without one, so nothing that was read by its
+  link only becomes listed.
 
 Left as they are, and counted:
 
 - an entry with another person's public reply directly under it: with
   the entry private that reply would no longer show in the thread;
 - entries of an account that is being deleted;
-- entries last changed at or after --before.
+- entries last changed at or after --before (their ids are printed).
 
 It cannot tell an entry its owner has shared on purpose from one that
 became public with its thread: before the deploy there was no such
-choice to make. After it there is. --before <UTC time> is therefore
+choice to make. After it there is. --before <time> is therefore
 required with --apply: give the time of the deploy, and entries their
-owners changed since are left alone. The dry run takes "now" when it is
-not given, and says so.
+owners changed since are left alone. The time is UTC unless it carries
+an offset or Z; with --apply it may not lie in the future. The dry run
+takes "now" when it is not given, and says so.
 
 What people notice: on a public Text-mode thread the prompt entry is no
 longer shown to anyone but its owner; the thread starts at its first
-message, in the listings too. A visitor who opens the root's own id
-address (/node/<root id>) gets "not found"; the message's address and
-the thread's permalink work.
+message, in the listings too. A visitor who opens the root's own
+addresses (/node/<root id>, a permalink the root had) gets "not found";
+the message's own address and its permalink work.
 
 It prints ids and counts only: no text, no slug. Dry run by default (it
 takes no row locks). A second run finds nothing to do. Stopping it
@@ -165,7 +170,8 @@ def _new_counts():
     return {"found": 0, "set_private": 0, "by_level": Counter(),
             "stamped": 0, "changed_meanwhile": 0,
             "others_reply": [], "account_being_deleted": 0,
-            "slugs_given": 0, "slugs_moved": 0, "pins_moved": 0,
+            "changed_since": [], "slugs_given": 0, "root_slugs_dropped": 0,
+            "pins_moved": 0, "circles_roots_without_slug": 0,
             "ids": [], "slug_ids": []}
 
 
@@ -176,6 +182,11 @@ def run(before, apply=False, batch_size=BATCH_SIZE, pause=PAUSE_SECONDS,
     *apply* nothing is written and they say what would be."""
     from backend.utils.slugs import generate_unique_public_slug
     counts = _new_counts()
+    # Entries that would be taken but for their time: their owners'.
+    since = _shared_entries(before)
+    since[-1] = func.coalesce(Node.updated_at, Node.created_at) >= before
+    for ids in _id_batches(since, batch_size):
+        counts["changed_since"].extend(ids)
     for ids in _id_batches(_shared_entries(before), batch_size):
         counts["found"] += len(ids)
         keys = _linked_keys(ids)
@@ -203,42 +214,45 @@ def run(before, apply=False, batch_size=BATCH_SIZE, pause=PAUSE_SECONDS,
             counts["by_level"][node.privacy_level] += 1
             stamp = not node.prompt_key and keys.get(node.id)
             counts["stamped"] += 1 if stamp else 0
+            # The thread's first public message, where the root was
+            # public and no living public message under it has a slug.
+            readable = [c for c in children if c.privacy_level == PUBLIC
+                        and c.deleted_at is None]
             first = None
             if (node.parent_id is None
-                    and not any(c.public_slug for c in children)):
-                first = next((c for c in children
-                              if c.privacy_level == PUBLIC
-                              and c.deleted_at is None
-                              and _owner(c) == owner), None)
+                    and not any(c.public_slug for c in readable)):
+                first = next((c for c in readable if _owner(c) == owner),
+                             None)
+            if first is not None and node.privacy_level != PUBLIC:
+                counts["circles_roots_without_slug"] += 1
+                first = None
             move_pin = (first is not None and node.pinned_at is not None
                         and first.pinned_at is None)
             if first is not None:
                 slugged.append(first.id)
-                counts["slugs_moved" if node.public_slug
-                       else "slugs_given"] += 1
+                counts["slugs_given"] += 1
                 counts["pins_moved"] += 1 if move_pin else 0
+            if node.public_slug:
+                counts["root_slugs_dropped"] += 1
             if not apply:
                 continue
             if stamp:
                 node.prompt_key = keys[node.id]
             pin = (node.pinned_at, node.pinned_by)
-            slug = node.public_slug
             node.set_privacy_level(PRIVATE)
             # A private node is not pinned (as the edit route does).
             node.pinned_at = None
             node.pinned_by = None
-            if first is not None:
-                node.public_slug = None
+            # Its slug was made from the prompt's text: dropped.
+            node.public_slug = None
             # Named in the UPDATE with its own value, so the column's
             # onupdate does not move it.
             flag_modified(node, "updated_at")
             counts["set_private"] += 1
             if first is not None:
-                # The root gives its slug up before the message takes
-                # it (unique per owner).
                 db.session.flush()
                 message = db.session.get(Node, first.id)
-                message.public_slug = slug or generate_unique_public_slug(
+                message.public_slug = generate_unique_public_slug(
                     owner, message.get_content() or "")
                 if move_pin:
                     message.pinned_at, message.pinned_by = pin
@@ -276,6 +290,23 @@ def _print_ids(what, ids):
               flush=True)
 
 
+def _utc_time(value):
+    """An ISO time as a naive UTC datetime (the form the rows hold): Z
+    or an offset is converted, a time without one is taken as UTC."""
+    from datetime import timezone
+    text = value.strip()
+    if text[-1:] in ("Z", "z"):
+        text = text[:-1] + "+00:00"
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"not a time: {value!r} (e.g. 2026-11-24T10:00:00)")
+    if when.tzinfo is not None:
+        when = when.astimezone(timezone.utc).replace(tzinfo=None)
+    return when
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="Set stored prompt entries that are public or shared "
@@ -283,11 +314,11 @@ def main(argv=None):
                     "message of their threads the permalink")
     parser.add_argument("--apply", action="store_true",
                         help="write; without it this only reports")
-    parser.add_argument("--before", type=datetime.fromisoformat,
-                        default=None,
-                        help="only entries last changed before this UTC "
+    parser.add_argument("--before", type=_utc_time, default=None,
+                        help="only entries last changed before this "
                              "time, the time of the deploy (e.g. "
-                             "2026-11-24T10:00:00); required with --apply")
+                             "2026-11-24T10:00:00; UTC unless it has an "
+                             "offset or Z); required with --apply")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--pause", type=float, default=PAUSE_SECONDS,
                         help="seconds between batches")
@@ -296,6 +327,9 @@ def main(argv=None):
         parser.error("--apply needs --before <UTC time of the deploy>: "
                      "entries changed since then are their owners' choice")
     before = args.before
+    if args.apply and before > datetime.utcnow():
+        parser.error("--before lies in the future: give the time of the "
+                     "deploy, in UTC")
     if before is None:
         before = datetime.utcnow()
         print(f"No --before given: counting entries last changed before "
@@ -313,16 +347,23 @@ def main(argv=None):
               f"{len(counts['ids'])} ({levels}); "
               f"{counts['stamped']} of them {will}given their prompt key")
         print(f"permalinks {will}given to a thread's first public "
-              f"message: {counts['slugs_given']}; {will}moved from the "
-              f"root to it: {counts['slugs_moved']}")
+              f"message, made from the message: {counts['slugs_given']}")
+        print(f"permalinks of prompt roots {will}dropped (their "
+              f"addresses stop answering): {counts['root_slugs_dropped']}")
         print(f"pins {will}moved from the root to that message: "
               f"{counts['pins_moved']}")
+        print(f"roots at the circles level {will}set private without a "
+              f"permalink for their public message (read by its link, "
+              f"as before): {counts['circles_roots_without_slug']}")
         print(f"left public because another person's public reply hangs "
               f"directly under them: {len(counts['others_reply'])}")
         _print_ids("left public", counts["others_reply"])
+        print(f"left as they are because they changed at or after "
+              f"--before: {len(counts['changed_since'])}")
+        _print_ids("changed at or after --before", counts["changed_since"])
         print(f"left as they are: {counts['account_being_deleted']} of "
               f"accounts being deleted; {counts['changed_meanwhile']} "
-              "changed meanwhile")
+              "changed while this ran")
         if not args.apply:
             print("Dry run. Add --apply (with --before) to write.")
     return 0
