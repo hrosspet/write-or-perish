@@ -89,5 +89,7 @@ def test_a_key_the_service_does_not_give_is_none(keys, monkeypatch):
 
 def test_with_encryption_off_there_is_no_key(keys, monkeypatch):
     stored = encryption.encrypt_content("the text")
+    # Off is the line alone: with a key name beside it nothing starts.
+    monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
     assert encryption.dek_of(stored) is None

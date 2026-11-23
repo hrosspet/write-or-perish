@@ -172,6 +172,8 @@ def test_text_that_looks_like_a_stored_value_reads_back_as_written(app, odd):
 
 
 def test_with_encryption_off_the_list_is_stored_as_it_is(app, monkeypatch):
+    # Off is the line alone: with a key name beside it nothing starts.
+    monkeypatch.setenv("GCP_KMS_KEY_NAME", "")
     monkeypatch.setenv("ENCRYPTION_DISABLED", "true")
     node = _reply(_user())
     assert _stored(node.id) == RECORD_TEXT
