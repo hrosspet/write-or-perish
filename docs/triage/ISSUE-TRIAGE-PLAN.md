@@ -80,7 +80,7 @@ The loop given the live Chrome session and the wipe-on-deploy DB:
    - **Username tests** (#91): the seeded admin account (`hrosspet`) exists post-init; use Account settings to attempt reserved names.
 3. **Verify via DevTools, not just visuals.** Use the network panel (request shape/payload/**verb** for #137, #94, #108, #135 — assert `PATCH /todo` for toggles, `PUT /todo` only for manual Save; response headers for #142), DOM inspection (title attribute for #62, computed font-size for #106, `Server` header for #142), and timezone/device emulation (Sensors → timezone for #128; device toolbar for #28/#98).
 
-**Session-lapse fallback (rare):** if the persistent cookie expires (SECRET_KEY rotation or 30-day window), drive the magic-link flow: enter `hrosspet@gmail.com` on LoginPage → `POST /auth/...` sends the link → read it via the **Gmail MCP** → open the link in Chrome → session re-established. Then resume at step 1.
+**Session-lapse fallback (rare):** if the persistent cookie expires (SECRET_KEY rotation or 30-day window), drive the magic-link flow: enter the admin's sign-in address on LoginPage → `POST /auth/...` sends the link → read it via the **Gmail MCP** → open the link in Chrome → session re-established. Then resume at step 1.
 
 **Batching cadence:** one **staging integration branch** per wave. Cut `staging-batch-N` from `main`, merge each green-locally feature branch into it, force-push to `staging`, run the whole batch's Chrome assertions in a single post-deploy cycle. Merge only the individually-green features to `main`. Budget ~6–15 min per deploy; do **one** seed+assert pass per deploy. Never interleave two deploys — the concurrency group serializes them anyway and the second wipe destroys the first's data.
 

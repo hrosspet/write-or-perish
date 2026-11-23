@@ -58,9 +58,12 @@ final class DictationController {
     @ObservationIgnored private var holdKeepsCapture = false
     @ObservationIgnored private var generation = 0
     @ObservationIgnored private let log = Logger(subsystem: "org.loore.app", category: "dictation")
+    /// The upload queue (`.shared`; tests pass their own).
+    @ObservationIgnored private let uploader: ChunkUploader?
 
-    init(app: AppState) {
+    init(app: AppState, uploader: ChunkUploader? = nil) {
         self.app = app
+        self.uploader = uploader
     }
 
     var isActive: Bool { state == .initializing || state == .recording || state == .finalizing }
@@ -127,7 +130,13 @@ final class DictationController {
                 }
                 return
             }
-            guard gen == self.generation else { return }
+            guard gen == self.generation else {
+                // The form closed while the session was being made (`leave`,
+                // or sign-out): nothing records into it, and kept it would stay
+                // a draft that no Send or Discard removes (as Voice does).
+                _ = try? await app.api.data(for: APIRequest(.delete, APIPath.streamingDiscard(sid)))
+                return
+            }
             self.sessionId = sid
             do {
                 try app.audio.session.activateForRecording(microphone: !app.audio.usesDebugAudioFile)
@@ -156,7 +165,7 @@ final class DictationController {
             return nil
             #endif
         }()
-        let recorder = VoiceRecorder(debugFile: debugFile)
+        let recorder = VoiceRecorder(uploader: uploader, debugFile: debugFile)
         recorder.onFatal = { [weak self] message in self?.fatalUpload(message) }
         recorder.onLimit = { [weak self] message in self?.reachedLimit(message) }
         recorder.onSourceEnded = { [weak self] in self?.stop() }
@@ -412,8 +421,50 @@ final class DictationController {
         LocalNotifier.withdraw(.recordingPaused)
     }
 
-    /// The form went away (web: unmount). Stored chunks stay on the server; the
-    /// Voice page's recovery banner offers them.
+    /// The form went away for good (web: unmount; `DictationLifetime`, #753).
+    /// - Recording: capture stops at once, the unfinished piece is queued with
+    ///   the others, and nothing is finalized: the Voice page's recovery banner
+    ///   offers the recording. Once the server has every chunk the session is
+    ///   released, so it is offered at once. A recording under
+    ///   `VoiceRecorder.shortestKeptRecording` with no earlier piece is
+    ///   discarded. A session continued meanwhile is left alone.
+    /// - Starting: no recording starts, and the session made for it is discarded.
+    /// - Finalizing: the Stop already on its way finishes, and its transcript is
+    ///   saved in the form's draft, as before.
+    /// - Returns: the left recording's task (tests await it), when one was left.
+    @discardableResult
+    func leave() -> Task<RecordingLeft, Never>? {
+        switch state {
+        case .recording:
+            guard let app, let recorder else {
+                cancel()
+                return nil
+            }
+            generation += 1
+            let api = app.api
+            let left = recorder.leave(
+                release: { sid in _ = try? await api.data(for: .streamingRelease(sid)) },
+                discard: { sid in _ = try? await api.data(for: APIRequest(.delete, APIPath.streamingDiscard(sid))) })
+            [sseTask, flowTask, tickTask].forEach { $0?.cancel() }
+            app.audio.session.deactivate()
+            if app.audio.activeDictation === self { app.audio.activeDictation = nil }
+            endInterruption()
+            reset()
+            callbacks.failed(nil, false)
+            return left
+        case .initializing:
+            // The start flow sees the new generation and discards its session.
+            generation += 1
+            state = .idle
+            callbacks.failed(nil, false)
+            return nil
+        case .finalizing, .idle, .error:
+            return nil
+        }
+    }
+
+    /// Sign-out (`AudioCenter.signedOut`): everything stops at once, and the
+    /// segment not yet cut is dropped. Stored chunks stay on the server.
     func cancel() {
         generation += 1
         recorder?.cancel()
@@ -466,5 +517,23 @@ final class DictationController {
         tickTask?.cancel()
         state = .error
         callbacks.failed(message, false)
+    }
+}
+
+/// Held in the writing form's state next to its dictation: SwiftUI releases it
+/// when the form goes away for good (popped, its sheet closed, replaced), and
+/// then the dictation leaves (#753). A tab switch, a screen pushed over the
+/// form, a dialog over it or a scroll keep the state, so the recording goes on
+/// there, as Voice does.
+final class DictationLifetime {
+    private let ended: @MainActor () -> Void
+
+    init(ended: @escaping @MainActor () -> Void) {
+        self.ended = ended
+    }
+
+    deinit {
+        let ended = ended
+        Task { @MainActor in ended() }
     }
 }

@@ -10,6 +10,8 @@ struct StreamingMicButton: View {
 
     @Environment(AppState.self) private var app
     @State private var dictation: DictationController?
+    /// Ends the dictation when the form goes away for good (#753).
+    @State private var lifetime: DictationLifetime?
     @State private var sharing = false
     @State private var sharedFile: URL?
 
@@ -150,6 +152,7 @@ struct StreamingMicButton: View {
                 if message == nil && !capped { model.isRecording = false } else { model.dictationFailed(message, spendCapped: capped) }
             })
         dictation = controller
+        lifetime = DictationLifetime { controller.leave() }
         return controller
     }
 }

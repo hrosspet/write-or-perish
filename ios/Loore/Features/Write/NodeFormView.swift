@@ -58,6 +58,7 @@ private struct NodeFormBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             editor
+            olderDraftBox
             if !config.hidePowerFeatures {
                 PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.loading,
                                     lockPrivacy: model.lockPrivacy,
@@ -151,6 +152,43 @@ private struct NodeFormBody: View {
             .accessibilityIdentifier("nodeForm.text.\(idSuffix)")
     }
 
+    /// An edit draft older than the entry's last change (#761), under the
+    /// editor that shows the entry as it is now: the todo editor's "Your text,
+    /// not saved" box, with "Use my edit" while the form's text is untouched.
+    @ViewBuilder private var olderDraftBox: some View {
+        if let older = model.olderDraft {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(NodeFormModel.olderDraftNotice(older, entryChangedAt: model.entryChangedAt,
+                                                    formShowsNewerText: model.hasDraft))
+                    .font(LooreFont.sans(12.8, .light))
+                    .foregroundStyle(LooreColor.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                ReadingText(text: older.content, font: LooreUIFont.sans(13.6, .light), color: LooreColor.textSecondaryUI)
+                    .padding(12)
+                    .overlay(RoundedRectangle(cornerRadius: LooreRadius.small)
+                        .strokeBorder(LooreColor.border, style: StrokeStyle(lineWidth: 1, dash: [4])))
+                    .accessibilityLabel("Your unsaved edit")
+                    .accessibilityIdentifier("nodeForm.olderDraft")
+                HStack(spacing: 8) {
+                    if model.canUseOlderDraft {
+                        Button("Use my edit") { model.useOlderDraft() }
+                            .buttonStyle(.looreOutline)
+                            .accessibilityIdentifier("nodeForm.olderDraft.use")
+                    }
+                    Button("Copy") {
+                        UIPasteboard.general.string = older.content
+                        app.toasts.show("Copied your text")
+                    }
+                    .buttonStyle(.looreOutline)
+                    Button("Discard") { model.discardOlderDraft() }
+                        .buttonStyle(.looreOutline)
+                        .accessibilityIdentifier("nodeForm.olderDraft.discard")
+                }
+            }
+            .padding(.top, 12)
+        }
+    }
+
     @ViewBuilder private var statusLines: some View {
         VStack(alignment: .leading, spacing: 4) {
             if model.isRecoveringAudio {
@@ -173,7 +211,8 @@ private struct NodeFormBody: View {
             if !model.content.jsTrimmed.isEmpty {
                 if model.drafts.isSaving {
                     Text("Saving...").foregroundStyle(LooreColor.accent)
-                } else if let saved = model.drafts.lastSaved {
+                } else if let saved = model.drafts.lastSaved, model.hasDraft || model.olderDraft == nil {
+                    // Not for an older edit on offer (#761): the box says when it was saved.
                     Text("Draft saved \(DraftAutosaver.timeAgo(saved))").foregroundStyle(LooreColor.textMuted)
                 }
             }

@@ -20,10 +20,13 @@ import {
   isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
 import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
+import { llmRequestErrorToast } from "../utils/llmRequestError";
 import {
   contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
 } from "../utils/aiUsage";
-import { THREAD_TOO_LONG_CODE, isThreadTooLong } from "../utils/threadLength";
+import {
+  THREAD_LIMIT_TEXT, THREAD_TOO_LONG_CODE, isThreadTooLong,
+} from "../utils/threadLength";
 import ThreadLengthNotice from "./ThreadLengthNotice";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
@@ -526,7 +529,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
-      if (llmData?.error_code === THREAD_TOO_LONG_CODE) {
+      const lengthRefusal = llmData?.error_code === THREAD_TOO_LONG_CODE;
+      // A Glean refused for the thread's length (#746): its refusal never
+      // counts as the thread's length (#717), so the entry this page goes
+      // back to shows no limit. The toast gives the server's sentence.
+      if (lengthRefusal && String(llmTaskNodeId) === String(id)
+          && isGleaningNode(node)) {
+        addToast(llmData?.error || THREAD_LIMIT_TEXT, 8000);
+      } else if (lengthRefusal) {
         // Refused for the thread's length (#648): the reply form of the
         // entry says so, with the way to a new thread, instead of a toast.
         if (String(llmTaskNodeId) !== String(id)) {
@@ -882,23 +892,20 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // used by the explicit button and the auto-generate-on-submit/edit paths.
   // - 402 (monthly spend cap): surfaced globally by SpendCapBanner — return
   //   silently so the thread stays exactly where the user was.
-  // - otherwise: toast. Never setError() here — that replaces the whole
-  //   node view (thread, inline form and all) with the failure text and
-  //   strands the user on a dead end.
+  // - otherwise: toast (llmRequestErrorToast, which Write New Entry uses
+  //   too). Never setError() here — that replaces the whole node view
+  //   (thread, inline form and all) with the failure text and strands the
+  //   user on a dead end.
   const handleLlmRequestError = (err) => {
     console.error(err);
-    const status = err?.response?.status;
-    const apiErr = err?.response?.data?.error;
-    if (status === 402) return;
-    // No automatic reply under a shared node: LLM Response stays offered.
-    if (isAutoGenerateOff(err)) return;
     // The thread is too long for another reply (#648): the reply form
     // says so, with the way to a new thread, in place of LLM Response.
     if (isThreadTooLong(err)) {
-      markThreadTooLong(apiErr);
+      markThreadTooLong(err.response.data?.error);
       return;
     }
-    addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
+    const message = llmRequestErrorToast(err);
+    if (message) addToast(message, 8000);
   };
 
   // The server refused a reply for the thread's length: the page shows the

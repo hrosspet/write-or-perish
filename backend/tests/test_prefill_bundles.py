@@ -1734,6 +1734,11 @@ def test_a_yes_loads_the_prepared_material_and_lets_the_person_in(world, monkeyp
         load = PrefillBundleLoad.query.one()
         assert load.origin == "self" and load.approve_when_done is True
         assert load.merge_status == "done"
+        # The merge ended within the wait: the merged profile is the first
+        # the person reads, and no profile notice follows it (#731).
+        _login(client, user_id)
+        me = client.get("/api/dashboard/?profile=0").get_json()["user"]
+        assert me["profile_merge_pending"] is False
         # A second Yes starts nothing new, and makes no second call.
         _yes(client)
         assert PrefillBundleLoad.query.count() == 1 and len(world.calls) == 1
@@ -1973,6 +1978,38 @@ def test_a_failed_merge_lets_the_person_in_and_is_retried_and_their_edit_wins(wo
         assert pbm.run_merge(check_id, dispatch=lambda *a, **k: None) == "skipped"
         assert db.session.get(PrefillBundleLoad, check_id).merge_error == "user_version"
         assert len(world.calls) == 2
+
+
+def test_the_payload_says_a_merge_goes_on_only_after_the_person_was_let_in(world, monkeypatch):
+    """#731: the user payload's profile_merge_pending starts the app's
+    usual profile watcher. It is true only while the merge goes on after
+    the wait let the person in: not while they wait for it, and not once
+    it ended, so an app opened after the merge landed gives no notice."""
+    _bundle(world, monkeypatch)
+    prod = world.prod()
+    with prod.app_context():
+        user_id = _x_user(prefill_consent="yes").id
+        client = prod.test_client()
+
+        def merge_pending():
+            _login(client, user_id)
+            user = client.get("/api/dashboard/?profile=0").get_json()["user"]
+            return user["profile_merge_pending"]
+        check_id = pbl.maybe_start_self_load(db.session.get(User, user_id)).id
+        world.state["fail"] = 1
+        _to_the_merge(check_id)
+        assert merge_pending() is False, "the person waits for it"
+        assert pbm.run_merge(check_id, dispatch=lambda *a, **k: None) == "retry"
+        assert merge_pending() is False, "still within the wait"
+        db.session.query(PrefillBundleLoad).update(
+            {PrefillBundleLoad.merge_started_at: datetime.utcnow() - pbm.MERGE_WAIT})
+        db.session.commit()
+        assert pbl.run_load(check_id, dispatch=lambda *a, **k: None) == "done"
+        assert db.session.get(User, user_id).approved is True
+        assert merge_pending() is True, "let in while the merge goes on"
+        assert pbm.run_merge(check_id, dispatch=lambda *a, **k: None) == "done"
+        assert _current_profile(user_id).generated_by == "claude-opus-5.5"
+        assert merge_pending() is False, "it ended: nothing left to follow"
 
 
 def test_a_merge_failing_every_time_stops_and_reports(world, monkeypatch, caplog):

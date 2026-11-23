@@ -1,6 +1,7 @@
 """How much of a Twitter account is in the Community Archive — from the local
 Parquet snapshot (own tweets, chars, ≈tokens via chars/2) AND from the live
-CA REST API (``num_tweets``, which is current even when the snapshot is stale).
+Community Archive API v1 (``num_tweets``, which is current even when the
+snapshot is stale; needs ``COMMUNITY_ARCHIVE_API_KEY``).
 Accounts not in CA at all fall back to the X API (app-only auth from
 ``TWITTER_API_KEY`` / ``TWITTER_API_SECRET``, env or repo ``.env``) for the
 public tweet count and the pay-per-use cost of pulling them.
@@ -21,8 +22,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from backend.utils.community_archive import (  # noqa: E402
-    ANON_KEY, SUPABASE_URL, TIMEOUT, _duckdb, _warn_if_rest_retired,
-    fetch_account, fetch_account_parquet, v1_enabled)
+    _duckdb, fetch_account, fetch_account_parquet)
 
 DEFAULT_SNAPSHOT = "~/data/twitter/community-archive-snapshot-2026-08-25"
 CHARS_PER_TOKEN = 2.0
@@ -45,30 +45,12 @@ def snapshot_size(handle, snapshot_dir):
             "tokens": chars / CHARS_PER_TOKEN, "first": first, "last": last}
 
 
-def _ca_exact_count(table, account_id):
-    """Server-side exact row count via PostgREST ``Prefer: count=exact`` (no rows fetched).
-    None with COMMUNITY_ARCHIVE_API_KEY set: API v1 has no count (#688)."""
-    if v1_enabled():
-        return None
-    _warn_if_rest_retired()
-    q = urllib.parse.urlencode({"account_id": f"eq.{account_id}", "select": "tweet_id", "limit": 0})
-    req = urllib.request.Request(
-        f"{SUPABASE_URL}/rest/v1/{table}?{q}",
-        headers={"apikey": ANON_KEY, "Authorization": f"Bearer {ANON_KEY}",
-                 "Prefer": "count=exact", "Range-Unit": "items"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-        return int(resp.headers["Content-Range"].split("/")[1])
-
-
 def api_size(handle):
-    """CA profile metadata plus the ACTUAL number of tweets stored in the archive.
-    ``num_tweets`` is the account's lifetime counter; extension-only opt-ins can
-    have hundreds listed but only a handful actually archived."""
+    """CA profile metadata. ``num_tweets`` is the account's lifetime counter;
+    extension-only opt-ins can have hundreds listed but only a handful
+    actually archived (API v1 has no count of those, #688)."""
     try:
-        a = fetch_account(handle)
-        if a:
-            a["archived"] = _ca_exact_count("tweets", a["account_id"])
-        return a
+        return fetch_account(handle)
     except Exception as e:  # network / API hiccup shouldn't kill the snapshot report
         return {"error": str(e)}
 
@@ -123,7 +105,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("handles", nargs="+")
     ap.add_argument("--parquet", default=DEFAULT_SNAPSHOT, metavar="SNAPSHOT_DIR")
-    ap.add_argument("--no-api", action="store_true", help="skip the live CA REST lookup")
+    ap.add_argument("--no-api", action="store_true", help="skip the live CA API lookup")
     args = ap.parse_args()
     snap = os.path.expanduser(args.parquet)
     for h in args.handles:
@@ -153,10 +135,7 @@ def main():
             elif "error" in a:
                 api_str = f" | API: error ({a['error']})"
             else:
-                archived = ("?" if a.get("archived") is None
-                            else f"{a['archived']:,}")
-                api_str = (f" | API: {archived} archived "
-                           f"(account reports {a.get('num_tweets') or 0:,})")
+                api_str = f" | API: account reports {a.get('num_tweets') or 0:,}"
         print(f"@{(s or {}).get('username', h)}: snapshot: {snap_str}{api_str}")
 
 

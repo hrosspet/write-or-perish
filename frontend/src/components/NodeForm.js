@@ -17,6 +17,7 @@ import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
 import RecoveryBanner from './RecoveryBanner';
 import { replySkippedForLength } from "../utils/threadLength";
+import { llmRequestErrorToast } from "../utils/llmRequestError";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
@@ -636,6 +637,12 @@ const NodeForm = forwardRef(
               response.data.spend_cap_lifts_with_payment);
           }
           noteSkippedReply(response.data);
+          // Saved, but the reply was refused: say why, as the typed paths
+          // above do (#747). A thread too long for a reply shows the limit
+          // on the entry's page instead.
+          if (response.data.llm_error && !replySkippedForLength(response.data)) {
+            addToast(response.data.llm_error, 10000);
+          }
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
           succeed({
             ...response.data,
@@ -781,8 +788,11 @@ const NodeForm = forwardRef(
             return;
           } catch (llmErr) {
             // LLM trigger failed — still fall through to plain success
-            // so the user at least keeps their entry.
+            // so the user at least keeps their entry, and say why, as the
+            // thread page does (#747).
             console.error('Auto-generate LLM trigger failed:', llmErr);
+            const message = llmRequestErrorToast(llmErr);
+            if (message) addToast(message, 8000);
           }
         }
 

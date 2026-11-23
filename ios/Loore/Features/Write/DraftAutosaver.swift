@@ -18,6 +18,10 @@ final class DraftAutosaver {
 
     @ObservationIgnored private let nodeId: Int?
     @ObservationIgnored private let parentId: Int?
+    /// The row this form's text is saved in (the loaded draft's, then each
+    /// save's answer): "Discard draft" next to a kept older edit deletes only
+    /// it (#766).
+    @ObservationIgnored private(set) var savedId: Int?
     @ObservationIgnored private let api: APIClient
     @ObservationIgnored private var pending: String?
     @ObservationIgnored private var debounceTask: Task<Void, Never>?
@@ -50,6 +54,7 @@ final class DraftAutosaver {
             let loaded: Draft = try await api.get(APIPath.drafts, query: query)
             draft = loaded
             lastSaved = loaded.updatedAt
+            savedId = loaded.id
         } catch {
             draft = nil
         }
@@ -88,6 +93,7 @@ final class DraftAutosaver {
         do {
             let saved: Draft = try await api.post(APIPath.drafts, json: .object(body))
             lastSaved = saved.updatedAt ?? Date()
+            savedId = saved.id
             if pending == content { pending = nil }
         } catch {
             // Kept pending: the next interval tick (or the next flush) retries.
@@ -141,6 +147,26 @@ final class DraftAutosaver {
         _ = try? await api.delete(APIPath.drafts, query: query, as: EmptyResponse.self)
         draft = nil
         lastSaved = nil
+        savedId = nil
+    }
+
+    /// "Discard draft" while an older edit is kept beside this form's text
+    /// (#766): only this form's own row goes; the older edit stays on offer.
+    func deleteOwn(keeping keptId: Int) async {
+        pending = nil
+        debounceTask?.cancel()
+        while let running = inFlight { await running.value }
+        if let savedId, savedId != keptId { await deleteRow(savedId) }
+        draft = nil
+        lastSaved = nil
+        savedId = nil
+    }
+
+    /// `DELETE /api/drafts/?…&draft_id=`: one row of this place (an older
+    /// edit the person discards or used, #766).
+    func deleteRow(_ id: Int) async {
+        _ = try? await api.delete(APIPath.drafts, query: query + [URLQueryItem(name: "draft_id", value: String(id))],
+                                  as: EmptyResponse.self)
     }
 
     private func startInterval() {
