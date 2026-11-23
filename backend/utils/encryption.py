@@ -421,6 +421,10 @@ def encrypt_content(plaintext: str) -> str:
         # Encode both parts as base64
         wrapped_dek_b64 = base64.b64encode(wrapped_dek).decode("ascii")
         payload_b64 = base64.b64encode(nonce + ciphertext).decode("ascii")
+        # As new_dek() does: this process reads its own write, and stores
+        # a second value of the same row under the same key
+        # (utils/tool_record), without another KMS call.
+        _cache_put(wrapped_dek_b64, dek)
 
         return f"{ENCRYPTED_PREFIX_V2}{wrapped_dek_b64}:{payload_b64}"
 
@@ -442,6 +446,25 @@ def new_dek():
     wrapped_b64 = base64.b64encode(_wrap_dek(dek)).decode("ascii")
     _cache_put(wrapped_b64, dek)
     return dek, wrapped_b64
+
+
+def dek_of(ciphertext):
+    """The data key of a v2 envelope this app stored, in the form
+    encrypt_with_dek takes, or None when *ciphertext* is no such
+    envelope or its key cannot be had. For a second value of the same
+    row (an artifact's title beside its text, a reply's tool record
+    beside its text): stored under the first value's key, the two are
+    read with one KMS call. The key comes from the cache when this
+    process wrote or read the first value, else from one KMS call."""
+    wrapped = wrapped_dek_of(ciphertext)
+    if wrapped is None or not is_encryption_enabled():
+        return None
+    try:
+        return _unwrap_dek(wrapped), base64.b64encode(wrapped).decode("ascii")
+    except Exception as e:  # noqa: BLE001 - the caller takes a new key
+        logger.debug("Data key of a stored value not available: %s",
+                     type(e).__name__)
+        return None
 
 
 def encrypt_with_dek(plaintext: str, dek_pair) -> str:
