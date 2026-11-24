@@ -1826,14 +1826,15 @@ def save_streaming_as_node(session_id):
         if not validate_ai_usage(ai_usage):
             return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
     if form_settings and draft.parent_id and privacy_level != "public":
-        # As for a typed entry (#228): replies under public posts are
-        # public.
-        parent = Node.query.get(draft.parent_id)
-        if parent is not None and parent.privacy_level == "public":
-            return jsonify({
-                "error": "Replies under public posts are public.",
-                "code": "public_reply_required",
-            }), 400
+        # As for a typed entry (#228): replies under other people's
+        # public posts are public; under a public node of the user's own
+        # the entry takes the level the form sent (Peter, 2026-11-24).
+        from backend.utils.public_reply_limits import (
+            public_reply_required_refusal)
+        err = public_reply_required_refusal(
+            current_user.id, Node.query.get(draft.parent_id), privacy_level)
+        if err is not None:
+            return err
 
     # A day's public replies under other people's posts; the session
     # stays, so the entry can be saved later.

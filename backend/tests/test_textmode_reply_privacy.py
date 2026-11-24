@@ -173,14 +173,19 @@ def _message(resp):
 # ── The form's level is the message's level ───────────────────────────
 
 
+@pytest.mark.parametrize("default", ["private", "public"])
 @pytest.mark.parametrize("node_level", ["public", "circles"])
 def test_private_chosen_under_a_shared_node_is_saved_private(
-        app, node_level):
+        app, node_level, default):
     """The form still shows Private (it was opened before the node was
     made public, or the user chose Private): the message is saved
     private, the prompt node above it is private, and the automatic
     reply comes, private, since it answers a private message (#644: a
-    private branch under a public node is not a shared thread)."""
+    private branch under a public node is not a shared thread). Under a
+    Public default too: a prompt node given the node's level there would
+    be Public."""
+    _user("ben").default_privacy_level = default
+    _db.session.commit()
     gleaning = _gleaning(node_level)
 
     resp = _post(app, gleaning, privacy_level="private", auto_generate=True)
@@ -195,9 +200,13 @@ def test_private_chosen_under_a_shared_node_is_saved_private(
     assert reply.privacy_level == "private"
 
 
-def test_circles_chosen_under_a_public_node_is_saved_circles(app):
+@pytest.mark.parametrize("default", ["private", "public"])
+def test_circles_chosen_under_a_public_node_is_saved_circles(app, default):
     """The prompt node is private: a Text-mode prompt entry is Public
-    only for a Public message (session_helpers.prompt_entry_privacy)."""
+    only for a Public message (session_helpers.prompt_entry_privacy),
+    also under a Public default."""
+    _user("ben").default_privacy_level = default
+    _db.session.commit()
     gleaning = _gleaning("public")
 
     resp = _post(app, gleaning, privacy_level="circles")
@@ -305,19 +314,23 @@ def test_a_null_level_reads_as_none_sent(app):
 # ── The neighbouring routes, for comparison ───────────────────────────
 
 
-def test_typed_reply_route_keeps_its_rule_from_main(app):
+@pytest.mark.parametrize("level", ["private", "circles"])
+def test_typed_reply_route_takes_the_forms_level_under_ones_own_node(
+        app, level):
     """POST /nodes/ (the same form's path for a note with AI usage None)
-    keeps the rule it had before this route took the form's level (#228:
-    a reply under a public post must be public). Not changed here."""
+    saves the level the form sent under a public node of the user's own,
+    as this route does (Peter, 2026-11-24: "they shouldn't be refused,
+    they should adhere to the form's selection")."""
     public = _gleaning("public")
     private = _gleaning("private")
     client = _client(app, "ben")
 
-    refused = client.post("/api/nodes/", json={
+    saved = client.post("/api/nodes/", json={
         "content": "a note", "parent_id": public.id,
-        "privacy_level": "private", "ai_usage": "none"})
-    assert refused.status_code == 400
-    assert refused.get_json()["code"] == "public_reply_required"
+        "privacy_level": level, "ai_usage": "none"})
+    assert saved.status_code == 201, saved.get_json()
+    assert _db.session.get(
+        Node, saved.get_json()["id"]).privacy_level == level
 
     saved = client.post("/api/nodes/", json={
         "content": "a note", "parent_id": private.id,
@@ -325,6 +338,25 @@ def test_typed_reply_route_keeps_its_rule_from_main(app):
     assert saved.status_code == 201, saved.get_json()
     assert _db.session.get(
         Node, saved.get_json()["id"]).privacy_level == "public"
+
+
+@pytest.mark.parametrize("level", ["private", "circles"])
+def test_typed_reply_route_keeps_the_rule_under_someone_elses_node(
+        app, level):
+    """Under someone else's public node a reply must be public (#228),
+    unchanged; this route is not open there (403)."""
+    public = _gleaning("public")
+    client = _client(app, "anna")
+
+    refused = client.post("/api/nodes/", json={
+        "content": "a note", "parent_id": public.id,
+        "privacy_level": level, "ai_usage": "none"})
+    assert refused.status_code == 400
+    assert refused.get_json()["code"] == "public_reply_required"
+
+    resp = client.post(f"/api/textmode/from-node/{public.id}", json={
+        "content": "a note", "privacy_level": level})
+    assert resp.status_code == 403
 
 
 def test_textmode_message_takes_its_parents_level(app):
