@@ -12,8 +12,10 @@ import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
 import { compareArtifacts, neighborAfterDelete } from '../utils/artifactKinds';
 import {
-  NEWER_ARTIFACT_MESSAGE, insertEdit, tickEdit, useChecklistEdits,
+  NEWER_ARTIFACT_EDIT_MESSAGE, NEWER_ARTIFACT_MESSAGE, insertEdit, isContentChanged,
+  tickEdit, useChecklistEdits,
 } from '../utils/markdown';
+import { NewerVersionNotice } from '../components/NewerVersionNotice';
 import { formatDate } from '../utils/date';
 
 const KIND_BLURBS = {
@@ -50,6 +52,11 @@ export default function ArtifactsPage() {
   const [editing, setEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
   const [editDescription, setEditDescription] = useState('');
+  // The text the edit form was opened on ('' for an artifact with no version
+  // yet; null while creating a new kind): its Save is refused when the
+  // artifact changed since (#799), and the form keeps its text.
+  const [editBase, setEditBase] = useState(null);
+  const [editConflict, setEditConflict] = useState(false);
   const [saving, setSaving] = useState(false);
   const [creatingKind, setCreatingKind] = useState(false);
   const [newKind, setNewKind] = useState('');
@@ -112,6 +119,8 @@ export default function ArtifactsPage() {
       setCreatingKind(true);
       setNewKind('');
       setEditContent('');
+      setEditBase(null);
+      setEditConflict(false);
       setEditDescription('');
       setEditing(true);
       const next = new URLSearchParams(searchParams);
@@ -214,11 +223,13 @@ export default function ArtifactsPage() {
 
   const handleSave = async (kind) => {
     setSaving(true);
+    setEditConflict(false);
     try {
       await api.put(`/artifacts/${kind}`, {
         content: editContent,
         description: editDescription.trim(),
         generated_by: 'user',
+        ...(!creatingKind && editBase !== null && { base_content: editBase }),
       });
       await fetchArtifacts();
       window.dispatchEvent(new CustomEvent('loore_artifacts_changed'));
@@ -229,7 +240,14 @@ export default function ArtifactsPage() {
       // from a different kind's URL) so only one bubble highlights.
       navigate(`/artifacts/${kind}`);
     } catch (err) {
-      console.error('Failed to save artifact:', err);
+      if (isContentChanged(err)) {
+        // Nothing saved: the artifact changed since the form was opened
+        // (the AI wrote a version, a box was ticked in another tab). The
+        // form stays open with the person's text.
+        setEditConflict(true);
+      } else {
+        console.error('Failed to save artifact:', err);
+      }
     }
     setSaving(false);
   };
@@ -295,6 +313,8 @@ export default function ArtifactsPage() {
     if (editing || !active) return;
     setEditing(true);
     setEditContent(active.content || '');
+    setEditBase(active.content || '');
+    setEditConflict(false);
     setEditDescription(active.description || '');
   };
 
@@ -481,6 +501,9 @@ export default function ArtifactsPage() {
               padding: '16px', lineHeight: 1.6, resize: 'vertical',
             }}
           />
+          {editConflict && (
+            <NewerVersionNotice message={NEWER_ARTIFACT_EDIT_MESSAGE} text={editContent} />
+          )}
           <div style={{ marginTop: '12px', display: 'flex', gap: '8px' }}>
             <button
               onClick={() => handleSave(creatingKind ? newKind : activeKind)}
@@ -543,7 +566,10 @@ export default function ArtifactsPage() {
               <br />or write your own.
             </p>
             <button
-              onClick={() => { setEditing(true); setEditContent(''); setEditDescription(active.description || ''); }}
+              onClick={() => {
+                setEditing(true); setEditContent(''); setEditBase('');
+                setEditConflict(false); setEditDescription(active.description || '');
+              }}
               style={{
                 padding: '10px 24px', background: 'var(--accent)', border: 'none',
                 borderRadius: '6px', color: 'var(--bg-deep)',
