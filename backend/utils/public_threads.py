@@ -18,11 +18,9 @@ The slug is what makes such a node a listed thread, and only creation
 gives it: a Text-mode thread created at Public gets it on its first
 message (/textmode/start, a recorded entry that starts a thread; an
 uploaded recording when its transcript is stored,
-slugs.slug_transcribed_thread). The edit route gives none, so a message, a Voice entry or a
-gleaning that its owner sets public later is read by its link and is in
-no listing, as before this rule. scripts/set_prompt_entries_private.py
-gives the slug to the first public message of a stored thread whose
-public prompt root it sets private.
+slugs.slug_transcribed_thread). The edit route gives none, so a message,
+a Voice entry or a gleaning that its owner sets public later is read by
+its link and is in no listing, as before this rule.
 
 The prompt entry itself is never listed and never read here: the rule
 looks at five of its columns, by primary key, inside the listing's own
@@ -31,8 +29,7 @@ listings start from the public nodes (Node's partial index
 ix_node_public_created_at), not from the roots.
 
 A prompt entry is recognised by its stamped ``prompt_key``. Entries from
-before that column (2026-09-02) only link a prompt version; the script
-stamps the ones it sets private.
+before that column (2026-09-02) only link a prompt version.
 
 A prompt entry in the middle of a thread (Text mode continued under an
 entry of one's own) is passed through by every thread view of someone

@@ -1,6 +1,6 @@
 """The rules of test_prompt_entries_private.py on PostgreSQL: the
-listings' own query for the top of a thread, the cascade, the page
-cache's queries and the script's locked batches run there as on sqlite.
+listings' own query for the top of a thread, the cascade and the page
+cache's queries run there as on sqlite.
 
 Runs only against a throwaway Postgres database named by
 LOORE_TEST_POSTGRES_URL (it creates and drops every table in it);
@@ -38,17 +38,6 @@ from backend.tests.test_prompt_entries_private import (  # noqa: E402,F401
     test_an_empty_transcript_leaves_no_address,
     test_an_upload_set_private_or_deleted_meanwhile_gets_no_address,
     test_only_the_first_entry_under_a_private_text_root_gets_the_address,
-    test_the_script_reports_without_writing,
-    test_the_script_sets_them_private_and_a_second_run_finds_nothing,
-    test_the_script_leaves_sessions_that_were_private_before_as_they_are,
-    test_the_script_gives_the_message_a_slug_of_its_own_and_moves_the_pin,
-    test_the_script_drops_the_slug_of_a_root_whose_message_has_its_own,
-    test_the_script_gives_no_slug_under_a_root_stored_at_the_circles_level,
-    test_a_deleted_or_private_slugged_entry_does_not_keep_the_slug_from_the_message,
-    test_the_script_leaves_an_entry_with_another_persons_reply_under_it,
-    test_the_script_skips_an_account_that_is_being_deleted,
-    test_the_script_leaves_and_counts_entries_changed_after_the_given_time,
-    test_the_script_needs_the_time_to_write_and_prints_ids_and_counts_only,
     test_lowering_a_threads_level_lowers_a_public_prompt_entry_inside_it,
     test_a_visitor_reads_the_message_inside_its_thread,
     test_another_member_reads_the_message_inside_its_thread,
