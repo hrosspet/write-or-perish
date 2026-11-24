@@ -26,7 +26,8 @@ struct RootView: View {
             BottomNotices()
         }
         .sheet(item: $router.presentedWeb) { presentation in
-            WebPresentationView(presentation: presentation, cookies: app.api.backendCookies())
+            WebPresentationView(presentation: presentation, cookies: app.api.backendCookies(),
+                                sessionHosts: app.environment.sessionHosts)
         }
         .sheet(isPresented: updatesBinding) {
             if let payload = app.pendingUpdates {

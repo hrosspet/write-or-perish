@@ -629,12 +629,15 @@ export function purgeLabel(job) {
 
 // The Users tab's Status cell. Payments on (#697): "Blocked" for an
 // account the admin blocked; "Held (spam)" for one the spam mark holds
-// (#713: not let in, Activate lets it in); "Inactive" is then one that has
-// not come back since payments went on (it is let in at its next visit).
+// (#713: not let in, Activate lets it in); "Waiting" for a new account
+// held for approval because the day's number of new accounts was reached
+// (Activate lets it in); "Inactive" is then one that has not come back
+// since payments went on (it is let in at its next visit).
 export function statusLabel(u, letInWithoutApproval) {
   if (u.approved) return "Active";
   if (letInWithoutApproval && u.blocked) return "Blocked";
   if (letInWithoutApproval && u.held_as_spam) return "Held (spam)";
+  if (letInWithoutApproval && u.waits_for_approval) return "Waiting";
   return "Inactive";
 }
 
@@ -986,7 +989,9 @@ function AdminPanel() {
       fetchUsers();
     } catch (err) {
       console.error(err);
-      setError("Error updating email.");
+      // The server says why: an account someone has signed in to, an
+      // address another account holds, an address that is not valid.
+      setError(err.response?.data?.error || "Error updating email.");
     }
   };
 
@@ -1491,6 +1496,14 @@ function AdminPanel() {
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px", width: "140px", whiteSpace: "nowrap" }}>
                 ${(u.current_month_spending_usd || 0).toFixed(2)}
+                {u.spend_period_start && (
+                  <span
+                    title={`Counted against the limit in the paid period since ${new Date(u.spend_period_start).toLocaleDateString()}`}
+                    style={{ color: "var(--text-muted)", marginLeft: "6px", fontSize: "0.85em" }}
+                  >
+                    (period ${(u.spend_period_usd || 0).toFixed(2)})
+                  </span>
+                )}
                 {u.spend_blocked && (
                   <FaTimesCircle
                     title="Blocked this month"

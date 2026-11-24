@@ -89,6 +89,7 @@ from backend.utils.artifact_versions import (
 from backend.utils.privacy import (
     AI_ALLOWED, X_API_INPUT, account_allows_ai, chat_at_most,
 )
+from backend.utils.profile_providers import kept_from_embeddings
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -966,6 +967,14 @@ SEARCH_TOOL_ACCOUNT_NONE_ERROR = (
     "Search is off for this user: their Default AI usage is set to None, "
     "so nothing is sent to the search model. Nothing was searched.")
 
+# semantic_search for a user who keeps their writing with a provider
+# other than the embedding model's (profile_providers.kept_from_embeddings):
+# the search words would go to that model, so nothing is searched.
+SEARCH_TOOL_ONE_PROVIDER_ERROR = (
+    "Search of the archive is off for this user: search data would be "
+    "computed by another provider than the one they chose to keep their "
+    "background work with. Nothing was searched.")
+
 
 def _todo_index_line(user_id, pinned_node=None):
     """Index line for the user's todo list, or None if it's AI-blocked.
@@ -1145,7 +1154,10 @@ def _load_node_chain(parent_node, user_id):
     The chain holds only what *user_id* (the user the reply is for) can
     see: the walk stops below the first ancestor they cannot see (or
     could not see before it was deleted), so nothing above it reaches
-    the model. An ancestor hidden with its owner's deleted account
+    the model. One kind of node is passed through instead: a prompt
+    entry the user may not read whose owner also wrote the node under it
+    (Text mode continued inside a public thread). It is left out, never
+    read, and the walk goes on above it. An ancestor hidden with its owner's deleted account
     (#269) is passed through like a deleted one: the message builder
     sends a notice in its place, as it does after the purge. The node
     the reply is built on must itself be visible.
@@ -1168,7 +1180,16 @@ def _load_node_chain(parent_node, user_id):
     if current is not None and not can_user_see_node_or_tombstone(
             current, user_id):
         current = None
-    while current and can_user_see_node_or_placeholder(current, user_id):
+    from backend.utils.public_threads import passes_through
+    while current:
+        if not can_user_see_node_or_placeholder(current, user_id):
+            # A prompt entry the user may not read, with a node of its
+            # owner's under it in the chain: left out, and the walk goes
+            # on above it (utils/public_threads).
+            if visible and passes_through(current, visible[0]):
+                current = current.parent
+                continue
+            break
         visible.insert(0, current)
         current = current.parent
     if not visible:
@@ -1185,9 +1206,11 @@ def _load_node_chain(parent_node, user_id):
     if not node_chain:
         from backend.utils.llm_nodes import AIUsageRefused
         raise AIUsageRefused()
-    # Not the deleted nodes: their text is never read.
-    prefetch_deks(n.content for n in node_chain
-                  if not shown_as_deleted(n, user_id))
+    # Not the deleted nodes: their text is never read. The replies' tool
+    # records are read with the texts (the history's replays and notes).
+    from backend.utils.tool_record import sealed_parts
+    live = [n for n in node_chain if not shown_as_deleted(n, user_id)]
+    prefetch_deks([n.content for n in live] + sealed_parts(live))
     return node_chain
 
 
@@ -2463,13 +2486,13 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
 
 
 # Tool-input keys that carry free-text user content. These are stripped
-# before the input is persisted to the plaintext ``tool_calls_meta`` column:
-# the content is already stored encrypted in its own row (UserArtifact /
-# UserFeedback / Draft), and a plaintext copy on the node would defeat
-# encryption-at-rest. The cross-turn scan, the frontend and exports key on
-# other fields; the replay of an update_artifact call in later turns
-# (#604) shows its input without the redacted keys, and the answer to it
-# shows what the write changed, from the stored version ids.
+# before the input is persisted to the ``tool_calls_meta`` column: the
+# content is already stored encrypted in its own row (UserArtifact /
+# UserFeedback / Draft), and the node keeps no second copy of it. The
+# cross-turn scan, the frontend and exports key on other fields; the
+# replay of an update_artifact call in later turns (#604) shows its input
+# without the redacted keys, and the answer to it shows what the write
+# changed, from the stored version ids.
 _REDACTED_INPUT_KEYS = {"content", "updated_content", "edits"}
 _REDACTED = "[redacted]"
 
@@ -2545,7 +2568,7 @@ def _resolve_artifact_write(inp, previous):
 
 def _redact_tool_input(inp):
     """Return a copy of a tool-call input with free-text content removed,
-    safe to persist to the plaintext tool_calls_meta column."""
+    safe to persist to the tool_calls_meta column."""
     if not isinstance(inp, dict):
         return inp
     return {
@@ -2596,7 +2619,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
     for tc in tool_calls:
         name = tc["name"]
         inp = tc.get("input", {})
-        # Persisted to plaintext tool_calls_meta — redact free-text content
+        # Persisted to tool_calls_meta — redact free-text content
         # (handlers below read the live ``inp``, which keeps the real values).
         result = {"name": name, "input": _redact_tool_input(inp)}
 
@@ -2772,7 +2795,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             user_id=user_id,
                             kind=kind,
                             title=title[:128],
-                            description=description,
+                            # Cut like the page's own saves
+                            # (routes/artifacts.update_artifact).
+                            description=(description[:255]
+                                         if description else None),
                             generated_by=(llm_node.llm_model
                                           or "agentic_session"),
                             tokens_used=0,
@@ -2848,7 +2874,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 # model's query, ranks NodeEmbedding rows (excluding nodes
                 # already in this thread), and stores only matched node ids +
                 # scores — snippet content is re-resolved at injection time
-                # (never in plaintext tool_calls_meta), like read_artifact.
+                # (never in tool_calls_meta), like read_artifact.
                 query = (inp.get("query") or "").strip()
                 if not query:
                     result["status"] = "error"
@@ -2860,6 +2886,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     # (gated_voice_tools: the cache prefix).
                     result["status"] = "error"
                     result["error"] = SEARCH_TOOL_ACCOUNT_NONE_ERROR
+                elif kept_from_embeddings(User.query.get(user_id)):
+                    # The same for an account that keeps to a provider
+                    # other than the embedding model's. The tool stays
+                    # in the list here too.
+                    result["status"] = "error"
+                    result["error"] = SEARCH_TOOL_ONE_PROVIDER_ERROR
                 else:
                     from backend.utils.api_keys import get_openai_chat_key
                     from backend.utils.embeddings import (
@@ -4058,7 +4090,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             )
             render_variant = _system_render_variant(system_node, user_id)
             cached = get_cached_render(
-                flask_app.config, system_node, render_variant)
+                flask_app.config, system_node, render_variant,
+                user_id=user_id)
             if cached is not None:
                 sys_text, unlicensed = cached.text, cached.unlicensed
             else:
@@ -4073,7 +4106,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                              render_variant, unlicensed=unlicensed,
                              rows=usage.rows(sys_content),
                              references=usage.named_references,
-                             inputs=usage.inputs(sys_content))
+                             inputs=usage.inputs(sys_content),
+                             user_id=user_id)
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4235,7 +4269,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # and billed it (a batch still queued is withdrawn by the poll
             # instead, see _ca_batch_poll), and the finalize logs the cost
             # either way. The cap gates new requests: the submit below.
-            from backend.utils.spend import user_is_capped
+            # A new run first sets the block from the spend recorded so
+            # far: replies of the same account queued together then stop
+            # once the earlier ones reach the limit, instead of all
+            # running before the deferred check queued behind them.
+            from backend.utils.spend import refresh_user_cap, user_is_capped
+            if batch_resp is None:
+                refresh_user_cap(user_id, flask_app.config)
             if batch_resp is None and user_is_capped(user_id):
                 logger.warning(
                     "User %s is spend-capped; skipping LLM completion", user_id)
@@ -4637,7 +4677,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     system_node, user_id, tools=chain_tools)
                 if system_render_cacheable:
                     _cached = get_cached_render(
-                        flask_app.config, system_node, render_variant)
+                        flask_app.config, system_node, render_variant,
+                        user_id=user_id)
                     if _cached is not None:
                         cached_system_render = _cached.text
                         cached_system_unlicensed = _cached.unlicensed
@@ -5540,7 +5581,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     context_usage.named_references
                                     if USER_RECENT_RAW_PLACEHOLDER
                                     in _verdict_text else ()),
-                                inputs=context_usage.inputs(_verdict_text))
+                                inputs=context_usage.inputs(_verdict_text),
+                                user_id=user_id)
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -6082,7 +6124,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'total_tokens': f_total_tokens,
                 }
                 if f_tool_meta:
-                    f_result['tool_calls_meta'] = f_tool_meta
+                    # The task's result is kept by the result backend for
+                    # a day; the record itself is on the node. Nothing
+                    # reads this copy: it names the actions only.
+                    from backend.utils.tool_meta import SHARED_TOOL_FIELDS
+                    f_result['tool_calls_meta'] = [
+                        {k: m[k] for k in SHARED_TOOL_FIELDS if k in m}
+                        for m in f_tool_meta if isinstance(m, dict)]
                 return f_result
 
             # ── Within-turn retrieval loop gating (#158) ───────────────────

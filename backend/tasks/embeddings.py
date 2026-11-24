@@ -8,8 +8,10 @@ each of them. New/edited nodes become searchable within one sweep period.
 Only nodes with ai_usage in AI_ALLOWED are embedded: embedding submits
 content to OpenAI, so 'none' nodes are never sent (their keyword search
 still works). Nothing new is embedded for an owner whose account setting
-is 'none' (#346); their existing vectors are kept. Deleted nodes'
-embeddings are removed.
+is 'none' (#346); their existing vectors are kept. The same holds for an
+owner who answered that their writing stays with their own provider when
+that is not the embedding model's (profile_providers.kept_from_embeddings).
+Deleted nodes' embeddings are removed.
 
 One sweep runs at a time (a Redis lock, utils/run_locks), and a new row
 that another sweep wrote in the meantime is left as it is (INSERT ... ON
@@ -17,7 +19,8 @@ CONFLICT DO NOTHING), so two sweeps never fail on the unique node or item.
 """
 from celery.utils.log import get_task_logger
 from flask import current_app
-from sqlalchemy import func, or_
+from sqlalchemy import LargeBinary, cast, func, or_
+from sqlalchemy.orm import defer
 
 from backend.celery_app import celery, flask_app
 from backend.extensions import db
@@ -25,12 +28,15 @@ from backend.models import (
     ExternalItem, ExternalItemEmbedding, Node, NodeEmbedding, User,
 )
 from backend.utils import pgvector
-from backend.utils import run_locks
+from backend.utils import run_locks, soft_limit
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.embeddings import (
-    EMBEDDING_MODEL, content_hash, embed_texts, pack_vector,
+    EMBEDDING_MODEL, MAX_EMBED_CHARS, content_hash, embed_texts, pack_vector,
 )
+from backend.utils.encryption import key_service_unavailable
+from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import AI_ALLOWED
+from backend.utils.profile_providers import kept_from_embeddings_clause
 
 from backend.utils.hidden_rows import account_on_hold_user_ids, hidden_ids
 
@@ -46,6 +52,15 @@ SWEEP_LOCK_KEY = "loore:embeddings:sweep"
 # that runs longer than this overlaps the next one, which the
 # ON CONFLICT insert then tolerates.
 SWEEP_LOCK_TTL = 15 * 60
+# HEURISTIC: the largest stored value (bytes of the column) the sweep
+# loads. An entry holds at most 100,000 characters (NODE_CHAR_CAP), which
+# is at most about 540,000 bytes stored encrypted; the largest entry from
+# before the cap was a ~900 KB paste. Ten million is many times both, so
+# no entry written in the apps is left out, while one row of this size
+# needs only tens of MB to load and decrypt. A row above it is never
+# embedded (it stays out of semantic search) and takes no place among the
+# sweep's candidates.
+EMBED_MAX_STORED_BYTES = 10_000_000
 
 
 def _embedding_owner_id(node):
@@ -66,6 +81,24 @@ def _paid_features_filter():
     return background_work_clause()
 
 
+def _readable_text(row, kind):
+    """The row's text, or None when the stored value cannot be read (it
+    does not decrypt). One row of one account must not stop the sweep for
+    every account: it is logged by id only and left for the next sweep,
+    which writes nothing for it now. A key-service outage
+    (encryption.key_service_unavailable) ends the sweep as before: every
+    row would fail the same way, each after its own retries."""
+    try:
+        return row.get_content()
+    except Exception as e:  # noqa: BLE001 — a read failure skips the row
+        soft_limit.reraise(e)
+        if key_service_unavailable(e):
+            raise
+        logger.warning("Embedding sweep: %s %s could not be read (%s); "
+                       "skipped", kind, row.id, describe_exception(e))
+        return None
+
+
 def _candidate_nodes(limit):
     """Nodes needing (re-)embedding: AI-readable, alive, with content,
     and either missing an embedding row, embedded with another model, or
@@ -76,9 +109,64 @@ def _candidate_nodes(limit):
     envelope-encrypted with a per-node DEK, so the previous decrypt-
     everything-each-sweep design made ~1.6M KMS calls/day (the dominant
     GCP cost) and OOM-thrashed the prod VM as the corpus grew.
+
+    The batch's stored values are loaded one row at a time and only the
+    first MAX_EMBED_CHARS of each text (all the embedding call sends) is
+    kept, so the memory a sweep needs is bounded by its largest row, not
+    by the sum of its rows. A row stored above EMBED_MAX_STORED_BYTES is
+    not a candidate: it is never loaded, and takes no place in the batch.
     """
-    rows = (
+    rows = _candidate_query(limit).all()
+    out = []
+    touched = False
+    for node, emb in rows:
+        # Hash the STORED bytes (the encrypted blob for encrypted nodes),
+        # not the plaintext: the unchanged-check then needs no KMS call,
+        # and no plaintext fingerprint lands in the DB. Trade-off:
+        # re-encrypting identical plaintext (fresh DEK) changes the blob
+        # and triggers one spurious re-embed — rare and cheap.
+        digest = content_hash(node.content)   # loads this row's value
+        if emb is not None and emb.content_hash == digest \
+                and emb.model == EMBEDDING_MODEL:
+            # Content unchanged (a non-content column bumped updated_at,
+            # or a legacy row without the snapshot): record the snapshot
+            # so the node drops out of the candidate query.
+            emb.node_updated_at = node.updated_at
+            touched = True
+            db.session.expire(node, ["content"])
+            continue
+        text = _readable_text(node, "node")
+        # The stored value is not needed again: let it go before the
+        # next row is loaded.
+        db.session.expire(node, ["content"])
+        if not text or not text.strip():
+            continue
+        out.append((node, emb, text[:MAX_EMBED_CHARS], digest))
+    if touched:
+        db.session.commit()
+    return out
+
+
+def _stored_size(column, dialect):
+    """The stored size of a text column in bytes, read without fetching
+    the value where the database allows it. PostgreSQL's octet_length
+    reads the size kept with the value (length() would fetch and
+    decompress every value the scan passes, across the whole table);
+    sqlite gets length() of the value as a blob, which counts bytes on
+    every sqlite version (octet_length exists only from 3.43)."""
+    if dialect == "sqlite":
+        return func.length(cast(column, LargeBinary))
+    return func.octet_length(column)
+
+
+def _candidate_query(limit, dialect=None):
+    """The candidate query of _candidate_nodes, for the session's
+    database (or the named *dialect*)."""
+    if dialect is None:
+        dialect = db.session.get_bind().dialect.name
+    return (
         db.session.query(Node, NodeEmbedding)
+        .options(defer(Node.content))
         .outerjoin(NodeEmbedding, NodeEmbedding.node_id == Node.id)
         # The owner's account setting (see _embedding_owner_id): an
         # AI reply's author is the llm-<model> account, not the owner.
@@ -88,12 +176,16 @@ def _candidate_nodes(limit):
             Node.deleted_at.is_(None),
             Node.content.isnot(None),
             Node.content != "",
+            _stored_size(Node.content, dialect) <= EMBED_MAX_STORED_BYTES,
             Node.ai_usage.in_(AI_ALLOWED),
             User.default_ai_usage.in_(AI_ALLOWED),
             # An account being deleted (#269): nothing new is embedded.
             # The nodes a "Delete all my content" hid are soft-deleted,
             # so they are left out above (#590).
             ~User.id.in_(account_on_hold_user_ids()),
+            # An owner who keeps to a provider other than the embedding
+            # model's: nothing of theirs is sent to it.
+            ~kept_from_embeddings_clause(),
             *_paid_features_filter(),
         )
         .filter(or_(
@@ -105,37 +197,13 @@ def _candidate_nodes(limit):
         ))
         .order_by(Node.id.desc())
         .limit(limit)
-        .all()
     )
-    out = []
-    touched = False
-    for node, emb in rows:
-        # Hash the STORED bytes (the encrypted blob for encrypted nodes),
-        # not the plaintext: the unchanged-check then needs no KMS call,
-        # and no plaintext fingerprint lands in the DB. Trade-off:
-        # re-encrypting identical plaintext (fresh DEK) changes the blob
-        # and triggers one spurious re-embed — rare and cheap.
-        digest = content_hash(node.content)
-        if emb is not None and emb.content_hash == digest \
-                and emb.model == EMBEDDING_MODEL:
-            # Content unchanged (a non-content column bumped updated_at,
-            # or a legacy row without the snapshot): record the snapshot
-            # so the node drops out of the candidate query.
-            emb.node_updated_at = node.updated_at
-            touched = True
-            continue
-        text = node.get_content()
-        if not text or not text.strip():
-            continue
-        out.append((node, emb, text, digest))
-    if touched:
-        db.session.commit()
-    return out
 
 
 def _candidate_external_items(limit):
     """Saved references without an embedding, whose owner's account
-    setting allows AI (#346)."""
+    setting allows AI (#346) and who does not keep to a provider other
+    than the embedding model's."""
     return (
         db.session.query(ExternalItem, ExternalItemEmbedding)
         .outerjoin(ExternalItemEmbedding,
@@ -144,6 +212,7 @@ def _candidate_external_items(limit):
         .filter(ExternalItemEmbedding.id.is_(None),
                 User.default_ai_usage.in_(AI_ALLOWED),
                 ~User.id.in_(account_on_hold_user_ids()),   # #269
+                ~kept_from_embeddings_clause(),
                 *_paid_features_filter(),
                 # A Read pick nobody saved is not a reference (#352).
                 ExternalItem.saved())
@@ -272,11 +341,33 @@ def sweep(limit=SWEEP_BATCH_SIZE):
 
     # External references (#155 component 2): embed imported items
     # the same way. They're user-curated content (bookmarks, CA
-    # tweets) — embedding makes them semantically searchable.
+    # tweets) — embedding makes them semantically searchable. The node
+    # half above is committed: its rows reach the pgvector copies even
+    # when this half fails.
+    try:
+        ext_embedded = _embed_external_items(limit, api_key)
+    except Exception:
+        db.session.rollback()
+        _sync_pgvector_copies()
+        raise
+
+    _sync_pgvector_copies()
+
+    logger.info(
+        "Embedding sweep: %d nodes embedded, %d external items "
+        "embedded, %d stale removed", embedded, ext_embedded,
+        len(stale))
+    return {"status": "ok", "embedded": embedded,
+            "external_embedded": ext_embedded,
+            "removed": len(stale)}
+
+
+def _embed_external_items(limit, api_key):
+    """The sweep's saved-reference half. Returns the number embedded."""
     ext_rows = _candidate_external_items(limit)
     ext_candidates = []
     for item, _ in ext_rows:
-        text = item.get_content()
+        text = _readable_text(item, "reference")
         if text and text.strip():
             # A web clip's title is often the best one-line summary
             # of the page; fold it in so the vector reflects it.
@@ -299,13 +390,4 @@ def sweep(limit=SWEEP_BATCH_SIZE):
                     vector=pack_vector(vector))):
                 ext_embedded += 1
         db.session.commit()
-
-    _sync_pgvector_copies()
-
-    logger.info(
-        "Embedding sweep: %d nodes embedded, %d external items "
-        "embedded, %d stale removed", embedded, ext_embedded,
-        len(stale))
-    return {"status": "ok", "embedded": embedded,
-            "external_embedded": ext_embedded,
-            "removed": len(stale)}
+    return ext_embedded

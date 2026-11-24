@@ -5,6 +5,8 @@ export const X_LOGIN_MESSAGES = {
   linked: { type: "success", text: "X connected. Sign in with X now opens this account." },
   cancelled: { type: "info", text: "X was not connected." },
   failed: { type: "error", text: "Could not read your X account. Please try again." },
+  // Connect X was started many times from this network (backend/oauth.py).
+  wait: { type: "error", text: "Connect X was started many times from this network. Please wait a few minutes, then try again." },
   other_x: { type: "error", text: "This account is already connected to a different X account." },
   taken: {
     type: "error",

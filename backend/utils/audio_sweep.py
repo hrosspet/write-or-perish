@@ -19,7 +19,15 @@ counts per category). Under the audio storage root it deletes:
 * a streaming session folder, ``streaming/<uid>/<session>/``, that no
   node not yet finalized and no draft names, once nothing in it changed
   for the grace period: what is left when the cleanup could not delete a
-  finalized node's session folder, or a recording was abandoned.
+  finalized node's session folder, or a recording was abandoned;
+* the folder that holds the pieces of an audio file's upload,
+  ``chunks/<uid>/<upload>/``, once nothing in it changed for
+  STAGED_UPLOAD_SECONDS and its entry no longer takes pieces: an upload
+  that stopped arriving (the tab was closed, the app was ended), one whose
+  entry is gone or deleted, or pieces left behind by a finished one. Its
+  entry, if it still waits for the file, then ends ``failed`` with the
+  words the upload routes answer for an upload that stopped arriving,
+  the one row change the sweep makes.
 
 A recording in a folder whose node row is gone (an upload,
 ``chunk_*``/``batch_*``, or a ``nodes/`` folder) is kept until nothing in
@@ -50,17 +58,21 @@ Never touched:
   that started before is not cut;
 * a streaming session a node not yet finalized or a draft names, or that
   changed within the grace period;
+* an upload's pieces while its entry still takes pieces (activity within
+  recording_limits.UPLOAD_COUNTS_FOR), whatever the folder's age;
 * anything outside those folders, and anything behind a symlink (never
   followed; paths are built with storage_path, and deleted only when
   they resolve inside the root).
 
 Reads folder names, file sizes and times, row ids, deletion times and
-stored audio URLs; never a file's content. Lists one folder at a time and
+stored audio URLs; never a file's content, except the entry id in an
+upload folder's ``metadata.json`` (written by /upload/init). Lists one folder at a time and
 looks rows up BATCH_SIZE folders per round of queries, ending each read
 transaction, so it is cheap enough to run daily on a small VM. With
 ``measure_kept=False`` (the daily run) it does not measure the folders it
 keeps.
 """
+import json
 import os
 import pathlib
 import re
@@ -86,6 +98,20 @@ RECENT_SECONDS = 24 * 3600
 # draft uses, are kept until nothing in them changed for the grace
 # period, the same 30 days a deleted node is kept.
 GRACE_SECONDS = SOFT_DELETE_GRACE_DAYS * 86400
+# The pieces of an audio file's upload (chunks/<uid>/<upload>/) go once
+# nothing in the folder changed for this long. An upload takes pieces and
+# its finalize while it had activity within UPLOAD_COUNTS_FOR (24 hours:
+# a device that slept mid-upload continues where it stopped); after that
+# the server refuses both (410). Neither app continues an upload under the
+# same name after a failure or a restart: it starts again from the file,
+# which stays on the person's device. Twice the server's time leaves a
+# day between the last moment a piece could arrive and the first moment
+# the folder could go. Live recordings are not stored here (streaming/).
+STAGED_UPLOAD_SECONDS = 48 * 3600
+# metadata.json holds the file's name and one number per piece (at most
+# recording_limits.MAX_UPLOAD_CHUNKS, 200): a few kilobytes. A larger
+# file is not read, and its folder is judged by its age alone.
+UPLOAD_METADATA_MAX_BYTES = 64 * 1024
 # Folders per round of database lookups.
 BATCH_SIZE = 500
 
@@ -96,13 +122,18 @@ SPEECH_FILE_RE = re.compile(r"tts(?:_chunk_[0-9]{1,6})?\.mp3(?:\.enc)?")
 # or streamed chunks (chunk_*, batch_*). A nodes/<uid>/<id>/ folder is a
 # recording as a whole.
 RECORDING_FILE_RE = re.compile(r"(?:original\.|chunk_|batch_).+")
+# An upload's folder: the name the client chose (routes/nodes.py
+# _UPLOAD_ID_RE), with ".finalizing" while its finalize runs.
+UPLOAD_DIR_RE = re.compile(r"[A-Za-z0-9_-]{1,64}(?:\.finalizing)?")
 
 ROW_GONE = "row gone"
 SPEECH_ONLY = "row gone, speech only (recording younger than grace period kept)"
 PAST_GRACE = "node deleted > grace period"
 SUPERSEDED = "superseded speech of a live row"
 SESSION_UNUSED = "no node or draft uses the session"
-TO_DELETE = (ROW_GONE, SPEECH_ONLY, PAST_GRACE, SUPERSEDED, SESSION_UNUSED)
+UPLOAD_ENDED = "upload no longer takes pieces"
+TO_DELETE = (ROW_GONE, SPEECH_ONLY, PAST_GRACE, SUPERSEDED, SESSION_UNUSED,
+             UPLOAD_ENDED)
 LIVE = "live (kept)"
 IN_GRACE = "node deleted, within grace period (kept)"
 HIDDEN = "hidden by a waiting 'Delete all my content' (kept)"
@@ -111,18 +142,21 @@ RECORDING_HELD = "row gone, recording younger than grace period (kept)"
 SESSION_IN_USE = "session of a node or draft (kept)"
 RECENT = "changed in the last 24 h (kept for a later run)"
 RECENT_GRACE = "changed within the grace period (kept for a later run)"
+UPLOAD_TAKING_PIECES = "upload still takes pieces (kept)"
+UPLOAD_RECENT = "changed in the last 48 h (kept for a later run)"
 SYMLINK = "symlink (left alone)"
 
 _USER_KINDS = ("node", "item", "profile")
 _NODES_LABEL = "nodes/<uid>/<id>"
 _SESSION_LABEL = "streaming/<uid>/<session>"
+_UPLOAD_LABEL = "chunks/<uid>/<upload>"
 
 
 class Folder(NamedTuple):
-    kind: str          # what it belongs to: "node", "item", "profile", "session"
+    kind: str          # "node", "item", "profile", "session" or "upload"
     label: str         # its layout, ids left out
     owner: int         # the user id in its path
-    row_id: object     # the row id, or the session id of a "session"
+    row_id: object     # the row id; a "session"'s id; an "upload"'s name
     path: pathlib.Path
     is_link: bool
 
@@ -159,25 +193,50 @@ def _session_dirs(folder):
                   key=lambda pair: pair[0])
 
 
+def _upload_dirs(folder):
+    """(name, entry) of the entries of *folder* named like an upload's
+    folder (UPLOAD_DIR_RE), symlinks included (never followed)."""
+    try:
+        entries = list(os.scandir(folder))
+    except OSError:
+        return []
+    return sorted(((e.name, e) for e in entries
+                   if UPLOAD_DIR_RE.fullmatch(e.name)
+                   and (e.is_symlink() or e.is_dir(follow_symlinks=False))),
+                  key=lambda pair: pair[0])
+
+
 def iter_folders(root):
     """Every row folder under *root*: ``user/<uid>/node|item|profile/<id>``,
-    ``nodes/<uid>/<id>``, and every streaming session folder,
-    ``streaming/<uid>/<session>``. A user folder (or its ``node``,
-    ``item`` or ``profile`` folder) that is a symlink is passed over,
-    never followed. Paths are built with storage_path, so they stay
-    inside the root."""
+    ``nodes/<uid>/<id>``, every streaming session folder,
+    ``streaming/<uid>/<session>``, and every upload's folder of pieces,
+    ``chunks/<uid>/<upload>``. A user folder (or its ``node``, ``item`` or
+    ``profile`` folder) that is a symlink is passed over, never followed.
+    Paths are built with storage_path (an upload's from a name that
+    matched UPLOAD_DIR_RE, one plain folder name), so they stay inside
+    the root."""
     from backend.utils.audio_storage import storage_path
     root = pathlib.Path(root)
     yield from _row_folders(root, storage_path)
     top = root / "streaming"
+    if not top.is_symlink() and top.is_dir():
+        for owner_id, owner in _id_dirs(top):
+            if owner.is_symlink():
+                continue
+            for session_id, entry in _session_dirs(owner.path):
+                yield Folder("session", _SESSION_LABEL, owner_id, session_id,
+                             storage_path(root, "streaming", owner_id,
+                                          session_id),
+                             entry.is_symlink())
+    top = root / "chunks"
     if top.is_symlink() or not top.is_dir():
         return
     for owner_id, owner in _id_dirs(top):
         if owner.is_symlink():
             continue
-        for session_id, entry in _session_dirs(owner.path):
-            yield Folder("session", _SESSION_LABEL, owner_id, session_id,
-                         storage_path(root, "streaming", owner_id, session_id),
+        for name, entry in _upload_dirs(owner.path):
+            yield Folder("upload", _UPLOAD_LABEL, owner_id, name,
+                         storage_path(root, "chunks", owner_id) / name,
                          entry.is_symlink())
 
 
@@ -245,6 +304,70 @@ class Rows(NamedTuple):
     hidden: dict   # kind -> {row id} a waiting "Delete all my content" hid
     refs: dict     # ("node", node id) / (kind, user id) -> {path keys}
     sessions: set = frozenset()   # streaming session ids still in use
+    # (owner, upload name) of the upload folders whose entry still takes
+    # pieces, and -> entry id of the others whose entry is their owner's.
+    uploads: set = frozenset()
+    upload_nodes: dict = {}
+
+
+def _upload_node_id(path):
+    """The entry id an upload's folder was made for (its metadata.json,
+    written by /upload/init), or None when the file is missing, a symlink,
+    larger than UPLOAD_METADATA_MAX_BYTES or not as init writes it. The
+    one file the sweep opens; never a piece."""
+    try:
+        fd = os.open(os.path.join(path, "metadata.json"),
+                     os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as f:
+            raw = f.read(UPLOAD_METADATA_MAX_BYTES + 1)
+        if len(raw) > UPLOAD_METADATA_MAX_BYTES:
+            return None
+        node_id = json.loads(raw).get("node_id")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(node_id, bool) or not isinstance(node_id, int) \
+            or not 0 < node_id < 10 ** 18:
+        return None
+    return node_id
+
+
+def _uploads(folders, now):
+    """(still taking pieces, entry ids of the rest) for the upload folders
+    in *folders*, keyed (owner, name). An upload takes pieces while its
+    entry is its owner's, not deleted, has no file yet and had activity
+    within UPLOAD_COUNTS_FOR of *now* (a POSIX time): what the upload
+    routes check (recording_limits.upload_expired)."""
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.recording_limits import UPLOAD_COUNTS_FOR
+    named = {}
+    for f in folders:
+        node_id = _upload_node_id(f.path)
+        if node_id is not None:
+            named[(f.owner, f.row_id)] = node_id
+    if not named:
+        return set(), {}
+    since = (datetime.fromtimestamp(now, timezone.utc).replace(tzinfo=None)
+             - UPLOAD_COUNTS_FOR)
+    nodes = {r.id: r for r in db.session.query(
+        Node.id, Node.user_id, Node.deleted_at, Node.audio_original_url,
+        Node.upload_activity_at, Node.created_at).filter(
+        Node.id.in_(sorted(set(named.values()))))}
+    taking, ended = set(), {}
+    for key, node_id in named.items():
+        r = nodes.get(node_id)
+        if r is None or r.user_id != key[0]:
+            continue
+        last = r.upload_activity_at or r.created_at
+        if (r.deleted_at is None and r.audio_original_url is None
+                and last is not None and last >= since):
+            taking.add(key)
+        else:
+            ended[key] = node_id
+    return taking, ended
 
 
 def _sessions_in_use(session_ids, cutoff):
@@ -314,20 +437,26 @@ def _lookup_owned(kind, model, fk, ids, owners, rows, refs):
         _add_refs(refs[(kind, uid)], url)
 
 
-def lookup(folders, cutoff=None):
+def lookup(folders, cutoff=None, now=None):
     """What the rows say about *folders*: ids, deletion times, stored
     audio URLs, the streaming sessions in use (see _sessions_in_use;
-    *cutoff* is the grace period's). Hidden rows are read too (and kept
-    by classify)."""
+    *cutoff* is the grace period's), the uploads that still take pieces
+    at *now* (see _uploads). Hidden rows are read too (and kept by
+    classify)."""
     from backend.extensions import db
     from backend.models import ExternalItem, TTSChunk, UserProfile
     from backend.utils.hidden_rows import including_hidden_rows
     ids = defaultdict(set)
     owners = defaultdict(set)
+    uploads = []
     for f in folders:
-        if not f.is_link:
-            ids[f.kind].add(f.row_id)
-            owners[f.kind].add(f.owner)
+        if f.is_link:
+            continue
+        if f.kind == "upload":
+            uploads.append(f)
+            continue
+        ids[f.kind].add(f.row_id)
+        owners[f.kind].add(f.owner)
     rows = {kind: {} for kind in _USER_KINDS}
     refs = defaultdict(set)
     tables = {"node": "node", "item": ExternalItem.__tablename__,
@@ -344,9 +473,11 @@ def lookup(folders, cutoff=None):
                   for kind in _USER_KINDS}
         sessions = (_sessions_in_use(ids["session"], cutoff)
                     if ids["session"] else set())
+        taking, ended = _uploads(
+            uploads, time.time() if now is None else now)
     # Read-only: end the transaction so none stays open during the walk.
     db.session.rollback()
-    return Rows(rows, hidden, refs, sessions)
+    return Rows(rows, hidden, refs, sessions, taking, ended)
 
 
 def classify(f, rows, cutoff):
@@ -355,6 +486,9 @@ def classify(f, rows, cutoff):
         return SYMLINK
     if f.kind == "session":
         return SESSION_IN_USE if f.row_id in rows.sessions else SESSION_UNUSED
+    if f.kind == "upload":
+        return (UPLOAD_TAKING_PIECES if (f.owner, f.row_id) in rows.uploads
+                else UPLOAD_ENDED)
     row = rows.rows[f.kind].get(f.row_id)
     if row is None:
         return ROW_GONE
@@ -394,7 +528,7 @@ def victims(f, cat, rows, root):
     whole folder (a node's folders past the grace period or of a gone
     row, a gone reference's or profile's when no other row uses a file
     in it); else the files to delete, which may be none."""
-    if cat in (PAST_GRACE, SESSION_UNUSED) or (
+    if cat in (PAST_GRACE, SESSION_UNUSED, UPLOAD_ENDED) or (
             cat == ROW_GONE and f.kind == "node"):
         return cat, None
     if cat not in (ROW_GONE, LIVE):
@@ -450,9 +584,10 @@ def _holds_recording(f):
 def _assess(f, rows, cutoff, now, root, measure_kept):
     """(category, files to delete or None for the whole folder, files,
     bytes) of one folder, after the age checks: nothing that changed in
-    the last 24 h; no unused streaming session, and no recording in a
-    folder whose node row is gone, that changed within the grace period
-    (only that folder's speech goes)."""
+    the last 24 h; no upload's pieces that changed within
+    STAGED_UPLOAD_SECONDS; no unused streaming session, and no recording
+    in a folder whose node row is gone, that changed within the grace
+    period (only that folder's speech goes)."""
     cat, gone = victims(f, classify(f, rows, cutoff), rows, root)
     if cat not in TO_DELETE:
         if measure_kept and not f.is_link:
@@ -461,6 +596,10 @@ def _assess(f, rows, cutoff, now, root, measure_kept):
         return cat, [], 0, 0
     files, size, newest = folder_stats(f.path)
     age = now - newest
+    if cat == UPLOAD_ENDED:
+        if age < STAGED_UPLOAD_SECONDS:
+            return f"{cat}, {UPLOAD_RECENT}", [], files, size
+        return cat, gone, files, size
     if age < RECENT_SECONDS:
         return f"{cat}, {RECENT}", [], files, size
     if age < GRACE_SECONDS:
@@ -477,10 +616,34 @@ def _assess(f, rows, cutoff, now, root, measure_kept):
     return cat, gone, files, size
 
 
-def _delete(f, gone, root, totals):
+def _end_upload_entry(node_id, owner):
+    """The entry of an upload whose pieces the sweep removed, if it still
+    waits for its file, ends ``failed`` with the words the upload routes
+    answer for an upload that stopped arriving (as /upload/cleanup ends
+    one the app reports as failed). ``updated_at`` stays: not an edit."""
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.recording_limits import UPLOAD_EXPIRED_TEXT
+    Node.query.filter(
+        Node.id == node_id, Node.user_id == owner,
+        Node.transcription_status == "pending",
+        Node.audio_original_url.is_(None),
+    ).update({Node.transcription_status: "failed",
+              Node.transcription_error: UPLOAD_EXPIRED_TEXT,
+              Node.updated_at: Node.updated_at},
+             synchronize_session=False)
+    db.session.commit()
+
+
+def _delete(f, gone, root, totals, rows=None):
     from backend.utils import audio_storage
     result = (audio_storage.delete_folders([f.path], root) if gone is None
               else audio_storage.delete_files(gone, root))
+    if f.kind == "upload" and rows is not None and not result.failed \
+            and not result.skipped:
+        node_id = rows.upload_nodes.get((f.owner, f.row_id))
+        if node_id is not None:
+            _end_upload_entry(node_id, f.owner)
     totals.done[0] += 1
     totals.done[1] += result.files
     totals.done[2] += result.bytes
@@ -513,7 +676,7 @@ def sweep(apply=False, verbose=False, root=None, now=None, out=None,
     totals = _Totals()
     folders = iter_folders(root) if root.is_dir() else ()
     for batch in _batches(folders, BATCH_SIZE):
-        rows = lookup(batch, cutoff)
+        rows = lookup(batch, cutoff, now)
         for f in batch:
             cat, gone, files, size = _assess(f, rows, cutoff, now, root,
                                              measure_kept)
@@ -528,7 +691,7 @@ def sweep(apply=False, verbose=False, root=None, now=None, out=None,
                 out(f"  {verb} {f.kind} {f.row_id} ({f.label}, {cat}, "
                     f"{files} files)")
             if apply:
-                _delete(f, gone, root, totals)
+                _delete(f, gone, root, totals, rows)
     return {"root": root,
             "categories": {k: tuple(v) for k, v in totals.stats.items()},
             "planned": tuple(totals.planned), "done": tuple(totals.done),

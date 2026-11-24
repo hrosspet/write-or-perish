@@ -266,6 +266,9 @@ def _fake_twitter_task(monkeypatch):
     mod = types.ModuleType("backend.tasks.imports")
     task = MagicMock()
     task.delay.return_value = MagicMock(id="task-123")
+    # The confirm queues under its own task id; recorded as a delay call.
+    task.apply_async.side_effect = (
+        lambda args, task_id: task.delay(*args))
     mod.import_twitter_archive = task
     monkeypatch.setitem(sys.modules, "backend.tasks.imports", mod)
     return task

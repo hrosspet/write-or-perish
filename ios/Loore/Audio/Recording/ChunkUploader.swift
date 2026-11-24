@@ -200,9 +200,14 @@ final class ChunkUploader: NSObject {
     }
     private let useBackgroundSession: Bool
 
-    init(root: URL? = nil, useBackgroundSession: Bool = true) {
-        let base = root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    /// Where the shared uploader keeps audio until it is sent.
+    static var defaultRoot: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("VoiceUploads", isDirectory: true)
+    }
+
+    init(root: URL? = nil, useBackgroundSession: Bool = true) {
+        let base = root ?? Self.defaultRoot
         self.root = base
         self.useBackgroundSession = useBackgroundSession
         super.init()

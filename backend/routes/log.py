@@ -10,6 +10,7 @@ from backend.utils.encryption import prefetch_deks
 from backend.utils.thread_tree import (
     thread_root_of, subtree_walk, alive_child_counts,
 )
+from backend.utils.public_threads import TEXT_STORED, public_prompt_roots
 from sqlalchemy import and_, or_, func, case
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -45,11 +46,19 @@ _SORT_KEY = func.coalesce(Node.pinned_at, Node.created_at)
 
 def _own_private(walk, node, user_id):
     """A `subtree_walk` row that is `user_id`'s own writing (author or
-    human owner) and not public; `node` is a Node alias joined on the
-    row's id, for its privacy level."""
+    human owner) and no public listing shows: not public, or an uploaded
+    recording whose transcript is not stored (waiting, or failed: the
+    listings show it only once it is, utils/public_threads). `node` is a
+    Node alias joined on the row's id, for its privacy level and
+    transcription status."""
     return and_(
         or_(walk.c.user_id == user_id, walk.c.human_owner_id == user_id),
-        node.privacy_level != PrivacyLevel.PUBLIC.value,
+        or_(
+            node.privacy_level != PrivacyLevel.PUBLIC.value,
+            and_(node.transcription_status.isnot(None),
+                 node.transcription_status.notin_(
+                     [s for s in TEXT_STORED if s is not None])),
+        ),
     )
 
 
@@ -97,9 +106,19 @@ def get_log():
     # another user's public reply keeps the thread out (#516), while the
     # user's private replies under a root published "this only" stay
     # reachable.
+    #
+    # The same holds for a living public prompt root that no public
+    # listing shows (no card: no public entry of the user's with its text
+    # stored directly under it, utils/public_threads): a public thread
+    # whose message was made private or deleted later, or whose upload
+    # waits for its transcript. It is a seed too, and is listed when the
+    # user's own unlisted writing is under it. Its ids come from a small
+    # query of their own: a correlated test here would make the
+    # database plan this query as a costly one.
+    unlisted = sorted(public_prompt_roots(current_user.id).bare)
     deleted_roots = db.session.query(Node.id).filter(
         Node.parent_id.is_(None),
-        Node.deleted_at.isnot(None),
+        or_(Node.deleted_at.isnot(None), Node.id.in_(unlisted)),
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
@@ -144,9 +163,13 @@ def get_log():
             # of the user's own non-public descendants (#516, see
             # `alive_roots`). Pinned non-roots that are soft-deleted
             # stay hidden — this branch only relaxes the rule for roots.
+            # Also a living public prompt root no public listing shows,
+            # with the user's own non-public writing under it (see
+            # `alive_roots`).
             and_(
                 Node.parent_id.is_(None),
-                Node.deleted_at.isnot(None),
+                or_(Node.deleted_at.isnot(None),
+                    Node.privacy_level == PrivacyLevel.PUBLIC.value),
                 Node.id.in_(alive_roots),
             ),
         ),
@@ -238,13 +261,16 @@ def get_log():
     # NULL` filter here is what keeps deleted nodes out. Do not drop that
     # filter as redundant.
     #
-    # Under a deleted public root only the user's own non-public nodes
-    # are picked, the same rule that listed the root: the card shows the
-    # user's private reply, never another user's public one.
+    # Under a deleted public root, and under a public prompt root no
+    # public listing shows, only the user's own non-public nodes are
+    # picked, the same rule that listed the root: the card shows the
+    # user's private reply, never another user's public one nor the
+    # public prompt. (Every public row of the page is such a root: the
+    # query lists no other public node.)
     root_ids = [n.id for n in items]
-    deleted_public_root_ids = [
+    public_root_ids = [
         n.id for n in items
-        if n.parent_id is None and n.deleted_at is not None
+        if n.parent_id is None
         and n.privacy_level == PrivacyLevel.PUBLIC.value
     ]
     newest_map = {}
@@ -266,10 +292,10 @@ def get_log():
                 ),
             ).label("rn_first"),
         ).filter(walk.c.deleted_at.is_(None))
-        if deleted_public_root_ids:
+        if public_root_ids:
             shown_node = db.aliased(Node, flat=True)
             ranked = ranked.join(shown_node, shown_node.id == walk.c.id).filter(or_(
-                walk.c.root_id.notin_(deleted_public_root_ids),
+                walk.c.root_id.notin_(public_root_ids),
                 _own_private(walk, shown_node, current_user.id),
             ))
         ranked = ranked.subquery()

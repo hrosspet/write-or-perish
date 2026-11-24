@@ -915,14 +915,14 @@ A recording is a Draft row with a `session_id` (UUID string). Audio is uploaded 
 - Backend: routes/textmode.py:continue_from_node
 - Auth: login; `human_owner_id` must be the caller.
 - Called from: NodeDetail `submitReadReplyMessage` (the reply box under a Read reply, typed path).
-- Request JSON: `{ "content": string (required), "model"?: string, "auto_generate"?: bool = true, "ai_usage"?: "chat"|"train" }`. Privacy comes from the node.
+- Request JSON: `{ "content": string (required), "model"?: string, "auto_generate"?: bool = true, "ai_usage"?: "chat"|"train", "privacy_level"?: "private"|"circles"|"public" }`. The message is saved at the `privacy_level` the form sent, whatever the node's level is now: a form that still shows Private after the node was made public in another tab saves a private message, with no refusal (Peter, 2026-11-24). No `privacy_level` (or `null`) → the node's level (older clients). The textmode prompt node inserted under the node takes the more private of the node's level and the message's. Automatic reply: decided by the message's level (none for public or circles, with `llm_error_code`; a private message gets one, also under a public node). A public message is refused when it quotes a node that is not public (`publish_refusal`), as on every route. The web and iPhone forms ask "This reply will be public" before sending when they know the parent is public (the form's level is then locked to Public); the server does not ask.
 - Response 202:
   ```
   { "prompt_node_id": int|null,   // textmode prompt inserted under the node, or null inside an agentic thread
     "user_node_id": int,
     "llm_node_id"?: int, "task_id"?: string, "spend_capped"?: true, "llm_error"?: string }
   ```
-- Errors: 404 (`get_or_404`, HTML-less default body), `403 {"error":"Unauthorized"}`, `400 {"error":"Content is required"}`, 422 char cap, `400 {"error":"Invalid ai_usage: x"}`, `400 {"error":"Text mode requires ai_usage of 'chat' or 'train'"}`, `400 {"error":"Unsupported model: x"}`. The spend cap is handled inline (`spend_capped`), not as a 402.
+- Errors: 404 (`get_or_404`, HTML-less default body), `403 {"error":"Unauthorized"}`, 410 deleted node (as `POST /api/nodes/`), `400 {"error":"Content is required"}`, 422 char cap, `400 {"error":"Invalid ai_usage: x"}`, `400 {"error":"Invalid privacy_level: x"}` (not one of the three levels, or not text), `400 {"error":"Text mode requires ai_usage of 'chat' or 'train'"}`, `400 {"error":"Unsupported model: x"}`. No `public_reply_required` here (unlike `POST /api/nodes/` and `save-as-node`). The spend cap is handled inline (`spend_capped`), not as a 402.
 - Notes: `ParentDeletedError` from `create_llm_placeholder` is not caught here and would surface as a 500. Web navigates to `/node/<user_node_id>?awaitLlm=<llm_node_id>`.
 
 ##### `GET /api/textmode/from-node/<node_id>`

@@ -16,6 +16,7 @@ from backend.extensions import db
 from backend.utils.share import save_share_drafts_from_node
 from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.slugs import permalink_for
 from backend.utils.privacy import (
     AIUsage, PrivacyLevel, can_user_access_node)
@@ -81,6 +82,7 @@ def list_shares():
 
 
 @share_bp.route("", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def create_share():
     """Manually create a share draft from the Share page."""
@@ -102,6 +104,7 @@ def create_share():
 
 
 @share_bp.route("/<int:share_id>", methods=["PATCH"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_share(share_id):
     """Edit a draft's content/type. Published items must be revoked first —
@@ -163,6 +166,14 @@ def publish_share(share_id):
     share = _get_own_share_or_404(share_id)
     if not share:
         return jsonify({"error": "Not found"}), 404
+    # Read again with the row locked to the commit (PostgreSQL): a second
+    # publish of the same share at the same moment waits here, then finds
+    # it published.
+    share = db.session.get(ShareDraft, share_id, with_for_update=True,
+                           populate_existing=True)
+    if share is None:
+        # Deleted in the meantime (the user's own delete).
+        return jsonify({"error": "Not found"}), 404
     if share.status == "published":
         return jsonify(_serialize(share)), 200
 
@@ -173,6 +184,19 @@ def publish_share(share_id):
     refusal = publish_refusal(content or "", current_user.id)
     if refusal is not None:
         return refusal
+
+    # The publish is claimed before its node is made: one conditional
+    # UPDATE in this transaction, so of two publishes only one makes a
+    # public node (also where the row lock above is not taken).
+    claimed = ShareDraft.query.filter(
+        ShareDraft.id == share.id, ShareDraft.status != "published",
+    ).update({ShareDraft.status: "published"}, synchronize_session=False)
+    if not claimed:
+        db.session.rollback()
+        share = db.session.get(ShareDraft, share.id, populate_existing=True)
+        if share is None:
+            return jsonify({"error": "Not found"}), 404
+        return jsonify(_serialize(share)), 200
 
     # Identity follows content: republishing UNCHANGED content restores the
     # same node (deleted_at cleared) so an existing discussion reattaches —
@@ -368,15 +392,31 @@ def public_shares(username):
     user, moved = resolve_public_handle(username)
     if not user:
         return jsonify({"error": "Not found"}), 404
-    # ALL the user's living public roots — shares are enriched with their
+    # The user's living public thread tops (roots, and the public first
+    # entry under a private prompt root) — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear
-    # too, so everything public has a home page (#228).
+    # too, so everything public has a home page (#228). One page of them
+    # (?page=N, PUBLIC_LISTING_PAGE_SIZE), as the Commons feed pages:
+    # pinned pieces lead (newest pin first), then publish date. A public
+    # prompt root's card is its owner's first public entry under it
+    # (utils/public_threads): its id, text and permalink (else the
+    # root's); the pin and the date stay the root's.
+    from backend.routes.commons import (
+        PUBLIC_LISTING_PAGE_SIZE, listing_page, public_root_order)
+    page = listing_page()
+    size = PUBLIC_LISTING_PAGE_SIZE
+    from backend.utils.public_threads import (
+        card_entries, public_prompt_roots, thread_top_filter)
+    roots = public_prompt_roots(user.id)
     nodes = Node.query.filter(
-        Node.parent_id.is_(None),
+        thread_top_filter(roots.bare),
         Node.deleted_at.is_(None),
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
-    ).all()
+    ).order_by(*public_root_order()).offset((page - 1) * size).limit(
+        size + 1).all()
+    has_more = len(nodes) > size
+    nodes = nodes[:size]
     if moved == "former" and not nodes:
         # A former handle only ever leads to a page that renders (the
         # server-rendered profile 404s without public roots): an empty
@@ -385,19 +425,17 @@ def public_shares(username):
         return jsonify({"error": "Not found"}), 404
     share_by_node = {
         s.public_node_id: s
-        for s in ShareDraft.query.filter_by(
-            user_id=user.id, status="published").all()
-        if s.public_node_id
-    }
-    # Pinned pieces lead the page (newest pin first), then publish date.
-    nodes.sort(key=lambda n: (
-        n.pinned_at is None,
-        -(n.pinned_at.timestamp() if n.pinned_at else 0),
-        -(n.created_at.timestamp() if n.created_at else 0),
-    ))
+        for s in ShareDraft.query.filter(
+            ShareDraft.user_id == user.id,
+            ShareDraft.status == "published",
+            ShareDraft.public_node_id.in_([n.id for n in nodes]),
+        ).all()
+    } if nodes else {}
+    cards = card_entries(nodes, roots)
     items = []
-    for node in nodes:
-        share = share_by_node.get(node.id)
+    for top in nodes:
+        share = share_by_node.get(top.id)
+        node = cards.get(top.id, top)
         content = (node.get_content() or "").strip()
         items.append({
             "id": node.id,
@@ -406,13 +444,14 @@ def public_shares(username):
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "share_type": share.share_type if share else None,
             "public_node_id": node.id,
-            "permalink": permalink_for(node),
-            "pinned": node.pinned_at is not None,
+            "permalink": permalink_for(node) or permalink_for(top),
+            "pinned": top.pinned_at is not None,
             "published_at": iso_utc(
                 share.published_at if share and share.published_at
-                else node.created_at),
+                else top.created_at),
         })
-    body = {"username": user.username, "shares": items}
+    body = {"username": user.username, "shares": items,
+            "has_more": has_more, "page": page}
     if moved:
         # The SPA swaps the address bar to the canonical URL (#253).
         body["canonical"] = f"/@{user.username}"

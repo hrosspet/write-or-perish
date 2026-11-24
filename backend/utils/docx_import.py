@@ -18,6 +18,8 @@ import mammoth
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
+from backend.utils import archive_limits
+
 # --- Limits (heuristics: chosen, not measured; listed in the PR) ---------
 # Combined uncompressed size of the XML parts the converter parses, summed
 # over every .docx in one upload request. The converter needs ~55 MB of
@@ -116,6 +118,13 @@ def _validate(zf, budget):
     infos = zf.infolist()
     if len(infos) > MAX_ENTRIES:
         raise DocxImportError("the document has too many parts")
+    # Word writes its parts deflated or stored (archive_limits).
+    try:
+        for info in infos:
+            archive_limits.check_member(info)
+    except archive_limits.UnsupportedMember:
+        raise DocxImportError(
+            "the file is damaged or uses an unsupported format")
     total = sum(i.file_size for i in infos)
     compressed = sum(i.compress_size for i in infos)
     if total > MAX_TOTAL_UNCOMPRESSED_BYTES:
@@ -211,9 +220,12 @@ def convert_docx(fileobj, budget=None):
     if not hasattr(fileobj, "seekable"):
         fileobj = _Seekable(fileobj)
     try:
-        with zipfile.ZipFile(fileobj) as zf:
+        # The parts are counted before zipfile lists them all in memory.
+        with archive_limits.open_zip(fileobj, MAX_ENTRIES) as zf:
             _validate(zf, budget or ParseBudget())
             modified = modified_date(zf)
+    except archive_limits.ArchiveTooLarge:
+        raise DocxImportError("the document has too many parts")
     except zipfile.BadZipFile:
         raise DocxImportError("this is not a valid Word document")
     except (zlib.error, NotImplementedError, RuntimeError):

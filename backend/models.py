@@ -2,10 +2,12 @@ from datetime import datetime
 from flask_login import UserMixin
 import logging
 from sqlalchemy import and_, event, or_
+from sqlalchemy.ext.hybrid import hybrid_property
 from backend.extensions import db
 from backend.utils.encryption import (
     encrypt_content, decrypt_content, encrypt_with_dek, is_encrypted,
     is_encryption_enabled)
+from backend.utils import tool_record
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +181,12 @@ class User(db.Model, UserMixin):
     # When the paid period (or the trial) ends, UTC: the next payment, or
     # the end of a subscription cancelled at period end.
     subscription_period_end = db.Column(db.DateTime, nullable=True)
+    # When the subscription's current period began, UTC (Stripe's
+    # current_period_start). The level's usage ceiling is counted over
+    # this period (utils/spend.ceiling_period_start). NULL: not known
+    # (no subscription event since the column exists), and the ceiling
+    # is counted over the calendar month.
+    subscription_period_start = db.Column(db.DateTime, nullable=True)
     subscription_trial_end = db.Column(db.DateTime, nullable=True)
     subscription_cancel_at_period_end = db.Column(
         db.Boolean, nullable=False, default=False,
@@ -267,6 +275,23 @@ class User(db.Model, UserMixin):
     # spending carries nothing into the next month (a limit of 0 clears
     # the carry, also when a limit is set again later in the month).
     spend_carry_free_month = db.Column(db.String(7), nullable=True)
+
+    # The ceiling of a paid period (utils/spend.ceiling_period_start), for
+    # an account whose ceiling comes from its subscription. The start of
+    # the period the account is blocked for: the block holds while it is
+    # the current period's start and ends by itself with the period.
+    spend_blocked_period_start = db.Column(db.DateTime, nullable=True)
+    # What earlier periods spent above the ceiling, counted toward the
+    # period that starts at spend_period_start (the #594 rule, per
+    # period), in microdollars. NULL start: never counted per period.
+    spend_period_start = db.Column(db.DateTime, nullable=True)
+    spend_period_carry_microdollars = db.Column(
+        db.BigInteger, nullable=False, default=0, server_default="0")
+    # The ceiling (USD) the period at spend_period_start ran under: what
+    # that period counted above it is carried, whatever the ceiling is
+    # when the next period arrives (another level, time without access
+    # in between). NULL: not recorded.
+    spend_period_limit_usd = db.Column(db.Float, nullable=True)
 
     # Per-user defaults for new nodes (overridable per-node)
     default_privacy_level = db.Column(
@@ -422,6 +447,13 @@ class User(db.Model, UserMixin):
     # approves the account by hand. With payments off again, such an
     # account without the paid set waits for approval like a new one.
     let_in_at = db.Column(db.DateTime, nullable=True)
+    # When the approval gate, while payments were on, did not let this new
+    # account in because the day's number of new accounts not prepared in
+    # advance was reached (utils/trial_alerts.held_at_gate): it waits for
+    # the admin's approval, as every new account did before payments, also
+    # after the day's count has fallen. Cleared when the account is
+    # approved. NULL: never held that way.
+    approval_hold_at = db.Column(db.DateTime, nullable=True)
     # Whether the account was approved when the admin blocked it (#697,
     # utils/approval.block), so Unblock restores exactly that. NULL: not
     # blocked by Block (an account deactivated before payments, or none).
@@ -850,8 +882,14 @@ class Node(db.Model):
     # Session ID for streaming upload (groups chunks together)
     streaming_session_id = db.Column(db.String(64), nullable=True)
 
-    # Tool call metadata for LLM nodes (JSON list of tool call logs)
-    tool_calls_meta = db.Column(db.Text, nullable=True)
+    # Tool call metadata for LLM nodes (JSON list of tool call logs), as
+    # stored (utils/tool_record): each entry's name and status as they
+    # are, the whole list encrypted beside them. Rows written before that
+    # hold the list itself. Code reads and writes ``tool_calls_meta``
+    # below, which gives and takes the list as JSON text; SQL filters on
+    # ``Node.tool_calls_meta`` match the stored names.
+    tool_calls_meta_stored = db.Column("tool_calls_meta", db.Text,
+                                       nullable=True)
 
     # The reply's text so far while an LLM node is being generated (#367),
     # for display only. `content` stays final-only, so embeddings, exports,
@@ -944,6 +982,20 @@ class Node(db.Model):
             "human_owner_id", "source_key",
             name="uq_node_human_owner_source_key",
         ),
+        # The public listings (Commons feed, sitemap, a person's public
+        # page) read the public nodes, newest first, and keep the tops of
+        # threads (utils/public_threads). Public nodes are a small part
+        # of the table: with this index those queries read only them.
+        db.Index("ix_node_public_created_at", "created_at",
+                 postgresql_where=db.text("privacy_level = 'public'")),
+        # The public prompt roots (utils/public_threads
+        # .public_prompt_roots): every public listing looks them up
+        # first, by owner or all of them. A few rows, so the lookup reads
+        # neither the account's nor all the public nodes.
+        db.Index("ix_node_public_prompt_root", "human_owner_id",
+                 postgresql_where=db.text(
+                     "privacy_level = 'public' AND parent_id IS NULL "
+                     "AND prompt_key IS NOT NULL")),
     )
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
@@ -1037,26 +1089,50 @@ class Node(db.Model):
 
         *dek*: a data key from encryption.new_dek() shared by a bulk
         writer (an import), so many nodes cost one KMS call instead of
-        one each. Same ENC:v2 envelope; decrypt_content reads it."""
-        if self.privacy_level == "public":
+        one each. Same ENC:v2 envelope; decrypt_content reads it.
+
+        Public text that itself begins with ENC:v1:/ENC:v2: is encrypted
+        too: reads decrypt by that prefix (public rows from before #257
+        are still stored encrypted), so storing such text as it is would
+        make it read as something else.
+
+        Without *dek*, a node that holds a tool record takes the
+        record's data key for its text (a reply's placeholder is written
+        with its record; the reply task then writes the text), so a
+        reply keeps one key and its text and record are read with one
+        key-service call. The text is encrypted afresh either way."""
+        if self.privacy_level == "public" and not is_encrypted(plaintext):
             self.content = plaintext
-        elif dek is not None:
+            return
+        if dek is None:
+            dek = self._tool_record_key()
+        if dek is not None:
             self.content = encrypt_with_dek(plaintext, dek)
         else:
             self.content = encrypt_content(plaintext)
+
+    def _tool_record_key(self):
+        """The data key the node's tool record is stored under, or None."""
+        from backend.utils.encryption import dek_of
+        return dek_of(tool_record.sealed_part(self.tool_calls_meta_stored))
 
     def set_privacy_level(self, level: str, dek=None):
         """The one sanctioned way to change privacy_level: moves the
         stored content across the encryption boundary with it —
         leaving public encrypts, becoming public decrypts. *dek* as in
-        set_content."""
+        set_content. Text that begins with ENC:v1:/ENC:v2: stays
+        encrypted when it becomes public, as set_content stores it."""
         self.privacy_level = level
         if not self.content:
             return
         if level == "public":
             if is_encrypted(self.content):
-                self.content = decrypt_content(self.content)
+                plaintext = decrypt_content(self.content)
+                if not is_encrypted(plaintext):
+                    self.content = plaintext
         elif not is_encrypted(self.content):
+            if dek is None:
+                dek = self._tool_record_key()   # as set_content
             self.content = (encrypt_with_dek(self.content, dek)
                             if dek is not None
                             else encrypt_content(self.content))
@@ -1077,6 +1153,56 @@ class Node(db.Model):
         if not self.streaming_content:
             return ""
         return decrypt_content(self.streaming_content)
+
+    # ----- Tool record ------------------------------------------------------
+
+    @hybrid_property
+    def tool_calls_meta(self):
+        """The reply's tool record as JSON text (a list of entries), or
+        None. Read from the stored form (utils/tool_record); the result
+        is kept on the instance while the stored value stays the same, so
+        the many readers of one request decrypt it once."""
+        stored = self.tool_calls_meta_stored
+        if not stored:
+            return stored
+        cached = self.__dict__.get("_tool_record_read")
+        if cached is not None and cached[0] == stored:
+            return cached[1]
+        text = tool_record.read(stored)
+        self.__dict__["_tool_record_read"] = (stored, text)
+        return text
+
+    @tool_calls_meta.inplace.setter
+    def _set_tool_calls_meta(self, value):
+        """Store the tool record. Whatever the reply's privacy level: the
+        full record is its owner's only (utils/tool_meta), so it is
+        encrypted under a public reply too. The data key is the one the
+        entry's text is stored under when there is one; then the
+        record's own earlier key; else a new one. set_content takes the
+        record's key in turn, so a reply's text and record stay under
+        one key whichever is written first, and reading both is one
+        key-service call (a public reply's record, and a reply whose
+        text was written with a bulk writer's key after its record,
+        have a key of their own)."""
+        if not value:
+            self.tool_calls_meta_stored = value
+            self.__dict__.pop("_tool_record_read", None)
+            return
+        if self.tool_calls_meta_stored:
+            try:
+                if self.tool_calls_meta == value:
+                    return   # unchanged: the row is not written again
+            except Exception:  # noqa: BLE001 - unreadable: replaced below
+                pass
+        stored = tool_record.store(
+            value, near=(self.content, self.tool_calls_meta_stored))
+        self.tool_calls_meta_stored = stored
+        self.__dict__["_tool_record_read"] = (stored, value)
+
+    @tool_calls_meta.inplace.expression
+    @classmethod
+    def _tool_calls_meta_expression(cls):
+        return cls.tool_calls_meta_stored
 
 @event.listens_for(Node, "before_insert")
 @event.listens_for(Node, "before_update")
@@ -1341,6 +1467,9 @@ class UserProfile(db.Model):
     tts_task_id = db.Column(db.String(255), nullable=True)
     tts_task_status = db.Column(db.String(20), nullable=True)
     tts_task_progress = db.Column(db.Integer, default=0)
+    # When the current speech run was started by the route
+    # (utils/audio_storage.claim_tts_start, PROFILE_TTS_START_HELD_FOR).
+    tts_requested_at = db.Column(db.DateTime, nullable=True)
 
     # Relationship back to user
     user = db.relationship("User", backref="profiles")
@@ -1466,11 +1595,22 @@ class UserArtifact(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
     # Slug identifying the artifact across versions, e.g. "memory".
     kind = db.Column(db.String(48), nullable=False, index=True)
-    title = db.Column(db.String(128), nullable=False)
+    # The title and the description are the user's words (or the AI's,
+    # from the user's writing), so they are stored like the text:
+    # encrypted, in title_enc / description_enc. Code reads and writes
+    # ``title`` and ``description`` below. The two plain columns hold the
+    # values of versions written before (title_enc NULL marks such a
+    # row: a column, not a prefix inside the text, says which form a row
+    # is in) and of every row while encryption is off; on an encrypted
+    # row they are '' and NULL. Not usable in SQL filters or sorting.
+    title_plain = db.Column("title", db.String(128), nullable=False)
+    title_enc = db.Column(db.Text, nullable=True)
     # One-line summary of what this artifact is for / contains. Powers the
     # agentic artifacts index (so the AI can judge what to read) and the nav
     # dropdown subtitle. Carried forward across versions like title.
-    description = db.Column(db.String(255), nullable=True)
+    description_plain = db.Column("description", db.String(255),
+                                  nullable=True)
+    description_enc = db.Column(db.Text, nullable=True)
     content = db.Column(db.Text, nullable=False)
     generated_by = db.Column(db.String(64), nullable=False)
     # LLM tokens a job spent on this version; 0 for the user's saves,
@@ -1563,11 +1703,88 @@ class UserArtifact(db.Model):
     SYSTEM_KINDS = (frozenset(DEFAULT_KINDS) | frozenset(RESERVED_KINDS)
                     | {"external_digest"})
 
+    def _row_key(self):
+        """The data key for this row's values, or None for a new one.
+
+        The one a value of the row is already stored under: the text,
+        the title and the description of a version share one key, so
+        reading all three is one key-service call, as reading the text
+        alone was. Else the key of the artifact's version before this
+        one: the versions list shows every version's title without its
+        text, and with one key down the history that is one call, not
+        one per version."""
+        from backend.utils.encryption import dek_of
+        for stored in (self.content, self.title_enc, self.description_enc):
+            key = dek_of(stored)
+            if key is not None:
+                return key
+        return self._earlier_version_key()
+
+    def _earlier_version_key(self):
+        """The data key of the newest other live version of this
+        artifact, or None (no such version, or the row does not say yet
+        whose artifact it is: writers name the account and the kind
+        first)."""
+        from backend.utils.encryption import dek_of
+        if self.user_id is None or not self.kind:
+            return None
+        cls = type(self)
+        with db.session.no_autoflush:
+            query = db.session.query(
+                cls.content, cls.title_enc, cls.description_enc,
+            ).filter(cls.user_id == self.user_id, cls.kind == self.kind,
+                     cls.deleted_at.is_(None))
+            if self.id is not None:
+                query = query.filter(cls.id != self.id)
+            earlier = query.order_by(
+                cls.created_at.desc(), cls.id.desc()).first()
+        for stored in earlier or ():
+            key = dek_of(stored)
+            if key is not None:
+                return key
+        return None
+
     def set_content(self, plaintext):
-        self.content = encrypt_content(plaintext)
+        key = self._row_key()
+        self.content = (encrypt_with_dek(plaintext, key) if key is not None
+                        else encrypt_content(plaintext))
 
     def get_content(self):
         return decrypt_content(self.content)
+
+    def _sealed(self, value):
+        """*value* (not None) encrypted under the row's key, or a new
+        one. Always encrypts: a title is text and may look like a stored
+        value. The empty string stays empty."""
+        from backend.utils.encryption import new_dek
+        return encrypt_with_dek(value, self._row_key() or new_dek())
+
+    @property
+    def title(self):
+        if self.title_enc is not None:
+            return decrypt_content(self.title_enc)
+        return self.title_plain
+
+    @title.setter
+    def title(self, value):
+        if value is None or not is_encryption_enabled():
+            self.title_plain, self.title_enc = value, None
+        else:
+            self.title_enc, self.title_plain = self._sealed(value), ""
+
+    @property
+    def description(self):
+        if self.description_enc is not None:
+            return decrypt_content(self.description_enc)
+        return self.description_plain
+
+    @description.setter
+    def description(self, value):
+        if value is None or not is_encryption_enabled():
+            self.description_plain, self.description_enc = value, None
+        else:
+            self.description_enc = self._sealed(value)
+            self.description_plain = None
 
     @classmethod
     def is_deletable_kind(cls, kind):
@@ -2321,6 +2538,10 @@ class PollResponse(db.Model):
     generated_by = db.Column(db.String(64), nullable=True)
     draft_task_id = db.Column(db.String(255), nullable=True)
     draft_requested_at = db.Column(db.DateTime, nullable=True)
+    # How many drafts the user asked for on this answer (routes/updates
+    # MAX_DRAFTS_PER_ANSWER).
+    draft_count = db.Column(db.Integer, nullable=False, default=0,
+                            server_default="0")
     sent_at = db.Column(db.DateTime, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow,
@@ -3111,16 +3332,19 @@ class DiscountCodeAttempt(db.Model):
 
 
 class BillingRequest(db.Model):
-    """A checkout started or a subscription synced by an account (#697),
-    for the hourly limits on both (CHECKOUT_STARTS_PER_HOUR,
-    BILLING_SYNCS_PER_HOUR; utils/billing_limits). Only who, which and
-    when."""
+    """A checkout started, a subscription synced or the billing page
+    (Stripe's portal) opened by an account (#697), for the hourly limits
+    on each (CHECKOUT_STARTS_PER_HOUR, BILLING_SYNCS_PER_HOUR,
+    BILLING_PORTALS_PER_HOUR; utils/billing_limits), or a call to the paid
+    X API it started (a bookmark sync by hand, an invite's handle lookup),
+    for the daily limits on those. Only who, which and when."""
     __tablename__ = "billing_request"
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=False, index=True)
-    # "checkout" or "sync".
+    # "checkout", "sync", "portal", "x_bookmark_sync" or "x_invite_lookup"
+    # (at most 16 characters).
     kind = db.Column(db.String(16), nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow, index=True)
@@ -3138,6 +3362,29 @@ class TrialCard(db.Model):
     card_hash = db.Column(db.String(64), nullable=False, unique=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
                         nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False,
+                           default=datetime.utcnow)
+
+
+class TrialAlert(db.Model):
+    """A UTC day on which the admin was emailed about the trials of
+    accounts not prepared in advance (utils/trial_alerts): one row per day
+    and kind, so each email goes out at most once a day. ``kind``
+    "trials": more trials started than the email's number (``trials`` is
+    that count). ``kind`` "hold": the waiting list took effect, a new
+    account was held for approval (``trials`` is the places taken then).
+    Holds counts, nothing of any account.
+    """
+    __tablename__ = "trial_alert"
+    __table_args__ = (
+        db.UniqueConstraint("day", "kind", name="uq_trial_alert_day_kind"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    day = db.Column(db.String(10), nullable=False)  # YYYY-MM-DD
+    kind = db.Column(db.String(16), nullable=False, default="trials",
+                     server_default="trials")
+    trials = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, nullable=False,
                            default=datetime.utcnow)
 

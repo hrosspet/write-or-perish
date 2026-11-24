@@ -11,6 +11,8 @@ enum MagicLink {
         // Back from X without a sign-in (#704): Cancel on X's page, or an error.
         "x_cancelled": "Sign in with X was cancelled.",
         "x_failed": "Sign in with X did not finish. Please try again.",
+        // Started many times from this network (backend/oauth.py).
+        "x_wait": "Sign in with X was started many times from this network. Please wait a few minutes, then try again.",
     ]
 
     static let genericFailure = "That link didn't sign you in. Please request a new one."

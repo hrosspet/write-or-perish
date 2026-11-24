@@ -31,6 +31,14 @@ With payments on:
   wins over the mark: Activate, Activate & Welcome, a whitelist or a
   pre-fill. Unmarking alone approves nothing.
 
+* From OUTSIDE_TRIALS_HOLD_PER_DAY new accounts not prepared in advance
+  in 24 hours, the next such account is not let in at its first request
+  (``let_in_at_gate``; utils/trial_alerts has the rule and the count). It
+  waits for the admin's approval as every account does while payments are
+  off: the same 403 text, the same waiting page in both apps, the same
+  "New signup" email asking for approval, and Activate in the Users tab.
+  An account prepared in advance and one already approved are never held.
+
 With payments off again, an account the gate let in by itself, without the
 paid set and never paid, waits for approval like a new one
 (``waiting_again``): nobody gets the alpha's free replies by having signed
@@ -118,6 +126,38 @@ def counts_as_approved(user, config=None):
                 and not held_as_spam(user, config))
 
 
+def may_be_let_in(user, config=None, automatic=True):
+    """Whether ``let_in`` would approve *user*: payments on, never
+    approved, not marked as spam (for the gate), not being deleted, not a
+    system account."""
+    if not approval_waived(config) or not never_approved(user):
+        return False
+    if automatic and getattr(user, "spam", False):
+        return False
+    if user.deleted_at is not None:
+        return False
+    from backend.utils.system_accounts import SYSTEM_USERNAMES
+    return user.username not in SYSTEM_USERNAMES
+
+
+def let_in_at_gate(user, now=None, config=None):
+    """The request gate's ``let_in``: the same, except that a new account
+    not prepared in advance waits for the admin's approval once the day's
+    number of such accounts is reached (utils/trial_alerts.held_at_gate),
+    and keeps waiting until the admin approves it. The count and the
+    approval are one transaction, which the caller commits. Returns True
+    when the account is let in (now, or by another request a moment
+    ago)."""
+    if not may_be_let_in(user, config=config):
+        return False
+    from backend.utils.trial_alerts import held_at_gate
+    if held_at_gate(user, now=now, config=config):
+        return False
+    if user.approved:
+        return True
+    return let_in(user, now=now, config=config)
+
+
 def let_in(user, now=None, config=None, automatic=True):
     """Payments on: approve *user* when it was never approved (not one the
     admin blocked, not a system account, not one being deleted). It goes
@@ -128,18 +168,12 @@ def let_in(user, now=None, config=None, automatic=True):
     admin's whitelist or pre-fill; the gate never lets in an account the
     admin marked as spam (#713). Does not commit. Returns True when it
     approved the account."""
-    if not approval_waived(config) or not never_approved(user):
-        return False
-    if automatic and getattr(user, "spam", False):
-        return False
-    if user.deleted_at is not None:
-        return False
-    from backend.utils.system_accounts import SYSTEM_USERNAMES
-    if user.username in SYSTEM_USERNAMES:
+    if not may_be_let_in(user, config=config, automatic=automatic):
         return False
     now = now or datetime.utcnow()
     user.approved = True
     user.approved_at = now
+    user.approval_hold_at = None
     if automatic:
         user.let_in_at = now
     if user.plan == "alpha" and not user.is_admin \
@@ -154,6 +188,7 @@ def approved_by_hand(user):
     by itself, nor one waiting to be unblocked. Does not commit."""
     user.let_in_at = None
     user.approved_before_block = None
+    user.approval_hold_at = None
 
 
 def block(user, now=None):
@@ -297,13 +332,18 @@ def signup_notice_due(user, config=None):
     terms for the first time (#715): None, SIGNUP_NOTICE_APPROVAL (payments
     off, an account waiting for approval, as always) or SIGNUP_NOTICE_INFO
     (payments on: nobody waits, so an information email, no approval
-    request). None when no admin has the setting on, and for an account
-    that accepted terms before (a terms update is not a signup)."""
+    request; an account the gate holds for approval because the day's
+    number of new accounts was reached asks for it, as with payments
+    off). None when no admin has the setting on, and for an account that
+    accepted terms before (a terms update is not a signup)."""
     if user.accepted_terms_at is not None:
         return None
     if not signup_notice_wanted():
         return None
     if approval_waived(config):
+        from backend.utils.trial_alerts import waits_for_approval
+        if waits_for_approval(user):
+            return SIGNUP_NOTICE_APPROVAL
         return SIGNUP_NOTICE_INFO
     if counts_as_approved(user, config):
         return None

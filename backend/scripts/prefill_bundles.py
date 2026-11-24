@@ -431,11 +431,14 @@ def run_export(storage, *, dry_run=False, only=None, limit=None, force=False,
     from backend.extensions import db
     from backend.models import User
     from backend.utils import prefill_bundles as pb
-    from backend.utils.encryption import is_encryption_enabled
-    if is_encryption_enabled():
-        sys.exit("Content is encrypted here: export runs only on the lab, "
-                 "where the pre-filled material is stored unencrypted. "
-                 "Exporting here would decrypt users' writing.")
+    from backend.utils.encryption import reads_decrypt
+    if reads_decrypt():
+        # Also with encryption off and a key name set: what was stored
+        # encrypted earlier is decrypted on read there.
+        sys.exit("Content is encrypted here, or a key name is set: export "
+                 "runs only on the lab, where the pre-filled material is "
+                 "stored unencrypted and no key name is set. Exporting "
+                 "here would decrypt users' writing.")
     snapshot = (check_archive_snapshot(archive_snapshot)
                 if not dry_run or archive_snapshot else None)
     excluded = pb.excluded_x_ids(storage)

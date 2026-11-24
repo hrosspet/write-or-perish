@@ -25,14 +25,19 @@ does not say whether a file exists. Files only signed-in viewers may fetch
 are sent with ``Cache-Control: private`` so no shared cache stores them.
 
 Encrypted files (``.enc``) are decrypted on the fly when GCP KMS
-encryption is enabled. HTTP Range requests are supported for seeking.
+encryption is enabled, into an unnamed temporary file that is streamed
+and closed with the response, at most MEDIA_DECRYPTS_PER_WORKER at once
+in a worker. HTTP Range requests are supported for seeking.
 """
 
-from flask import Blueprint, jsonify, send_file, Response, request, current_app
+from flask import Blueprint, jsonify, send_file, request, current_app
 from flask_login import current_user
 from urllib.parse import unquote
+from werkzeug.wsgi import FileWrapper
 import os
 import pathlib
+import tempfile
+import threading
 
 # Root storage folder mirrors the setting in nodes blueprint.
 MEDIA_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
@@ -47,6 +52,17 @@ OWNER_DIRS = ("user", "nodes", "drafts", "chunks", "streaming")
 # generated speech carries a ?v= query that changes when it is regenerated.
 PUBLIC_CACHE_CONTROL = "public, max-age=86400"
 PRIVATE_CACHE_CONTROL = "private, max-age=86400"
+
+# Heuristics: how many encrypted files one web worker decrypts at once, and
+# how long a request waits for its turn before it is answered 503. A
+# decryption holds the whole file twice in memory for a moment (ciphertext
+# and plaintext: about 400 MB for a 200 MB upload) and takes well under a
+# second for the files the apps play; a player fetches one file at a time.
+MEDIA_DECRYPTS_PER_WORKER = 2
+MEDIA_DECRYPT_WAIT_SECONDS = 30
+
+# threading's semaphore is gevent's under the gevent workers.
+_decrypt_slots = threading.BoundedSemaphore(MEDIA_DECRYPTS_PER_WORKER)
 
 
 def _not_found():
@@ -138,49 +154,46 @@ def _cache_control_for(rel_path):
     return None
 
 
-def _serve_bytes_with_range(data: bytes, mime_type: str, filename: str):
-    """Serve binary data with HTTP Range request support for seeking."""
-    total_length = len(data)
-
-    range_header = request.headers.get('Range')
-    if range_header:
-        # Parse Range header: "bytes=start-end"
+def _decrypted_copy(file_path):
+    """``(file, size)``: *file_path* decrypted into an unnamed temporary
+    file (it has no name on disk, so nothing of it outlives the response
+    or the process), positioned at its start. None when no decryption
+    slot frees up within MEDIA_DECRYPT_WAIT_SECONDS. Raises when the file
+    cannot be decrypted."""
+    from backend.utils.encryption import decrypt_file
+    if not _decrypt_slots.acquire(timeout=MEDIA_DECRYPT_WAIT_SECONDS):
+        return None
+    try:
+        data = decrypt_file(str(file_path))
+        copy = tempfile.TemporaryFile()
         try:
-            range_spec = range_header.replace('bytes=', '')
-            parts = range_spec.split('-')
-            start = int(parts[0]) if parts[0] else 0
-            end = int(parts[1]) if parts[1] else total_length - 1
-        except (ValueError, IndexError):
-            start = 0
-            end = total_length - 1
+            copy.write(data)
+            copy.flush()
+            copy.seek(0)
+        except BaseException:
+            copy.close()
+            raise
+        return copy, len(data)
+    finally:
+        _decrypt_slots.release()
 
-        # Clamp to valid range
-        start = max(0, min(start, total_length - 1))
-        end = max(start, min(end, total_length - 1))
-        content_length = end - start + 1
 
-        return Response(
-            data[start:end + 1],
-            status=206,
-            mimetype=mime_type,
+def _serve_open_file(copy, size, mime_type: str, filename: str):
+    """Serve the open file *copy* of *size* bytes, streamed from disk,
+    with HTTP Range support for seeking (206 with Content-Range). The
+    server closes the file when the response ends."""
+    try:
+        response = current_app.response_class(
+            FileWrapper(copy), mimetype=mime_type, direct_passthrough=True,
             headers={
-                'Content-Range': f'bytes {start}-{end}/{total_length}',
-                'Content-Length': content_length,
-                'Accept-Ranges': 'bytes',
                 'Content-Disposition': f'inline; filename="{filename}"',
-            }
-        )
-
-    # No Range header — serve the full content
-    return Response(
-        data,
-        mimetype=mime_type,
-        headers={
-            'Content-Length': total_length,
-            'Accept-Ranges': 'bytes',
-            'Content-Disposition': f'inline; filename="{filename}"',
-        }
-    )
+            })
+        response.content_length = size
+        return response.make_conditional(
+            request.environ, accept_ranges=True, complete_length=size)
+    except BaseException:
+        copy.close()
+        raise
 
 
 @media_bp.route("/<path:filename>")
@@ -199,16 +212,18 @@ def serve_media(filename):
         response = send_file(file_path)
 
     else:
-        from backend.utils.encryption import decrypt_file, is_encryption_enabled
+        from backend.utils.encryption import reads_decrypt
 
-        if not is_encryption_enabled():
+        if not reads_decrypt():
             return jsonify({"error": "Encrypted file found but encryption is disabled"}), 500
 
         try:
-            decrypted_content = decrypt_file(str(file_path))
+            copy = _decrypted_copy(file_path)
         except Exception:
             # decrypt_file logs the failure (type only reaches Sentry)
             return jsonify({"error": "Failed to decrypt file"}), 500
+        if copy is None:
+            return jsonify({"error": "Busy, please try again"}), 503
 
         # Determine mime type from the extension before ".enc"
         plain_name = file_path.name[:-len(".enc")]
@@ -223,9 +238,7 @@ def serve_media(filename):
         }
         mime_type = mime_types.get(ext, 'application/octet-stream')
 
-        response = _serve_bytes_with_range(
-            decrypted_content, mime_type, plain_name
-        )
+        response = _serve_open_file(*copy, mime_type, plain_name)
 
     response.headers["Cache-Control"] = cache_control
     return response

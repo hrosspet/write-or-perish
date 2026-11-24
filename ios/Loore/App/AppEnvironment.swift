@@ -66,6 +66,12 @@ enum AppEnvironment: String, CaseIterable, Identifiable, Sendable {
         return hosts
     }
 
+    /// The hosts of this environment's backend and web frontend: where a web
+    /// view that carries the session stays.
+    var sessionHosts: Set<String> {
+        Set([backendOrigin.host, frontendOrigin.host].compactMap { $0?.lowercased() })
+    }
+
     func url(path: String) -> URL {
         URL(string: path, relativeTo: backendOrigin)!.absoluteURL
     }

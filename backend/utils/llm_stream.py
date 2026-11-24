@@ -15,7 +15,7 @@ from sqlalchemy import update
 
 from backend.extensions import db
 from backend.models import Node
-from backend.utils.encryption import encrypt_with_dek, new_dek
+from backend.utils.encryption import encrypt_with_dek, is_encrypted, new_dek
 from backend.utils.timefmt import _LEADING_STAMPS_RE, _TRAILING_STAMPS_RE
 from backend.utils.tts_stream_text import _is_marker_prefix, _is_stamp_prefix
 
@@ -92,9 +92,13 @@ class PartialTextWriter:
         text = partial_display_text("".join(self._raw), self._canonicalize)
         if text == self._written:
             return
-        if text and not self._public and self._dek is None:
+        # A public reply's partial text is stored as it is, except text
+        # that begins with ENC:v1:/ENC:v2:, which reads decrypt by that
+        # prefix: it is encrypted, as Node.set_content does.
+        sealed = not self._public or is_encrypted(text)
+        if text and sealed and self._dek is None:
             self._dek = new_dek()
-        value = (text if self._public else encrypt_with_dek(text, self._dek))
+        value = encrypt_with_dek(text, self._dek) if sealed else text
         db.session.execute(
             update(Node).where(Node.id == self._node_id).values(
                 streaming_content=value or None,

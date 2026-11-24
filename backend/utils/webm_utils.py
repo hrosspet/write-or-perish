@@ -33,6 +33,20 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# The containers the apps record and upload audio in, as ffmpeg's demuxer
+# names: MP3, MP4 and M4A ("mov": the iPhone app, Safari), WebM
+# ("matroska": browsers), Ogg, WAV, FLAC, AAC and MPEG. Every ffmpeg and
+# ffprobe call on stored or uploaded audio passes INPUT_FORMAT_ARGS before
+# its input, so a file is read only as one of these, whatever its name or
+# its first bytes say: a playlist or list that names other files is
+# refused.
+AUDIO_INPUT_FORMATS = "mp3,mov,matroska,ogg,wav,flac,aac,mpeg"
+INPUT_FORMAT_ARGS = ["-format_whitelist", AUDIO_INPUT_FORMATS]
+# For a concat list this module writes itself; the files it names are read
+# with the same list.
+CONCAT_INPUT_FORMAT_ARGS = ["-format_whitelist",
+                            "concat," + AUDIO_INPUT_FORMATS]
+
 # A deadline (a time.monotonic() value) for the merge's ffmpeg work, set by
 # a caller that has one for all its audio work (the batch transcription
 # task): each ffmpeg call in concat_fragmented_media then gets the time left
@@ -66,7 +80,7 @@ def get_webm_duration(filepath: str) -> Optional[float]:
     try:
         result = subprocess.run(
             [
-                'ffprobe', '-v', 'error',
+                'ffprobe', '-v', 'error', *INPUT_FORMAT_ARGS,
                 '-show_entries', 'format=duration',
                 '-of', 'csv=p=0',
                 filepath
@@ -460,7 +474,7 @@ def concat_fragmented_media(paths: list,
         fd, out_path = tempfile.mkstemp(suffix=output_suffix, prefix='merged_')
         os.close(fd)
         result = subprocess.run(
-            ['ffmpeg', '-y', '-fflags', '+genpts',
+            ['ffmpeg', '-y', '-fflags', '+genpts', *INPUT_FORMAT_ARGS,
              '-i', raw_path, '-c', 'copy', out_path],
             capture_output=True, text=True, timeout=_timeout(120),
         )
@@ -554,7 +568,8 @@ def _mp4_durations(path: str):
     change."""
     try:
         result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+            ['ffprobe', '-v', 'error', *INPUT_FORMAT_ARGS,
+             '-select_streams', 'a:0',
              '-count_packets', '-show_entries',
              'stream=codec_name,sample_rate,nb_read_packets:format=duration',
              '-of', 'default=noprint_wrappers=1', path],
@@ -586,10 +601,10 @@ def _rebuild_from_decoded_audio(raw_path: str, work_dir: str) -> str:
     wav_path = os.path.join(work_dir, 'audio.wav')
     rebuilt = os.path.join(work_dir, 'rebuilt.mp4')
     for cmd in (
-        ['ffmpeg', '-y', '-i', raw_path, '-vn', '-c:a', 'pcm_s16le',
-         wav_path],
-        ['ffmpeg', '-y', '-i', wav_path, '-c:a', 'aac', '-b:a', '64k',
-         rebuilt],
+        ['ffmpeg', '-y', *INPUT_FORMAT_ARGS, '-i', raw_path, '-vn',
+         '-c:a', 'pcm_s16le', wav_path],
+        ['ffmpeg', '-y', *INPUT_FORMAT_ARGS, '-i', wav_path, '-c:a', 'aac',
+         '-b:a', '64k', rebuilt],
     ):
         r = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=_timeout(600))
@@ -716,7 +731,7 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm',
             for i, p in enumerate(paths):
                 wav_path = os.path.join(wav_dir, f'part_{i:04d}.wav')
                 r = subprocess.run(
-                    ['ffmpeg', '-y', '-i', p,
+                    ['ffmpeg', '-y', *INPUT_FORMAT_ARGS, '-i', p,
                      '-c:a', 'pcm_s16le', '-ar', '48000', '-ac', '1',
                      wav_path],
                     capture_output=True, text=True, timeout=600,
@@ -739,7 +754,7 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm',
             os.close(fd)
             r = subprocess.run(
                 ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-                 '-i', list_path,
+                 *CONCAT_INPUT_FORMAT_ARGS, '-i', list_path,
                  '-c:a', reencode_codec, '-b:a', '128k', out_path],
                 capture_output=True, text=True, timeout=600,
             )
@@ -768,7 +783,8 @@ def concat_audio_files(paths: list, output_suffix: str = '.webm',
 
         result = subprocess.run(
             ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
-             '-i', concat_path, '-c', 'copy', out_path],
+             *CONCAT_INPUT_FORMAT_ARGS, '-i', concat_path, '-c', 'copy',
+             out_path],
             capture_output=True, text=True, timeout=600,
         )
         if result.returncode != 0:

@@ -375,7 +375,7 @@ function MarkdownImage({ node, src, alt, ...props }) {
 }
 
 function MarkdownLink({ node, children, href, ...props }) {
-  const { onInternalLinkClick, inRouter } = React.useContext(MarkdownContext);
+  const { onInternalLinkClick, inRouter, guestLinks } = React.useContext(MarkdownContext);
   const nodeId = href ? parseNodeLink(href) : null;
   if (nodeId !== null && isBareUrlLink(children, href)) {
     // Keyed on the target: the link component now survives re-renders, so an
@@ -407,7 +407,7 @@ function MarkdownLink({ node, children, href, ...props }) {
       href={href}
       style={{ color: 'var(--accent)', textDecoration: 'underline' }}
       target="_blank"
-      rel="noopener noreferrer"
+      rel={guestLinks ? 'noopener noreferrer nofollow ugc' : 'noopener noreferrer'}
       onClick={(e) => e.stopPropagation()}
       {...props}
     ><InsideLinkContext.Provider value>{children}</InsideLinkContext.Provider></a>
@@ -476,6 +476,9 @@ const REMARK_PLUGINS = [remarkGfm, remarkHtmlAsCode];
  *     modal closes itself and navigates in-tab, since a new tab would just
  *     show the same unread modal again. External links keep opening in a
  *     new tab regardless.
+ *   guestLinks: the text is a reply under another person's public piece;
+ *     its outside links tell search engines not to follow them, as the
+ *     server-rendered public page does (backend/utils/public_html.py).
  */
 // flowText: render paragraphs with standard markdown soft-wrap semantics
 // (single source newlines flow into the line) instead of the default
@@ -486,14 +489,14 @@ const REMARK_PLUGINS = [remarkGfm, remarkHtmlAsCode];
 // inline: render a single line of markdown as phrasing content (a <span>
 // wrapper, paragraphs as <span>s) so it can sit inside an existing label —
 // e.g. a Todo item's text — instead of forcing block layout.
-const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, inline = false, onCheckboxToggle, onAddTask, onInternalLinkClick }) => {
+const MarkdownBody = ({ children, style, paragraphMargin = '0.5em 0', flowText = false, inline = false, onCheckboxToggle, onAddTask, onInternalLinkClick, guestLinks = false }) => {
   const [addingAfter, setAddingAfter] = React.useState(null);
   // MarkdownBody renders inside the app's BrowserRouter, but unit tests and
   // any future router-less host must not crash on useNavigate.
   const inRouter = useInRouterContext();
   const context = React.useMemo(
-    () => ({ onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter, setAddingAfter }),
-    [onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter],
+    () => ({ onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter, setAddingAfter, guestLinks }),
+    [onCheckboxToggle, onAddTask, onInternalLinkClick, inRouter, addingAfter, guestLinks],
   );
   // Memoized on the layout props only: everything that changes from render
   // to render reaches `li` and `a` through MarkdownContext (see above).

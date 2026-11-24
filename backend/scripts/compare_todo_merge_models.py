@@ -190,6 +190,7 @@ from backend.extensions import db  # noqa: E402
 from backend.models import (  # noqa: E402
     APICostLog, Node, NodeVersion, User, UserPrompt, UserTodo)
 from backend.utils.privacy import AI_ALLOWED, account_allows_ai  # noqa: E402
+from backend.utils import tool_record  # noqa: E402
 
 DEFAULT_MODELS = ["gpt-6-luna"]
 DEFAULT_LIMIT = 20
@@ -376,7 +377,9 @@ def load_applied_proposals(user_id):
     ).order_by(Node.created_at, Node.id).all()
     applied = []
     for row in rows:
-        done, truncated = _proposal_state(row.tool_calls_meta)
+        # The column as selected is the stored value.
+        done, truncated = _proposal_state(
+            tool_record.read(row.tool_calls_meta))
         if done:
             applied.append({
                 "id": row.id, "created_at": row.created_at,

@@ -35,7 +35,9 @@ from backend.llm_providers import (
     LLMProvider, ProviderAccountError, is_refused, policy_block_code)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
-from backend.utils import refusal_backoff
+from backend.utils.encryption import key_service_unavailable
+from backend.utils.error_privacy import describe_exception
+from backend.utils import refusal_backoff, soft_limit
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.approval import background_work_allowed, not_active
@@ -308,7 +310,22 @@ def _submit_digest_batch(users):
     for user in users:
         # Stamped BEFORE the corpus is read (see _save_digest).
         corpus_at = datetime.utcnow()
-        rendered = _render_digest_prompt(user.id)
+        try:
+            rendered = _render_digest_prompt(user.id)
+        except Exception as e:  # noqa: BLE001 — one account's render
+            # One account whose references cannot be read is left out of
+            # this run, not every account due in it. Nothing is written
+            # for it, so it is due again in its next night. A key-service
+            # outage ends the run as before (every account would wait out
+            # its own retries).
+            soft_limit.reraise(e)
+            if key_service_unavailable(e):
+                raise
+            db.session.rollback()
+            logger.warning("Digest for user %s skipped: its references "
+                           "could not be read (%s)", user.id,
+                           describe_exception(e))
+            continue
         if rendered is None:
             continue
         prompt_text, total = rendered

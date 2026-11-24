@@ -15,6 +15,10 @@ final class AudioCenter {
     @ObservationIgnored let sounds = SoundPlayer()
     @ObservationIgnored let session = AudioSessionController()
     @ObservationIgnored let nowPlaying = NowPlayingController()
+    /// Decides between the entry's heading and a fixed title in Now Playing.
+    @ObservationIgnored var lockState: DeviceLockState = SystemLockState() {
+        didSet { lockState.onChange = { [weak self] in self?.refreshNowPlaying() } }
+    }
     @ObservationIgnored let liveActivity = VoiceLiveActivity()
     /// A refused Voice turn's sentence (#651): its clip, else the device's speech.
     @ObservationIgnored let refusalVoice = RefusalVoice()
@@ -77,6 +81,7 @@ final class AudioCenter {
         }
         session.onEvent = { [weak self] event in self?.handleSessionEvent(event) }
         liveActivity.onEnded = { [weak self] in self?.refreshNowPlaying() }
+        lockState.onChange = { [weak self] in self?.refreshNowPlaying() }
         refusalVoice.fetch = { [weak self] refusal in await self?.refusalClip(refusal) }
         refusalVoice.playClip = { [refusalClips] data in await refusalClips.play(data) }
         refusalVoice.stopClip = { [refusalClips] in refusalClips.stop() }
@@ -395,6 +400,7 @@ final class AudioCenter {
     // MARK: Lock screen
 
     func refreshNowPlaying() {
+        lockState.playbackChanged(playing: player.isLoaded && player.isPlaying)
         if let voice = voiceController {
             liveActivity.sync(VoiceLiveActivity.state(turn: voice.state, isPaused: voice.isPaused,
                                                       isInterrupted: voice.isInterrupted,
@@ -441,9 +447,14 @@ final class AudioCenter {
                                     skip: { [weak self] in self?.player.skip(by: $0) },
                                     seek: { [weak self] in self?.player.seek(to: $0) },
                                     rate: { [weak self] in self?.player.setRate($0) })
-        var title = player.title.isEmpty ? "Loore" : player.title
-        if player.chapters.count > 1, let i = player.currentChapterIndex {
-            title += " — " + player.chapters[i].title
+        // Unlocked: the entry's title and the heading being read. Locked: one of
+        // two fixed titles; the entry's own words stay inside the app.
+        let title: String
+        if lockState.isLocked {
+            title = NowPlayingController.playbackTitle(voice: player.source == .voice)
+        } else {
+            let chapter = player.chapters.count > 1 ? player.currentChapterIndex.map { player.chapters[$0].title } : nil
+            title = NowPlayingController.playbackTitle(entry: player.title, chapter: chapter)
         }
         nowPlaying.update(.playback(title: title, elapsed: player.cumulativeTime, duration: player.totalDuration,
                                     rate: player.rate, playing: player.isPlaying))

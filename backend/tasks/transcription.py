@@ -104,8 +104,8 @@ def _start_upload_reply(node, tip, model_id):
             record_task_warning(node, subscription_required_message(owner))
             return None
     from backend.utils.llm_nodes import (
-        AIUsageRefused, ReadOnlyModelRefused, auto_generate_refusal,
-        create_llm_placeholder,
+        AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
+        auto_generate_refusal, create_llm_placeholder,
     )
     # The entry may have been made public (or shared with circles) while
     # it was transcribed: no automatic reply there (Peter, 2026-11-12).
@@ -132,8 +132,9 @@ def _start_upload_reply(node, tip, model_id):
             message = UPLOAD_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
             message = f"Your entry is saved. {e.message}"
-        elif isinstance(e, ThreadTooLong):
-            # The thread's next prompt would be over the limit (#648).
+        elif isinstance(e, (ThreadTooLong, TooManyReplies)):
+            # The thread's next prompt would be over the limit (#648), or
+            # the account's replies in progress are at their bound.
             message = e.entry_message
         else:
             message = REPLY_NOT_STARTED_TEXT
@@ -410,6 +411,25 @@ def transcribe_audio(self, node_id: int, audio_file_path: str, filename: str = N
             node.transcription_status = 'completed'
             node.transcription_completed_at = datetime.utcnow()
             db.session.commit()
+            # A public upload that started a Text-mode thread gets its
+            # permalink now that its text is stored, in a transaction of
+            # its own (utils/slugs); the transcript is kept whatever
+            # happens here.
+            try:
+                from backend.utils.slugs import slug_transcribed_thread
+                if slug_transcribed_thread(node, transcript):
+                    db.session.commit()
+                    from backend.utils.public_cache import (
+                        invalidate_for_node,
+                    )
+                    invalidate_for_node(node)
+                else:
+                    db.session.rollback()
+            except Exception as e:
+                db.session.rollback()
+                logger.warning(
+                    "Node %s: no permalink given after transcription (%s)",
+                    node_id, type(e).__name__)
 
             logger.info(f"Transcription successful for node {node_id}: {len(transcript)} characters")
 

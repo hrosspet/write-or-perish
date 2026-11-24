@@ -118,8 +118,10 @@ def _read_batches():
         Node.id, Node.llm_task_status, Node.tool_calls_meta).filter(
         Node.node_type == "llm",
         Node.tool_calls_meta.like('%"_batch"%')).yield_per(500)
+    from backend.utils import tool_record
     for node_id, status, meta in rows:
-        for entry in _batch_entries(meta):
+        # The column as selected is the stored value.
+        for entry in _batch_entries(tool_record.read(meta)):
             batch_id = entry.get("batch_id")
             if ((entry.get("provider") or "anthropic") == "anthropic"
                     and batch_id):

@@ -14,6 +14,10 @@ CONDA_ENV="write-or-perish"
 PYTHON_VERSION="3.9"
 BACKEND_DIR="$PROJECT_DIR/backend"
 LOG_FILE="$PROJECT_DIR/deployment.log"
+# The full output of the schema commands goes only here, on the VM: what
+# this script prints is the Actions log of a public repo, and a database
+# error's text can quote a row's values. Readable by its owner only.
+touch "$LOG_FILE" && chmod 600 "$LOG_FILE" || true
 
 # Color output
 GREEN='\033[0;32m'
@@ -107,6 +111,22 @@ if [[ "$CURRENT_REMOTE" == https://* ]]; then
     log "Git remote updated to: $SSH_REMOTE"
 fi
 
+# Start check, before the schema step and before anything is stopped,
+# restarted or reloaded: the app is imported once with the new code and the
+# env file the services read (backend/__init__.py loads .env.production
+# itself). An app that refuses to start (a setting missing from the env
+# file, or one with a value the app does not take) then stops the deploy here,
+# while the running processes keep serving; without this check the reload
+# below would replace them with processes that cannot start. The reason
+# stays in deployment.log on the VM; this script prints fixed lines only.
+log "Checking that the app starts with this code and .env.production..."
+START_STATUS=0
+python -c "import backend.app" >> "$LOG_FILE" 2>&1 || START_STATUS=$?
+if [ "$START_STATUS" -ne 0 ]; then
+    error "The app does not start with this code and .env.production. Nothing was stopped, restarted or reloaded; the reason is in deployment.log on the VM"
+fi
+log "The app starts"
+
 # Database migrations.
 #
 # Services are stopped ONLY when a migration is actually pending, and only
@@ -133,8 +153,28 @@ export FLASK_APP="$BACKEND_DIR/app.py"
 if [ -d "migrations" ]; then
     # Auto-generate migrations if models changed (services stay up)
     log "Checking for model changes..."
-    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1) || true
-    echo "$MIGRATION_OUTPUT"
+    MIGRATE_STATUS=0
+    MIGRATION_OUTPUT=$(flask db migrate -m "auto-generated migration from deployment" 2>&1) || MIGRATE_STATUS=$?
+    # Kept on the VM only (see LOG_FILE); the lines below say what it did.
+    echo "$MIGRATION_OUTPUT" >> "$LOG_FILE"
+    if [ "$MIGRATE_STATUS" -ne 0 ]; then
+        # Without the generated migration the services below would
+        # restart on the new code against the old schema. One failure is
+        # expected and goes on: a migration that is already in
+        # migrations/versions and not applied yet (an earlier deploy
+        # stopped at its upgrade) makes `flask db migrate` refuse, and
+        # the upgrade below applies it. Any other failure ends the deploy
+        # here, before anything is stopped.
+        PENDING_CURRENT=$( (flask db current 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+        PENDING_HEAD=$( (flask db heads 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+        # (A database that cannot be reached gives no current revision:
+        # that is not this case, and ends the deploy too.)
+        if [ -n "$PENDING_CURRENT" ] && [ -n "$PENDING_HEAD" ] && [ "$PENDING_CURRENT" != "$PENDING_HEAD" ]; then
+            warn "flask db migrate exited with status $MIGRATE_STATUS while an earlier migration is not applied yet; it is applied below. Model changes of this deploy were not checked: deploy once more after this one. Its output is in deployment.log on the VM"
+        else
+            error "flask db migrate exited with status $MIGRATE_STATUS, so no migration was generated for this code. Nothing was stopped, restarted or reloaded by this deploy; its output is in deployment.log on the VM"
+        fi
+    fi
 
     if echo "$MIGRATION_OUTPUT" | grep -q "Generating"; then
         log "New migration generated, committing to git..."
@@ -162,7 +202,12 @@ if [ -d "migrations" ]; then
     if [ -n "$HEAD_REV" ] && [ "$CURRENT_REV" != "$HEAD_REV" ]; then
         log "Pending migration (${CURRENT_REV:-none} -> $HEAD_REV)"
         stop_services_for_upgrade
-        flask db upgrade || error "Database migration failed"
+        # Its output (and its error, if any) goes to LOG_FILE on the VM
+        # only; the redirect keeps the command's own exit status.
+        flask db upgrade >> "$LOG_FILE" 2>&1 \
+            || error "Database migration failed; the error is in deployment.log on the VM"
+        NEW_REV=$( (flask db current 2>/dev/null || true) | grep -oE '^[a-f0-9]+' | head -1 || true)
+        log "Database now at ${NEW_REV:-unknown}"
     else
         log "Database already at head (${HEAD_REV:-unknown}); no downtime needed"
     fi
@@ -200,6 +245,9 @@ fi
 
 # Install/update Gunicorn service
 log "Installing Gunicorn service..."
+# A changed unit file means a changed command line, which a reload (HUP)
+# does not pick up: the restart step below then restarts in full.
+GUNICORN_UNIT_CHANGED=0
 GUNICORN_SERVICE_SOURCE="$PROJECT_DIR/write-or-perish.service"
 GUNICORN_SERVICE_TARGET="/etc/systemd/system/write-or-perish.service"
 
@@ -215,6 +263,7 @@ if [ -f "$GUNICORN_SERVICE_SOURCE" ]; then
         sudo systemctl daemon-reload || error "Failed to reload systemd daemon"
 
         log "Gunicorn service file updated"
+        GUNICORN_UNIT_CHANGED=1
     else
         log "Gunicorn service file unchanged"
     fi
@@ -401,7 +450,9 @@ fi
 # fall back to a full restart.
 GUNICORN_PID=$(cat "$PROJECT_DIR/gunicorn.pid" 2>/dev/null || true)
 NEED_FULL_RESTART=1
-if [ "$SERVICES_STOPPED" -eq 0 ] && [ -n "$GUNICORN_PID" ] && sudo systemctl is-active --quiet write-or-perish; then
+if [ "$GUNICORN_UNIT_CHANGED" -eq 1 ]; then
+    log "Gunicorn service file changed — full restart instead of reload"
+elif [ "$SERVICES_STOPPED" -eq 0 ] && [ -n "$GUNICORN_PID" ] && sudo systemctl is-active --quiet write-or-perish; then
     MASTER_START=$(date -d "$(ps -o lstart= -p "$GUNICORN_PID" 2>/dev/null)" +%s 2>/dev/null || echo 0)
     ENV_MTIME=$(stat -c %Y "$PROJECT_DIR/.env.production" 2>/dev/null || echo 0)
     if [ "$MASTER_START" -gt 0 ] && [ "$ENV_MTIME" -le "$MASTER_START" ]; then

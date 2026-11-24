@@ -29,8 +29,14 @@ def stripe_key_from_env(name, sandbox_name, environ=None):
     return value or None
 
 
+# What SECRET_KEY is when the environment has none. Development and the
+# tests may run on it; production and staging do not start on it
+# (validate_keys in backend/__init__.py).
+PLACEHOLDER_SECRET_KEY = "this-should-be-changed"
+
+
 class Config:
-    SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
+    SECRET_KEY = os.environ.get("SECRET_KEY", PLACEHOLDER_SECRET_KEY)
     # Make sure your DATABASE_URL looks something like
     # "postgresql://username:password@localhost/writeorperish"
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", "postgresql://localhost/writeorperish")
@@ -221,7 +227,10 @@ class Config:
     # Monthly model-cost ceiling of a subscribed account, in USD (Peter,
     # 2026-11-12): the per-user spend cap for an account whose access
     # comes from its subscription. An admin's per-user limit still wins;
-    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD.
+    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD. It is counted
+    # over the subscription's paid period, not the calendar month
+    # (utils/spend.ceiling_period_start); an admin's limit and
+    # PER_USER_MONTHLY_LIMIT_USD are counted over the calendar month.
     SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD = float_from_env(
         "SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD", 50.0)
     SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER = float_from_env(
@@ -230,14 +239,27 @@ class Config:
         "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
     # Model cost a trial may use in all, whatever the level: nothing has
     # been paid yet. Counted from the trial's start, not per month. From
-    # the first successful payment the level's monthly ceiling applies, and
-    # it counts the whole calendar month, trial usage in that month
+    # the first successful payment the level's ceiling applies, and the
+    # first paid period counts from the trial's start, trial usage
     # included. 0: no separate trial ceiling. Peter, 2026-11-12: "let's go
     # with $30 for the free trial period, and if the user pays, extend
     # this to the subscription's cap" — a starting value, to be checked
     # with the prices before the switch is turned on.
     SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD = float_from_env(
         "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 30.0)
+    # Trials of accounts that were not prepared in advance, per 24 hours
+    # (backend/utils/trial_alerts.py; Peter, 2026-11-23: "One -> email me.
+    # A higher one -> hard stop, put them on a waiting list as it was in
+    # Alpha"). HEURISTICS, both: 10 for the email is Peter's number
+    # (2026-11-23); 20 for the waiting list was proposed to him with it.
+    # More than the first: one email to the admin a day, nothing stopped.
+    # From the second: a new such account waits for the admin's approval
+    # instead of going on to the trial. 0 turns a level off. Only while
+    # PAYMENTS_ENABLED is on.
+    OUTSIDE_TRIALS_EMAIL_PER_DAY = int(
+        float_from_env("OUTSIDE_TRIALS_EMAIL_PER_DAY", 10))
+    OUTSIDE_TRIALS_HOLD_PER_DAY = int(
+        float_from_env("OUTSIDE_TRIALS_HOLD_PER_DAY", 20))
     # Wrong discount codes one account may try per hour before the code
     # field answers "try again later". 10: a typo or two is never
     # refused, guessing an 8-character code is out of reach.
@@ -253,6 +275,11 @@ class Config:
         os.environ.get("CHECKOUT_STARTS_PER_HOUR") or "10")
     BILLING_SYNCS_PER_HOUR = int(
         os.environ.get("BILLING_SYNCS_PER_HOUR") or "20")
+    # INTRODUCED HEURISTIC: Stripe's billing page (the portal) opened per
+    # account per hour; each press makes a session there. A person
+    # changing a card or cancelling opens it a few times.
+    BILLING_PORTALS_PER_HOUR = int(
+        os.environ.get("BILLING_PORTALS_PER_HOUR") or "20")
     # One trial per card (#697, utils/trial_cards): the key of the card
     # fingerprint's hash. Unset: SECRET_KEY. Changing it (or SECRET_KEY
     # while it is unset) forgets every card that had a trial.
@@ -1008,7 +1035,11 @@ class Config:
     # GCP Cloud KMS configuration for content encryption at rest
     # Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
     GCP_KMS_KEY_NAME = os.environ.get("GCP_KMS_KEY_NAME")
-    # Set to "true" to disable encryption (for local development without GCP)
+    # "true" is the only thing that turns encryption off (local
+    # development, staging, tests), with or without a key name above.
+    # Without it the app starts only with the key name: see
+    # encryption_choice() in backend/utils/encryption.py, which reads
+    # the environment itself.
     ENCRYPTION_DISABLED = os.environ.get("ENCRYPTION_DISABLED", "false").lower() in ("true", "1", "yes")
 
     # Production Security Settings
