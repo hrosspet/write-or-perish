@@ -225,7 +225,8 @@ def _gleaning(owner, privacy):
 def _stored_prompt_entry(owner, parent, privacy, stamped=True,
                          message_privacy=None, text="anna earlier message"):
     """A prompt entry as an earlier version stored it: at *privacy*,
-    with a message under it (at *message_privacy*, default the same)."""
+    with a message under it (at *message_privacy*, default the same).
+    Without the stamp it dates from before the stamp existed."""
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.utils.prompts import get_user_prompt_record
     u = _user(owner)
@@ -237,7 +238,10 @@ def _stored_prompt_entry(owner, parent, privacy, stamped=True,
     attach_context_artifacts(
         pn.id, u.id, prompt_record=get_user_prompt_record(u.id, "textmode"))
     if not stamped:
+        # Only an entry from before the stamp lacks it.
+        from datetime import datetime
         pn.prompt_key = None
+        pn.created_at = datetime(2026, 8, 1)
     _db.session.commit()
     msg = _node(owner, text, parent=pn, privacy=message_privacy or privacy)
     return pn, msg
@@ -1098,29 +1102,54 @@ def test_an_uploaded_public_thread_gets_its_address_with_its_transcript(
     assert second.public_slug == "a-walk-by-the-river-2"
 
 
-def test_an_uploaded_thread_under_the_default_public_is_listed_by_its_message(
+def test_an_uploaded_thread_under_the_default_public_is_listed_with_its_transcript(
         app, monkeypatch, tmp_path):
-    """Default Public: the public prompt root is listed, its card the
-    upload; the upload's permalink comes with its transcript, as under a
-    private root, and the card links to it from then on."""
+    """Default Public: the public prompt root is listed once the upload's
+    transcript is stored, as under a private root; until then no card
+    shows the placeholder, and the owner's Log has the thread. The card
+    links to the permalink the transcript gives."""
     _set_default("anna", "public")
     message = _upload(app)
     prompt = _get(message.parent_id)
     assert prompt.privacy_level == "public"
-    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
-    assert _client(app).get(
-        "/api/share/public/anna").get_json()["shares"][0]["permalink"] is None
+    _listed_nowhere(app)
+    assert [c["id"] for c in _log(app)[0]] == [message.id]
 
     done = _transcribe(app, monkeypatch, tmp_path, message.id,
                        text="A walk by the river\n\nand more")
 
     assert done.public_slug == "a-walk-by-the-river"
+    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
     share = _client(app).get("/api/share/public/anna").get_json()["shares"]
     assert share[0]["permalink"] == "/@anna/a-walk-by-the-river"
+    assert "A walk by the river" in share[0]["content"]
     assert "/@anna/a-walk-by-the-river</loc>" in _body(
         _client(app).get("/sitemap.xml"))
     assert "/@anna/a-walk-by-the-river" in _body(
         _client(app).get("/@anna/feed.xml"))
+    assert _log(app)[0] == []
+
+
+def test_a_failed_transcription_under_the_default_public_lists_nothing(
+        app, monkeypatch, tmp_path):
+    """The upload's transcription fails: the public prompt root stays out
+    of every listing (no card with the placeholder) and in its owner's
+    Log, where the recording can be transcribed again."""
+    _set_default("anna", "public")
+    message = _upload(app)
+
+    failed = _transcribe(app, monkeypatch, tmp_path, message.id, fail=True)
+
+    assert failed.transcription_status == "failed"
+    _listed_nowhere(app)
+    for body in _listing_bodies(app):
+        assert "Voice note" not in body
+    assert [c["id"] for c in _log(app)[0]] == [message.id]
+
+    again = _transcribe(app, monkeypatch, tmp_path, message.id,
+                        text="Said on the second try")
+    assert again.transcription_status == "completed"
+    assert _listed_ids(app)["share"] == [message.id]
 
 
 def test_a_failed_transcription_leaves_no_address_and_a_retry_gives_it(
@@ -1471,11 +1500,12 @@ def _statements(app, request):
 
 def test_a_listing_page_makes_as_many_queries_for_every_kind_of_top(app):
     """Three plain public roots, three more, then three threads under
-    private prompt roots, then three under public ones (their cards):
-    each step adds the same number of queries to a listing (what an
-    entry cost before: its pins, its publish date), and none to the
-    sitemap. The rules are part of the listing's own query; the cards
-    of a page are one query."""
+    private prompt roots, then three under public ones (their cards),
+    then three more: each step of three entries adds the same number of
+    queries to a listing (what an entry cost before: its pins, its
+    publish date), and none to the sitemap. The first public prompt
+    roots add a fixed number once (their cards are found in one query,
+    and loaded in one per page)."""
     requests = {
         "share": lambda: _client(app).get("/api/share/public/anna"),
         "profile": lambda: _client(app).get("/@anna"),
@@ -1503,12 +1533,18 @@ def test_a_listing_page_makes_as_many_queries_for_every_kind_of_top(app):
     for i in range(3, 6):
         _start(app, content=f"# Thread {i}\n\nbody")
     twelve = measure()
+    for i in range(6, 9):
+        _start(app, content=f"# Thread {i}\n\nbody")
+    fifteen = measure()
 
-    assert len(_listed_ids(app)["share"]) == 12
+    assert len(_listed_ids(app)["share"]) == 15
     for name in requests:
-        assert nine[name] - six[name] == six[name] - three[name], name
-        assert twelve[name] - nine[name] == six[name] - three[name], name
-    assert twelve["sitemap"] == three["sitemap"] == 1
+        step = six[name] - three[name]
+        assert nine[name] - six[name] == step, name
+        assert fifteen[name] - twelve[name] == step, name
+        assert twelve[name] - nine[name] - step <= 2, name
+    assert nine["sitemap"] == three["sitemap"]
+    assert fifteen["sitemap"] == twelve["sitemap"] <= three["sitemap"] + 1
 
 
 # ── Page cache ────────────────────────────────────────────────────────

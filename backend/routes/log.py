@@ -10,7 +10,7 @@ from backend.utils.encryption import prefetch_deks
 from backend.utils.thread_tree import (
     thread_root_of, subtree_walk, alive_child_counts,
 )
-from backend.utils.public_threads import unlisted_public_prompt_root
+from backend.utils.public_threads import TEXT_STORED, public_prompt_roots
 from sqlalchemy import and_, or_, func, case
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -46,11 +46,19 @@ _SORT_KEY = func.coalesce(Node.pinned_at, Node.created_at)
 
 def _own_private(walk, node, user_id):
     """A `subtree_walk` row that is `user_id`'s own writing (author or
-    human owner) and not public; `node` is a Node alias joined on the
-    row's id, for its privacy level."""
+    human owner) and no public listing shows: not public, or an uploaded
+    recording whose transcript is not stored (waiting, or failed: the
+    listings show it only once it is, utils/public_threads). `node` is a
+    Node alias joined on the row's id, for its privacy level and
+    transcription status."""
     return and_(
         or_(walk.c.user_id == user_id, walk.c.human_owner_id == user_id),
-        node.privacy_level != PrivacyLevel.PUBLIC.value,
+        or_(
+            node.privacy_level != PrivacyLevel.PUBLIC.value,
+            and_(node.transcription_status.isnot(None),
+                 node.transcription_status.notin_(
+                     [s for s in TEXT_STORED if s is not None])),
+        ),
     )
 
 
@@ -100,13 +108,17 @@ def get_log():
     # reachable.
     #
     # The same holds for a living public prompt root that no public
-    # listing shows (no public entry of the user's directly under it,
-    # utils/public_threads): a Text-mode thread started at the account's
-    # default Public with a private message. It is a seed too, and is
-    # listed when the user's own private writing is under it.
+    # listing shows (no card: no public entry of the user's with its text
+    # stored directly under it, utils/public_threads): a public thread
+    # whose message was made private or deleted later, or whose upload
+    # waits for its transcript. It is a seed too, and is listed when the
+    # user's own unlisted writing is under it. Its ids come from a small
+    # query of their own: a correlated test here would make the
+    # database plan this query as a costly one.
+    unlisted = sorted(public_prompt_roots(current_user.id).bare)
     deleted_roots = db.session.query(Node.id).filter(
         Node.parent_id.is_(None),
-        or_(Node.deleted_at.isnot(None), unlisted_public_prompt_root()),
+        or_(Node.deleted_at.isnot(None), Node.id.in_(unlisted)),
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,

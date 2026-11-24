@@ -23,7 +23,8 @@ from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import PrivacyLevel
 from backend.utils.public_threads import (
-    card_entries, public_children_filter, public_root_of, thread_top_filter,
+    card_entries, public_children_filter, public_prompt_roots, public_root_of,
+    thread_top_filter,
 )
 from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
@@ -117,12 +118,13 @@ def feed():
         return jsonify({"error": "Not found"}), 404
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 20, type=int), 100)
+    roots = public_prompt_roots()
     query = _public_alive(
-        Node.query.filter(thread_top_filter())
+        Node.query.filter(thread_top_filter(roots.bare))
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page,
                                 error_out=False)
-    cards = card_entries(pagination.items)
+    cards = card_entries(pagination.items, roots)
     items = []
     for top in pagination.items:
         node = cards.get(top.id, top)

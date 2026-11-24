@@ -406,9 +406,10 @@ def public_shares(username):
     page = listing_page()
     size = PUBLIC_LISTING_PAGE_SIZE
     from backend.utils.public_threads import (
-        card_entries, thread_top_filter)
+        card_entries, public_prompt_roots, thread_top_filter)
+    roots = public_prompt_roots(user.id)
     nodes = Node.query.filter(
-        thread_top_filter(),
+        thread_top_filter(roots.bare),
         Node.deleted_at.is_(None),
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
@@ -430,7 +431,7 @@ def public_shares(username):
             ShareDraft.public_node_id.in_([n.id for n in nodes]),
         ).all()
     } if nodes else {}
-    cards = card_entries(nodes)
+    cards = card_entries(nodes, roots)
     items = []
     for top in nodes:
         share = share_by_node.get(top.id)

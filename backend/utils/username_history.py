@@ -84,9 +84,10 @@ def _published_under(user):
     kill every link once sharing resumes. While sharing stays off, the
     redirect never fires (resolve_public_handle), so nothing is
     revealed; only the reservation persists."""
-    from backend.utils.public_threads import thread_top_filter
+    from backend.utils.public_threads import (
+        public_prompt_roots, thread_top_filter)
     return db.session.query(Node.id).filter(
-        thread_top_filter(),
+        thread_top_filter(public_prompt_roots(user.id).bare),
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
         Node.privacy_level == "public",
         Node.deleted_at.is_(None),

@@ -988,6 +988,14 @@ class Node(db.Model):
         # of the table: with this index those queries read only them.
         db.Index("ix_node_public_created_at", "created_at",
                  postgresql_where=db.text("privacy_level = 'public'")),
+        # The public prompt roots (utils/public_threads
+        # .public_prompt_roots): every public listing looks them up
+        # first, by owner or all of them. A few rows, so the lookup reads
+        # neither the account's nor all the public nodes.
+        db.Index("ix_node_public_prompt_root", "human_owner_id",
+                 postgresql_where=db.text(
+                     "privacy_level = 'public' AND parent_id IS NULL "
+                     "AND prompt_key IS NOT NULL")),
     )
 
     created_at = db.Column(db.DateTime, default=datetime.utcnow)

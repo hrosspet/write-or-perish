@@ -3,22 +3,25 @@ its card shows.
 
 A Text-mode thread starts with a prompt entry: its owner's prompt text,
 with pinned versions of their profile and other documents. A new one is
-stored at its owner's default level (the Account page: Public, else
-Private; session_helpers.prompt_entry_privacy), never at the level of
-the message under it, so a thread's root and its first message can have
-different levels. Voice and Glean prompt entries are private.
+Public only when its owner's default level (the Account page) is Public
+and the message it starts with is created Public, else Private
+(session_helpers.prompt_entry_privacy). Its owner may change it later,
+and so may "This node and all my replies", so a thread's root and its
+first message can have different levels. Voice and Glean prompt entries
+are private.
 
 The public listings (Commons feed, a person's public page and its JSON,
 feed.xml, the sitemap) list "thread tops":
 
 - a root (no parent) that is no prompt entry, as before;
-- a public prompt root with a public node of its owner directly under
-  it. Its card shows that node (the first one: oldest, then lowest id;
-  ``card_entries``), not the prompt text, and links to the node's
-  permalink when it has one, else to the root's (``link_slug``). A
-  public prompt root with no such node is listed nowhere: it is read by
-  its link, and listed again once a public node of its owner is under
-  it;
+- a public prompt root with a card: a living public node of its owner
+  directly under it, whose text is stored (an uploaded recording counts
+  once its transcript is). The card shows the first such node (oldest,
+  then lowest id; ``card_entries``), not the prompt text, and links to
+  the node's permalink when it has one, else to the root's
+  (``PromptRoots.link_slug``). A public prompt root without a card is
+  listed nowhere: it is read by its link, its owner's Log lists it
+  (routes/log.py), and it is listed again once it has a card;
 - a node that has a permalink slug and hangs directly under a living
   root that is a prompt entry, is not public and belongs to the same
   person.
@@ -32,11 +35,14 @@ The edit route gives none, so a message, a Voice entry or a gleaning
 that its owner sets public later under a private prompt root is read by
 its link and is in no listing, as before this rule.
 
-The prompt entry is never read here: the rules look at its columns and
-its prompt link inside the listing's own query (correlated EXISTS and
-subqueries, no row load), and one more query per listing page finds the
-cards. The listings start from the public nodes (Node's partial index
-ix_node_public_created_at), not from the roots.
+The prompt entry is never read here. The public prompt roots of a
+listing (one account's, or everyone's) and their cards are found first,
+in a few small queries over the public nodes and the prompt links
+(``public_prompt_roots``); the listing's own query then leaves out the
+roots without a card by id. Correlated subqueries in the listing's query
+would make PostgreSQL estimate it costly enough to compile it (JIT) on
+every request. The listings start from the public nodes (Node's partial
+index ix_node_public_created_at), not from the roots.
 
 A prompt entry is recognised as Node.is_system_prompt does: a stamped
 ``prompt_key``, or, for entries from before that column (2026-09-02), a
@@ -55,59 +61,118 @@ nodes in hand, ``public_children_filter`` for the public pages' query).
 Only a prompt entry is passed through, never another private node, and
 only towards nodes of the entry's own owner.
 """
-from sqlalchemy import and_, case, exists, func, literal, not_, or_, select
+from datetime import datetime
+
+from sqlalchemy import and_, exists, func, literal, or_, select, union
 from sqlalchemy.orm import aliased
 
 from backend.models import Node, NodeContextArtifact
 from backend.utils.privacy import PrivacyLevel
+
+# An uploaded recording's text is stored when its transcription is
+# completed; a node that was never transcribed has no status.
+TEXT_STORED = (None, "completed")
+
+# INTRODUCED CONSTANT: prompt entries created from this moment (UTC) on
+# carry the prompt_key stamp. The column reached production on
+# 2026-09-02 at 15:52 UTC, and every path that pins a prompt stamps it
+# since (context_artifacts.attach_context_artifacts, dump_rows
+# .pin_prompt). Only an older root can be a prompt entry by its prompt
+# link alone, so the lookup by link reads only the public nodes created
+# before this moment, a set that does not grow.
+STAMPED_SINCE = datetime(2026, 9, 3)
 
 
 def _owner(node):
     return func.coalesce(node.human_owner_id, node.user_id)
 
 
-def is_prompt_entry(node=Node):
-    """SQL condition: *node* is a prompt entry (Node.is_system_prompt):
-    stamped with a prompt key, or linked to a prompt version."""
-    link = aliased(NodeContextArtifact, flat=True)
-    return or_(
-        node.prompt_key.isnot(None),
-        exists().where(and_(link.node_id == node.id,
-                            link.artifact_type == "prompt")),
-    )
+class PromptRoots:
+    """The living public prompt roots of one account or of everyone
+    (public_prompt_roots): *cards* {root id: (card id, card slug)} for
+    those with a card, *bare* the ids of those without one."""
+
+    def __init__(self, cards, bare):
+        self.cards = cards
+        self.bare = bare
+
+    def link_slug(self, top_id, own_slug):
+        """The slug a listing links the top *top_id* by: its card's when
+        it is a public prompt root whose card has one, else its own."""
+        card = self.cards.get(top_id)
+        return (card[1] if card is not None and card[1] else own_slug)
+
+    def slugged_card_roots(self):
+        """Ids of the roots whose card has a slug of its own."""
+        return sorted(r for r, (_, slug) in self.cards.items() if slug)
+
+    def linked_filter(self, node=Node):
+        """SQL condition: the top *node* has a slug to link it by (its
+        own, or its card's: link_slug). The ids are added only when
+        there are any, so the plain test stays as before."""
+        roots = self.slugged_card_roots()
+        own = node.public_slug.isnot(None)
+        return or_(own, node.id.in_(roots)) if roots else own
 
 
-def _card_conditions(entry, top):
-    """SQL condition: *entry* may be the card of the prompt root *top*:
-    a living public node of the root's owner directly under it."""
-    return and_(
-        entry.parent_id == top.id,
-        entry.privacy_level == PrivacyLevel.PUBLIC.value,
-        entry.deleted_at.is_(None),
-        _owner(entry) == _owner(top),
-    )
+def public_prompt_roots(owner_id=None):
+    """PromptRoots for the living public prompt roots of *owner_id* (as
+    owner or author), or of everyone. Two small queries: the stamped
+    roots (Node's partial index ix_node_public_prompt_root) with the
+    roots from before the stamp that link a prompt version (the public
+    nodes created before STAMPED_SINCE), then, when there are any, the
+    public nodes directly under them, from which the cards are picked
+    here."""
+    from backend.extensions import db
+
+    root = [Node.privacy_level == PrivacyLevel.PUBLIC.value,
+            Node.parent_id.is_(None), Node.deleted_at.is_(None)]
+    if owner_id is not None:
+        root.append(or_(Node.human_owner_id == owner_id,
+                        Node.user_id == owner_id))
+    columns = (Node.id, Node.human_owner_id, Node.user_id)
+    stamped = select(*columns).where(*root, Node.prompt_key.isnot(None))
+    linked = (select(*columns)
+              .join(NodeContextArtifact,
+                    NodeContextArtifact.node_id == Node.id)
+              .where(*root, Node.prompt_key.is_(None),
+                     Node.created_at < STAMPED_SINCE,
+                     NodeContextArtifact.artifact_type == "prompt"))
+    rows = db.session.execute(union(stamped, linked)).all()
+    owner_of = {r.id: r.human_owner_id or r.user_id for r in rows}
+    ids = sorted(owner_of)
+    cards = {}
+    for start in range(0, len(ids), 1000):
+        under = db.session.query(
+            Node.id, Node.parent_id, Node.public_slug, Node.created_at,
+            Node.human_owner_id, Node.user_id, Node.transcription_status,
+        ).filter(
+            Node.parent_id.in_(ids[start:start + 1000]),
+            Node.privacy_level == PrivacyLevel.PUBLIC.value,
+            Node.deleted_at.is_(None),
+        ).all()
+        for n in sorted(under, key=lambda n: (n.created_at or datetime.min,
+                                              n.id)):
+            if (n.parent_id not in cards
+                    and (n.human_owner_id or n.user_id)
+                    == owner_of[n.parent_id]
+                    and n.transcription_status in TEXT_STORED):
+                cards[n.parent_id] = (n.id, n.public_slug)
+    return PromptRoots(cards, set(ids) - set(cards))
 
 
-def _card_order(entry):
-    return (entry.created_at.asc(), entry.id.asc())
-
-
-def _is_prompt_root(node):
-    return and_(node.parent_id.is_(None), is_prompt_entry(node))
-
-
-def thread_top_filter(node=Node):
+def thread_top_filter(bare, node=Node):
     """SQL condition: *node* is the top of its thread as the public
-    surfaces list it (see the module text). The caller adds what makes
-    the node itself listable (public, alive, its owner sharing)."""
+    surfaces list it (see the module text); *bare* holds the ids of the
+    public prompt roots without a card (PromptRoots.bare), which are
+    left out. The caller adds what makes the node itself listable
+    (public, alive, its owner sharing)."""
     above = aliased(Node, flat=True)
-    card = aliased(Node, flat=True)
+    root = node.parent_id.is_(None)
+    if bare:
+        root = and_(root, node.id.notin_(sorted(bare)))
     return or_(
-        and_(
-            node.parent_id.is_(None),
-            or_(not_(is_prompt_entry(node)),
-                exists().where(_card_conditions(card, node))),
-        ),
+        root,
         and_(
             node.public_slug.isnot(None),
             exists().where(and_(
@@ -121,65 +186,16 @@ def thread_top_filter(node=Node):
     )
 
 
-def unlisted_public_prompt_root(node=Node):
-    """SQL condition: *node* is a living public prompt root that no
-    public listing shows, having no public node of its owner directly
-    under it (thread_top_filter). Its owner's Log lists it instead, by
-    their own private writing under it (routes/log.py), so their entries
-    in such a thread stay reachable."""
-    card = aliased(Node, flat=True)
-    return and_(
-        _is_prompt_root(node),
-        node.deleted_at.is_(None),
-        node.privacy_level == PrivacyLevel.PUBLIC.value,
-        not_(exists().where(_card_conditions(card, node))),
-    )
-
-
-def link_slug(node=Node):
-    """SQL expression: the slug a listing links the top *node* by: for a
-    prompt root, its card's slug, else the root's own; for any other top,
-    its own. NULL when there is none (the top is then left out of
-    feed.xml and the sitemap, as an unslugged root always was)."""
-    card = aliased(Node, flat=True)
-    card_slug = (select(card.public_slug)
-                 .where(_card_conditions(card, node))
-                 .order_by(*_card_order(card))
-                 .limit(1)
-                 .scalar_subquery())
-    return case(
-        (_is_prompt_root(node), func.coalesce(card_slug, node.public_slug)),
-        else_=node.public_slug,
-    )
-
-
-def card_entries(tops):
-    """{top id: node} for the listed *tops* that are prompt roots: the
-    node each one's card shows (see the module text), in one query. A
-    top missing from the answer shows itself."""
-    from backend.extensions import db
-
-    ids = [t.id for t in tops if t.parent_id is None]
-    if not ids:
+def card_entries(tops, roots):
+    """{top id: node} for the listed *tops* that are public prompt roots
+    with a card (*roots*, a PromptRoots): the node each one's card
+    shows, in one query. A top missing from the answer shows itself."""
+    top_of = {roots.cards[t.id][0]: t.id for t in tops
+              if t.id in roots.cards}
+    if not top_of:
         return {}
-    top = aliased(Node, flat=True)
-    rank = func.row_number().over(
-        partition_by=Node.parent_id, order_by=_card_order(Node))
-    ranked = (db.session.query(Node.id.label("id"), rank.label("rank"))
-              .join(top, top.id == Node.parent_id)
-              .filter(top.id.in_(ids), is_prompt_entry(top),
-                      _card_conditions(Node, top))
-              .subquery())
-    rows = (Node.query.join(ranked, ranked.c.id == Node.id)
-            .filter(ranked.c.rank == 1).all())
-    return {n.parent_id: n for n in rows}
-
-
-def shown_slug(top, card):
-    """The slug *top*'s card links to: *card*'s (card_entries), else the
-    top's own; as link_slug says in SQL."""
-    return (card.public_slug if card is not None and card.public_slug
-            else top.public_slug)
+    return {top_of[n.id]: n
+            for n in Node.query.filter(Node.id.in_(sorted(top_of))).all()}
 
 
 def owner_id_of(node):
