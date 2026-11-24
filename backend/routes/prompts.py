@@ -3,6 +3,7 @@ from flask_login import login_required, current_user
 from backend.models import UserPrompt
 from backend.extensions import db
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.placeholders import (
     UserExportValidationError, check_user_export_plan,
     validate_user_export_placeholders,
@@ -144,6 +145,7 @@ def _admin_prompt_refused(prompt_key):
 
 
 @prompts_bp.route("/<prompt_key>", methods=["PUT"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_prompt(prompt_key):
     """Save a new version of a prompt."""

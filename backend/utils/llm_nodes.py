@@ -223,12 +223,10 @@ def _is_llm(node):
 
 
 def _has_read_marker(node):
-    try:
-        meta = json.loads(node.tool_calls_meta or "[]") or []
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
-               for m in meta)
+    """Entry names are read without decrypting (utils/tool_record): the
+    chain walk reads no text."""
+    from backend.utils.tool_record import entry_names
+    return READ_FURTHER_MARKER in entry_names(node)
 
 
 class _Chain:
@@ -254,7 +252,7 @@ class _Chain:
         # prompt (utils/thread_size, #648).
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
-            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
+            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta_stored,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
             Node.privacy_level, Node.token_count, Node.continuation_node_id,
             max_depth=_MAX_ANCESTRY_HOPS)
@@ -290,11 +288,18 @@ class _Chain:
             can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
             shown_as_deleted,
         )
+        from backend.utils.public_threads import passes_through
+        below = None
         for i, n in enumerate(self.nodes):
             seen = (can_user_see_node_or_tombstone if i == 0
                     else can_user_see_node_or_placeholder)
             if not seen(n, user_id):
+                # As the task: a prompt entry the user may not read is
+                # left out and the walk goes on above it.
+                if below is not None and passes_through(n, below):
+                    continue
                 return None
+            below = n
             if (not shown_as_deleted(n, user_id)
                     and n.ai_usage not in AI_ALLOWED):
                 return n
@@ -734,6 +739,104 @@ def enqueue_reply_job(llm_node, dispatch, record_task_id=True):
     return task_id
 
 
+# ── Replies one account has waiting or being written ─────────────────────
+# Every account's replies wait in the same queue for the same few workers,
+# so one account may have at most MAX_REPLIES_IN_PROGRESS of its own
+# waiting or being written; a new one past it is refused before anything
+# is written (create_llm_placeholder). Counted under the account's
+# replies lock, so two requests at once cannot both pass.
+#
+# INTRODUCED HEURISTIC: 20. Real use stays well below it: a reply in each
+# of a few threads open at once (web tabs and the iPhone), a Voice turn, a
+# Glean, and the replies of the audio files being uploaded (at most
+# recording_limits.MAX_UPLOADS_IN_PROGRESS, 5) come to about ten at the
+# very most; 20 is twice that. A reply that is a step of another (the
+# continuation after a tool call) replaces that reply in the count.
+MAX_REPLIES_IN_PROGRESS = 20
+# A reply counts for this long after it was asked for: the reply task's
+# hard time limit (celery_app.TASK_TIME_LIMIT, one hour). A reply left
+# waiting by a worker that stopped does not hold the account longer.
+REPLY_COUNTS_FOR_SECONDS = 3600
+# The first key of the two-key advisory lock: a fixed number naming "an
+# account's new replies", distinct from utils/todo_lock (477001) and
+# utils/recording_limits (694001).
+_REPLIES_LOCK_NAMESPACE = 731001
+
+TOO_MANY_REPLIES_CODE = "too_many_replies"
+TOO_MANY_REPLIES_MESSAGE = (
+    "Several of your AI replies are still being written. Wait for one of "
+    "them to finish, then ask again.")
+TOO_MANY_REPLIES_ENTRY_MESSAGE = (
+    "Your entry is saved. Loore didn't reply because several of your AI "
+    "replies are still being written. Ask again once one of them is done.")
+TOO_MANY_REPLIES_RECORDING_MESSAGE = (
+    "Your recording is saved. Loore didn't reply because several of your "
+    "AI replies are still being written. Ask again once one of them is "
+    "done.")
+
+
+class TooManyReplies(Exception):
+    """The account already has MAX_REPLIES_IN_PROGRESS replies waiting or
+    being written. Raised by create_llm_placeholder before the reply is
+    written. HTTP callers answer 429 ``{"error", "code":
+    "too_many_replies"}`` (too_many_replies_response; backend/__init__.py
+    registers the same answer for a route that lets it escape), or keep
+    the entry they wrote and report the skipped reply as ``llm_error`` /
+    ``llm_error_code`` (thread_size.reply_skipped_fields)."""
+
+    code = TOO_MANY_REPLIES_CODE
+    message = TOO_MANY_REPLIES_MESSAGE
+    entry_message = TOO_MANY_REPLIES_ENTRY_MESSAGE
+    recording_message = TOO_MANY_REPLIES_RECORDING_MESSAGE
+
+    def __init__(self):
+        super().__init__(self.message)
+
+
+def too_many_replies_response(exc=None):
+    """The 429 answer for a refused reply."""
+    from flask import jsonify
+    exc = exc or TooManyReplies()
+    return jsonify({"error": exc.message, "code": exc.code}), 429
+
+
+def replies_in_progress(user_id, now=None):
+    """How many replies of the account are waiting or being written,
+    asked for within REPLY_COUNTS_FOR_SECONDS. The admin's Batch API reads
+    (READ_BATCH_MARKER) are left out: they wait for the provider's batch
+    for hours and take no worker meanwhile."""
+    from datetime import datetime, timedelta
+    from backend.utils.glean import READ_BATCH_MARKER
+    since = (now or datetime.utcnow()) - timedelta(
+        seconds=REPLY_COUNTS_FOR_SECONDS)
+    return Node.query.filter(
+        Node.human_owner_id == user_id,
+        Node.node_type == "llm",
+        Node.llm_task_status.in_(("pending", "processing")),
+        Node.created_at >= since,
+        db.or_(Node.tool_calls_meta.is_(None),
+               ~Node.tool_calls_meta.contains(f'"{READ_BATCH_MARKER}"',
+                                              autoescape=True)),
+    ).count()
+
+
+def _lock_new_replies(user_id):
+    """Take the account's replies lock for the rest of the current
+    transaction (a PostgreSQL advisory lock keyed on the user, as
+    utils/todo_lock): the commit or rollback releases it, also when a
+    worker dies. Its holder only counts, inserts and commits, so it waits
+    for nothing else and is held for milliseconds; no wait limit is set
+    (a lock timeout would end the caller's transaction, and the entry a
+    route keeps with it). Other databases (SQLite in the tests) take no
+    lock; the count still runs."""
+    from sqlalchemy import text
+    if db.session.get_bind().dialect.name != "postgresql":
+        return
+    db.session.execute(
+        text("SELECT pg_advisory_xact_lock(:namespace, :user_id)"),
+        {"namespace": _REPLIES_LOCK_NAMESPACE, "user_id": int(user_id)})
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -784,6 +887,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
 
     Raises ThreadTooLong (utils/thread_size), also before any write, when
     the reply's prompt would be over THREAD_PROMPT_TOKEN_LIMIT (#648).
+
+    Raises TooManyReplies, also before the reply is written, when the
+    account already has MAX_REPLIES_IN_PROGRESS replies waiting or being
+    written. The account's replies lock it takes is held until the
+    caller's transaction ends.
     """
     # Spend-cap guard: a blocked user must never get an LLM placeholder node
     # (and never incur generation spend). Raised before any DB write so no
@@ -911,6 +1019,14 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                                          chain=chain, user=owner)
         if too_long is not None:
             raise too_long
+
+    # At most MAX_REPLIES_IN_PROGRESS replies of the account waiting or
+    # being written, counted under its replies lock (held to the commit
+    # below), so a burst of requests on many threads cannot all pass.
+    # Taken last, after everything that may wait on the network above.
+    _lock_new_replies(human_owner_id)
+    if replies_in_progress(human_owner_id) >= MAX_REPLIES_IN_PROGRESS:
+        raise TooManyReplies()
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

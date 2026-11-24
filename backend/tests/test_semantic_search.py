@@ -787,3 +787,39 @@ def test_keyword_search_is_unchanged_for_an_account_set_to_none(
     assert resp.status_code == 200
     assert resp.get_json()["total"] == 1
     assert sent == []
+
+
+# ── An account at its spend cap (the rule of its other billed calls) ─────
+
+def test_semantic_search_refused_for_an_account_at_its_spend_cap(
+        app, client, monkeypatch):
+    """The query is not embedded: the spend cap's 402, as for the
+    account's other AI use."""
+    from backend.utils.spend import current_month
+    user = User.query.first()
+    user.spend_blocked_month = current_month()
+    _db.session.commit()
+    sent = _record_query_embedding(monkeypatch)
+
+    for _ in range(3):
+        resp = client.get("/api/search/semantic?q=gardens")
+        assert resp.status_code == 402
+        assert resp.get_json()["error"] == "monthly_spend_limit_reached"
+    assert sent == []
+
+
+def test_an_account_set_to_none_and_capped_gets_the_ai_usage_answer(
+        app, client, monkeypatch):
+    """Control: the AI-usage refusal still comes first."""
+    from backend.utils.spend import current_month
+    user = User.query.first()
+    user.spend_blocked_month = current_month()
+    user.default_ai_usage = "none"
+    _db.session.commit()
+    sent = _record_query_embedding(monkeypatch)
+
+    resp = client.get("/api/search/semantic?q=gardens")
+
+    assert resp.status_code == 403
+    assert resp.get_json()["code"] == "ai_usage_none"
+    assert sent == []

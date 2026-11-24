@@ -37,3 +37,11 @@ test('new: made in the last week', () => {
   expect(isNewAccount({ created_at: new Date(now - 8 * day).toISOString() }, now)).toBe(false);
   expect(isNewAccount({ created_at: null }, now)).toBe(false);
 });
+
+test('payments on: a new account held for approval reads Waiting', () => {
+  expect(statusLabel({ approved: false, blocked: false, waits_for_approval: true }, true))
+    .toBe('Waiting');
+  expect(statusLabel({ approved: true, waits_for_approval: false }, true)).toBe('Active');
+  expect(statusLabel({ approved: false, blocked: true, waits_for_approval: false }, true))
+    .toBe('Blocked');
+});

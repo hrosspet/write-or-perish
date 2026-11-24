@@ -3,7 +3,9 @@
 // when the user returns to the page; the TTS stream's replayed chunks
 // reach the page once each.
 import { renderHook, act } from '@testing-library/react';
-import { useSSE, useTTSStreamSSE, useLlmTextStream } from './useSSE';
+import {
+  useSSE, useTTSStreamSSE, useLlmTextStream, reconnectWait, RECONNECT_MAX_DELAY_MS,
+} from './useSSE';
 
 class MockEventSource {
   static instances = [];
@@ -140,4 +142,65 @@ test("a reply's text stream reconnects on return and takes the fresh snapshot", 
   expect(MockEventSource.instances).toHaveLength(2);
   act(() => MockEventSource.instances[1].emit('snapshot', { text: 'Hello, world' }));
   expect(result.current.text).toBe('Hello, world');
+});
+
+// A stream the server refuses (429 when the account holds the most open
+// streams; 400, 404) is asked for again after a delay that doubles with each
+// refusal in a row, up to RECONNECT_MAX_DELAY_MS, and starts over once a
+// connection opens.
+describe('reconnecting after refusals', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    console.error.mockRestore();
+  });
+
+  // Handlers that stay the same between renders, as the callers memoize them.
+  const HANDLERS = {};
+  const refuse = (es) => act(() => {
+    es.readyState = MockEventSource.CLOSED;
+    es.onerror(new Event('error'));
+  });
+  const last = () => MockEventSource.instances[MockEventSource.instances.length - 1];
+  // How long until the next connection is made after a refusal.
+  const waitBeforeNext = () => {
+    const before = MockEventSource.instances.length;
+    let waited = 0;
+    while (MockEventSource.instances.length === before && waited < 120000) {
+      act(() => { jest.advanceTimersByTime(500); });
+      waited += 500;
+    }
+    return waited;
+  };
+
+  test('the delay doubles with each refusal, up to the most', () => {
+    renderHook(() => useSSE('/api/sse/x', { enabled: true, eventHandlers: HANDLERS }));
+    const waits = [];
+    for (let i = 0; i < 7; i += 1) {
+      refuse(last());
+      waits.push(waitBeforeNext());
+    }
+    expect(waits).toEqual([3000, 6000, 12000, 24000, 48000,
+      RECONNECT_MAX_DELAY_MS, RECONNECT_MAX_DELAY_MS]);
+  });
+
+  test('a connection that opens starts over at the first delay', () => {
+    renderHook(() => useSSE('/api/sse/x', { enabled: true, eventHandlers: HANDLERS }));
+    refuse(last());
+    waitBeforeNext();
+    refuse(last());
+    expect(waitBeforeNext()).toBe(6000);
+    act(() => { last().onopen(); });
+    refuse(last());
+    expect(waitBeforeNext()).toBe(3000);
+  });
+
+  test('reconnectWait', () => {
+    expect(reconnectWait(3000, 1)).toBe(3000);
+    expect(reconnectWait(3000, 3)).toBe(12000);
+    expect(reconnectWait(3000, 30)).toBe(RECONNECT_MAX_DELAY_MS);
+  });
 });

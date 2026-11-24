@@ -295,13 +295,12 @@ def _is_gleaning_meta(tool_calls_meta):
     again, the admin's batch experiments). Metadata only."""
     from backend.utils.ca_feed import READ_FURTHER_MARKER
     from backend.utils.glean import READ_BATCH_MARKER, READ_LIVE_MARKER
-    try:
-        meta = json.loads(tool_calls_meta or "[]") or []
-    except (TypeError, ValueError):
-        return False
+    from backend.utils.tool_record import shown_entries
+    # The column as selected (the stored value): entry names are read
+    # from it without decrypting.
     markers = {READ_LIVE_MARKER, READ_FURTHER_MARKER, READ_BATCH_MARKER}
     return any(isinstance(m, dict) and m.get("name") in markers
-               for m in meta)
+               for m in shown_entries(tool_calls_meta))
 
 
 def _gleaning_refusal_ids(chain, refusal_rows):

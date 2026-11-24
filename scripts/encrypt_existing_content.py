@@ -128,7 +128,7 @@ def encrypt_database_content():
 
     if not is_encryption_enabled():
         print("ERROR: Encryption is not enabled!")
-        print("Please set GCP_KMS_KEY_NAME environment variable.")
+        print("ENCRYPTION_DISABLED=true is set in this environment.")
         return False
 
     def encrypt_field(record, field_name, label, stats):
@@ -181,7 +181,7 @@ def encrypt_audio_files():
 
     if not is_encryption_enabled():
         print("ERROR: Encryption is not enabled!")
-        print("Please set GCP_KMS_KEY_NAME environment variable.")
+        print("ENCRYPTION_DISABLED=true is set in this environment.")
         return False
 
     audio_dir = os.environ.get("AUDIO_STORAGE_PATH", "data/audio")

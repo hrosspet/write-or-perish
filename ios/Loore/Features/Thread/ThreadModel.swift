@@ -698,7 +698,8 @@ final class ThreadModel {
             return NodeFormResult(id: created.id)
         }
         let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeFromNode(nodeId), json: .object([
-            "content": .string(submission.content), "ai_usage": .string(submission.aiUsage.rawString),
+            "content": .string(submission.content), "privacy_level": .string(submission.privacy.rawString),
+            "ai_usage": .string(submission.aiUsage.rawString),
             "model": .optional(selectedModel), "auto_generate": .bool(auto),
         ]))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,

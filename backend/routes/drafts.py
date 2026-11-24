@@ -19,16 +19,18 @@ from backend.utils.audio_storage import (
 from backend.utils.encryption import stage_encrypted_file
 from backend.utils.client_platform import request_client
 from backend.utils.recording_limits import (
-    LONGEST_RECORDING_TEXT, NOT_ANNOUNCED_TEXT,
+    FORM_OVERHEAD_BYTES, LONGEST_RECORDING_TEXT, MAX_STREAMING_CHUNK_BYTES,
+    NOT_ANNOUNCED_TEXT,
 )
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.recording_device import (
     SessionBusy, claim_session, is_taken_over, is_taken_over_locked,
     lock_writer_key, request_device_key, session_busy_response,
     taken_over_response, valid_device_key,
 )
 from backend.utils.llm_nodes import (
-    AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
-    pick_model_for_generation, voice_turn_refusal,
+    AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
+    ai_usage_refused_response, pick_model_for_generation, voice_turn_refusal,
 )
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
@@ -479,6 +481,7 @@ def get_interrupted_drafts():
 
 
 @drafts_bp.route("/", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def save_draft():
     """
@@ -974,6 +977,16 @@ def _move_staged(staged):
     return final
 
 
+def _queue_stored_chunks(session_id, chunks):
+    """Queue *chunks* (rows read as 'stored') for transcription, each
+    chunk claimed before it is queued
+    (utils/audio_storage.claim_and_queue_chunks). Returns the task ids
+    (none when another request took them all)."""
+    from backend.tasks.streaming_transcription import transcribe_chunk_batch
+    from backend.utils.audio_storage import claim_and_queue_chunks
+    return claim_and_queue_chunks(session_id, chunks, transcribe_chunk_batch)
+
+
 def _chunk_already_uploaded(chunk_index, chunk):
     return jsonify({
         "message": "Chunk already uploaded",
@@ -1045,6 +1058,7 @@ def _staged_size_error(staged, chunk_dir, chunk_index):
 
 
 @drafts_bp.route("/streaming/<session_id>/audio-chunk", methods=["POST"])
+@body_limit(MAX_STREAMING_CHUNK_BYTES + FORM_OVERHEAD_BYTES)
 @login_required
 def upload_streaming_chunk(session_id):
     """
@@ -1076,7 +1090,9 @@ def upload_streaming_chunk(session_id):
     chunk of a recording without audio past EMPTY_SESSION_EXPIRES_AFTER (or
     released) is a new start: 402 at the usage limit, 429 past the count;
     a recording with audio inactive for a day must fit under the count
-    again (utils/recording_limits.audio_refusal). Once finalizing, only
+    again (utils/recording_limits.audio_refusal). A recording's first
+    audio is asked once more right before its row is stored, under the
+    account's lock. Once finalizing, only
     the chunks it announced are taken (400 ``chunk_not_announced``, which
     the apps do not treat as the bound).
 
@@ -1306,6 +1322,20 @@ def upload_streaming_chunk(session_id):
         _discard_staged(staged)
         raise
 
+    # The first audio of a recording (or audio that counts as a new start)
+    # is asked again here: the check above ended with the stamp's commit,
+    # before the body was read and the file encrypted, and what it counts
+    # (the open recordings, the audio waiting for its transcript) is the
+    # chunk rows. Asked now, the account's lock stays held through this
+    # chunk's row and its commit below, so first chunks of several
+    # recordings that arrive together are counted one after the other.
+    # The account's lock comes before the draft row's, as in a claim. For
+    # a recording that holds audio this asks nothing and takes no lock.
+    refused = audio_refusal(draft)
+    if refused is not None:
+        _discard_staged(staged)
+        return refused
+
     # A claim may have come in since the check above. From here to the
     # chunk's commit the draft row stays locked, so this chunk is stored
     # before a claim counts the chunks, or refused here, its files never
@@ -1399,28 +1429,18 @@ def upload_streaming_chunk(session_id):
             "Session %s: %d chunk(s) not transcribed, AI usage is None",
             session_id, len(stored_chunks))
     elif len(stored_chunks) >= BATCH_SIZE:
-        # Take the first BATCH_SIZE stored chunks and queue transcription
+        # Take the first BATCH_SIZE stored chunks and queue transcription;
+        # a chunk another upload of this recording queued meanwhile is
+        # left to that one (_queue_stored_chunks).
         batch = stored_chunks[:BATCH_SIZE]
         chunk_indices = [c.chunk_index for c in batch]
-
-        from backend.tasks.streaming_transcription import transcribe_chunk_batch
-
-        task = transcribe_chunk_batch.delay(
-            session_id=session_id,
-            chunk_indices=chunk_indices
-        )
-        task_id = task.id
-
-        # Mark batch chunks as processing
-        for c in batch:
-            c.status = 'processing'
-            c.task_id = task.id
-        db.session.commit()
-
-        current_app.logger.info(
-            f"Queued batch transcription for session {session_id}, "
-            f"chunks {chunk_indices}, task {task.id}"
-        )
+        task_ids = _queue_stored_chunks(session_id, batch)
+        if task_ids:
+            task_id = task_ids[0]
+            current_app.logger.info(
+                f"Queued batch transcription for session {session_id}, "
+                f"chunks {chunk_indices}, task {task_id}"
+            )
 
     # Count total chunks in DB for this session for debugging
     total_db_chunks = NodeTranscriptChunk.query.filter_by(
@@ -1633,23 +1653,16 @@ def transcribe_remaining(session_id):
 
     chunk_indices = [c.chunk_index for c in stored_chunks]
 
-    from backend.tasks.streaming_transcription import transcribe_chunk_batch
-    from backend.utils.recording_limits import BATCH_CHUNKS
-
-    # In batches of BATCH_CHUNKS, as the chunk route queues them; marked
-    # as processing.
-    task_ids = []
-    for start in range(0, len(stored_chunks), BATCH_CHUNKS):
-        batch = stored_chunks[start:start + BATCH_CHUNKS]
-        task = transcribe_chunk_batch.delay(
-            session_id=session_id,
-            chunk_indices=[c.chunk_index for c in batch]
-        )
-        for c in batch:
-            c.status = 'processing'
-            c.task_id = task.id
-        task_ids.append(task.id)
-    db.session.commit()
+    # In batches of BATCH_CHUNKS, as the chunk route queues them; each
+    # chunk moved to processing before it is queued, so two requests at
+    # once (the web and the iPhone app opening the same draft) queue it
+    # once.
+    task_ids = _queue_stored_chunks(session_id, stored_chunks)
+    if not task_ids:
+        return jsonify({
+            "message": "No stored chunks to transcribe",
+            "chunk_count": 0
+        }), 200
 
     current_app.logger.info(
         f"Triggered transcribe-remaining for session {session_id}, "
@@ -1774,6 +1787,7 @@ def release_streaming(session_id):
 
 
 @drafts_bp.route("/streaming/<session_id>/save-as-node", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def save_streaming_as_node(session_id):
     """
@@ -1857,6 +1871,14 @@ def save_streaming_as_node(session_id):
                 "code": "public_reply_required",
             }), 400
 
+    # A day's public replies under other people's posts; the session
+    # stays, so the entry can be saved later.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(
+        current_user.id, draft.parent_id, privacy_level)
+    if err is not None:
+        return err
+
     # A public entry quotes only public nodes (Peter, 2026-11-12); the
     # session stays, so the text can be changed and saved again.
     if privacy_level == "public":
@@ -1895,32 +1917,34 @@ def save_streaming_as_node(session_id):
         # A recorded reply inside an existing thread (the reply box under
         # a read reply, #323): the textmode prompt goes under the parent
         # when no agentic prompt sits above it, as POST /textmode/from-node
-        # does for a typed reply; inside an agentic thread nothing is added.
+        # does for a typed reply; inside an agentic thread nothing is added,
+        # nor under someone else's node (a plain reply there).
         from backend.utils.session_helpers import attach_agentic_prompt_under
         parent_node = Node.query.get(draft.parent_id)
         if parent_node is None:
             return jsonify({"error": "Parent node not found"}), 404
+        # The prompt node is Public only for a Public message under a
+        # Public parent of an account whose default is Public
+        # (session_helpers.prompt_entry_privacy), as POST
+        # /textmode/from-node sets it for a typed reply: under a parent
+        # of another level it is given "private" (Peter, 2026-11-24: a
+        # public reply recorded under one's own private Glean does not
+        # publish its prompt entry).
+        prompt_level = (
+            privacy_level
+            if (parent_node.privacy_level or "private") == privacy_level
+            else "private")
         system_node = attach_agentic_prompt_under(
-            parent_node, current_user.id, "textmode", privacy_level, ai_usage)
+            parent_node, current_user.id, "textmode", prompt_level,
+            ai_usage)
         if system_node is not None:
             user_parent_id = system_node.id
     elif agentic:
-        from backend.utils.prompts import get_user_prompt_record
-        from backend.utils.context_artifacts import attach_context_artifacts
-        prompt_record = get_user_prompt_record(current_user.id, "textmode")
-        system_node = Node(
-            user_id=current_user.id,
-            human_owner_id=current_user.id,
-            parent_id=None,
-            node_type="user",
-            privacy_level=privacy_level,
-            ai_usage=ai_usage,
-        )
-        db.session.add(system_node)
-        db.session.flush()
-        attach_context_artifacts(
-            system_node.id, current_user.id, prompt_record=prompt_record,
-        )
+        # Public only for a Public entry of an account whose default is
+        # Public (session_helpers.prompt_entry_privacy).
+        from backend.utils.session_helpers import create_agentic_root
+        system_node = create_agentic_root(
+            current_user.id, "textmode", privacy_level, ai_usage)
         # Started from the Glean card (#435): every turn offers Glean.
         from backend.utils.glean import stamp_glean_entry
         stamp_glean_entry(system_node, current_user, data.get("entry"))
@@ -1940,9 +1964,15 @@ def save_streaming_as_node(session_id):
     from backend.utils.tokens import approximate_token_count
     node.set_content(content)
     node.token_count = approximate_token_count(content)
-    if form_settings and privacy_level == "public" and user_parent_id is None:
-        # A public root gets its permalink slug at birth, as a typed one
-        # does (POST /nodes/, #228).
+    if (privacy_level == "public" and draft.parent_id is None
+            and (form_settings or system_node is not None)):
+        # A public entry that starts a thread gets its permalink slug at
+        # birth, as a typed one does (POST /nodes/, #228): a root (when
+        # the form sent the settings), or the first entry under the
+        # thread's prompt root: under a private root the public pages
+        # list it as the top of its thread because it has the slug, and
+        # under a public one the root's card shows it and links to it
+        # (utils/public_threads).
         from backend.utils.slugs import generate_unique_public_slug
         node.public_slug = generate_unique_public_slug(
             current_user.id, content)
@@ -2013,11 +2043,13 @@ def save_streaming_as_node(session_id):
                 response["task_id"] = task_id
             except (UserExportValidationError, ParentDeletedError,
                     AIUsageRefused, ReadOnlyModelRefused,
-                    ThreadTooLong) as e:
+                    ThreadTooLong, TooManyReplies) as e:
                 # A thread above that keeps AI out (AIUsageRefused), a
                 # read-only model asked to reply (ReadOnlyModelRefused),
-                # or a thread too long for another reply (ThreadTooLong,
-                # #648) skips the reply the same way: the entry is saved.
+                # a thread too long for another reply (ThreadTooLong,
+                # #648), or the account's replies in progress at their
+                # bound (TooManyReplies) skips the reply the same way: the
+                # entry is saved.
                 db.session.rollback()
                 # The message is written for the user (llm_error); the
                 # log keeps the type
@@ -2026,7 +2058,7 @@ def save_streaming_as_node(session_id):
                     node.id, describe_exception(e))
                 response["llm_error"] = str(e)
                 if isinstance(e, (AIUsageRefused, ReadOnlyModelRefused,
-                                  ThreadTooLong)):
+                                  ThreadTooLong, TooManyReplies)):
                     response["llm_error_code"] = e.code
 
     return jsonify(response), 201

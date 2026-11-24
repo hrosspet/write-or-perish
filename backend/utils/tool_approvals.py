@@ -228,7 +228,7 @@ def _artifact_preview(payload, user_id):
     old_title = previous.title if previous is not None else None
     if new_title and new_title != (old_title or ""):
         out["title_change"] = {"from": old_title, "to": new_title}
-    new_description = (inp.get("description") or "").strip()
+    new_description = (inp.get("description") or "").strip()[:255]
     old_description = previous.description if previous is not None else None
     if new_description and new_description != (old_description or ""):
         out["description_change"] = {"from": old_description,

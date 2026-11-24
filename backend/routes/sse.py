@@ -10,6 +10,7 @@ from flask import Blueprint, Response, request, jsonify, current_app
 from flask_login import login_required, current_user
 from backend.models import Node, UserProfile, NodeTranscriptChunk, TTSChunk, Draft
 from backend.extensions import db
+from backend.utils import open_streams
 from backend.utils.streaming_session import (
     draft_user_node_id, stamp_session_alive,
 )
@@ -144,8 +145,11 @@ def transcription_stream(node_id):
             # Sleep briefly before checking again (outside app context)
             time.sleep(1)
 
+    slot = open_streams.admit(current_user.id)
+    if slot is None:
+        return open_streams.too_many_response()
     return Response(
-        generate(),
+        open_streams.CountedStream(generate(), slot),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
@@ -258,12 +262,16 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
 
 def _tts_stream_response(app, entity_cls, entity_id, chunk_fk_attr,
                           entity_label, last_chunk):
-    """Wrap the TTS stream generator in an SSE Response."""
+    """Wrap the TTS stream generator in an SSE Response (429 when the
+    account holds the most open streams, utils/open_streams)."""
+    slot = open_streams.admit(current_user.id)
+    if slot is None:
+        return open_streams.too_many_response()
     return Response(
-        _tts_stream_generator(
+        open_streams.CountedStream(_tts_stream_generator(
             app, entity_cls, entity_id, chunk_fk_attr,
             entity_label, last_chunk
-        ),
+        ), slot),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
@@ -383,8 +391,11 @@ def llm_stream(node_id):
                     last_heartbeat = time.time()
             time.sleep(0.5)
 
+    slot = open_streams.admit(current_user.id)
+    if slot is None:
+        return open_streams.too_many_response()
     return Response(
-        generate(),
+        open_streams.CountedStream(generate(), slot),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
@@ -461,6 +472,10 @@ def draft_transcription_stream(session_id):
     # Get the last chunk index the client has seen
     last_chunk = request.args.get('last_chunk', -1, type=int)
     device_key = request.args.get('device_key') or None
+
+    slot = open_streams.admit(current_user.id)
+    if slot is None:
+        return open_streams.too_many_response()
 
     # Only the tab recording the session opens this stream, so a
     # (re)connect is a sign of life — also for a resumed session whose
@@ -621,7 +636,7 @@ def draft_transcription_stream(session_id):
             time.sleep(1)
 
     return Response(
-        generate(),
+        open_streams.CountedStream(generate(), slot),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',

@@ -93,6 +93,20 @@ def request_account_deletion():
         except AccountDeletionRefused as e:
             return _refused(e)
 
+    # The emails one account and one client may ask for
+    # (utils/send_limits, as the email change): checked before the link
+    # is replaced, so a refused request leaves the link already sent
+    # working.
+    from backend.utils import send_limits
+    claim = None
+    if send_limits.client_may_ask("account-deletion", request.remote_addr):
+        claim = send_limits.claim_account("account-deletion", user.id)
+    if claim is None:
+        logger.info("Deletion link for user %s not sent: over the account "
+                    "or client limit", user.id)
+        return jsonify({"error": send_limits.WAIT_MESSAGE,
+                        "code": "too_many_requests"}), 429
+
     token = issue_confirmation_link(user)
     frontend_url = current_app.config.get("FRONTEND_URL", "")
     url = f"{frontend_url}/confirm-account-deletion?token={token}"
@@ -102,6 +116,8 @@ def request_account_deletion():
             user.email, user.username, url, DELETION_LINK_SECONDS,
             ACCOUNT_DELETION_GRACE_DAYS)
     except Exception:  # noqa: BLE001 - logged by the mailer
+        # Nothing went out: the count is given back.
+        send_limits.release(claim)
         user.account_deletion_token_hash = None
         user.account_deletion_expires_at = None
         db.session.commit()

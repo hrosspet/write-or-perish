@@ -115,3 +115,9 @@ test('links render as before: outside links open in a new tab, app paths in plac
   fireEvent.click(inside);
   expect(onInternal).toHaveBeenCalledWith('/account');
 });
+
+test("an outside link in a guest's reply tells search engines not to follow it", () => {
+  render(<MarkdownBody guestLinks>{'See [the shop](https://shop.example/buy)'}</MarkdownBody>);
+  expect(screen.getByRole('link', { name: 'the shop' }))
+    .toHaveAttribute('rel', 'noopener noreferrer nofollow ugc');
+});

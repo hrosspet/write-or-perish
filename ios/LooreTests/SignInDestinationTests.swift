@@ -87,6 +87,8 @@ final class SignInDestinationTests: StubbedAppTestCase {
     func testBackFromXWithoutASignInMatchesTheWeb() {
         XCTAssertEqual(MagicLink.message(for: "x_cancelled"), "Sign in with X was cancelled.")
         XCTAssertEqual(MagicLink.message(for: "x_failed"), "Sign in with X did not finish. Please try again.")
+        XCTAssertEqual(MagicLink.message(for: "x_wait"),
+                       "Sign in with X was started many times from this network. Please wait a few minutes, then try again.")
         // The in-app X sign-in reads the code off the sign-in page it lands on.
         let cancelled = URL(string: "https://loore.org/login?error=x_cancelled&returnUrl=%2Fprofile")!
         XCTAssertTrue(WebLoginRouting.isFrontendLanding(cancelled, environment: .production))

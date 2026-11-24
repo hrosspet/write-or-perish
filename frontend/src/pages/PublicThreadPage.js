@@ -28,7 +28,7 @@ function authorLine(node) {
  * One node's card. The focused node (deep-link target) gets a faint accent
  * border so arriving readers land visibly.
  */
-function ThreadNode({ node, focusId, isRoot }) {
+function ThreadNode({ node, focusId, isRoot, pieceAuthor }) {
   const focused = node.id === focusId;
   return (
     <>
@@ -68,7 +68,9 @@ function ThreadNode({ node, focusId, isRoot }) {
           color: 'var(--text-secondary)',
           lineHeight: 1.75,
         }}>
-          <MarkdownBody>{node.content}</MarkdownBody>
+          {/* A reply by someone other than the piece's author: search
+              engines do not follow its links. */}
+          <MarkdownBody guestLinks={node.username !== pieceAuthor}>{node.content}</MarkdownBody>
         </div>
         <div style={{
           fontFamily: 'var(--sans)',
@@ -88,7 +90,7 @@ function ThreadNode({ node, focusId, isRoot }) {
           borderLeft: '2px solid var(--border)',
         }}>
           {node.children.map((child) => (
-            <ThreadNode key={child.id} node={child} focusId={focusId} isRoot={false} />
+            <ThreadNode key={child.id} node={child} focusId={focusId} isRoot={false} pieceAuthor={pieceAuthor} />
           ))}
         </div>
       )}
@@ -165,7 +167,7 @@ export default function PublicThreadPage({ nodeIdOverride }) {
 
   return shell(
     <>
-      <ThreadNode node={data.thread} focusId={data.focus_id} isRoot />
+      <ThreadNode node={data.thread} focusId={data.focus_id} isRoot pieceAuthor={data.thread.username} />
 
       {data.truncated && (
         <p style={{

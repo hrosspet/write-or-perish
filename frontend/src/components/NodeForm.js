@@ -61,7 +61,12 @@ const NodeForm = forwardRef(
     const [showPublicReplyDialog, setShowPublicReplyDialog] = useState(false);
     // Parent's privacy, tracked whenever replying — drives the public-reply
     // consent dialog (#228). Independent of the inherit-defaults effect.
-    const [parentPrivacy, setParentPrivacy] = useState(null);
+    // A reply starts from the level the page already holds for the parent
+    // (parentPrivacyLevel), so a send before the form's own request for
+    // the parent answers, or after it failed, uses the parent's level and
+    // not the account's default.
+    const [parentPrivacy, setParentPrivacy] = useState(
+      (!editMode && parentId && parentPrivacyLevel) || null);
     const [pendingPaste, setPendingPaste] = useState(null);
     const [splitAcknowledged, setSplitAcknowledged] = useState(false);
 
@@ -85,6 +90,7 @@ const NodeForm = forwardRef(
     // For new nodes with a parent, we'll update these after fetching the parent.
     const [privacyLevel, setPrivacyLevel] = useState(
       initialPrivacyLevel
+      || (!editMode && parentId && parentPrivacyLevel)
       || readRemembered('loore_last_privacy_level', user?.default_privacy_level)
       || "private"
     );

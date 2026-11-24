@@ -105,27 +105,52 @@ def _saved_by(user_id, external_ids, cutoff):
 @celery.task(name='backend.tasks.external_sync.fetch_community_archive',
              bind=True)
 def fetch_community_archive(self, user_id, username, max_items=2000):
+    return fetch_community_archive_impl(
+        self.request.id, user_id, username, max_items)
+
+
+def fetch_community_archive_impl(task_id, user_id, username, max_items):
+    """The task's work. The account's fetch key
+    (routes/external.CA_FETCH_LOCK_KEY) is held from the start, refreshed
+    from a thread while the fetch runs, and freed however it ends."""
     with flask_app.app_context():
-        username = (username or "").strip().lstrip("@")
-        from backend.utils.community_archive import CommunityArchiveRetired
+        from backend.routes.external import CA_FETCH_BEAT_SECONDS, ca_fetch_key
+        from backend.utils import run_locks
+        lock = ca_fetch_key(user_id, task_id, username)
         try:
-            account_id = ca_lookup_account(username)
-        except CommunityArchiveRetired as e:
-            # No key past the REST API's retirement (#688): not "not found".
-            logger.error("Community Archive fetch for user %s: %s", user_id, e)
-            return {"status": "unavailable", "username": username,
-                    "message": str(e)}
-        if account_id is None:
-            return {"status": "not_found", "username": username}
-        created, skipped = _upsert_items(
-            user_id, SOURCE_COMMUNITY_ARCHIVE,
-            ca_fetch_tweets(account_id, username, max_items=max_items),
-        )
-        logger.info(
-            "Community Archive fetch for user %s @%s: %d new, %d known",
-            user_id, username, created, skipped)
-        return {"status": "ok", "username": username,
-                "created": created, "skipped": skipped}
+            try:
+                lock.beat()   # the running TTL from now on
+            except run_locks.RunLockLost:
+                logger.warning("Community Archive fetch key was taken by "
+                               "another fetch")
+            with run_locks.heartbeat(lock, CA_FETCH_BEAT_SECONDS):
+                return _fetch_community_archive(user_id, username, max_items)
+        finally:
+            lock.release()
+
+
+def _fetch_community_archive(user_id, username, max_items):
+    """The fetch itself, in the task's app context."""
+    username = (username or "").strip().lstrip("@")
+    from backend.utils.community_archive import CommunityArchiveRetired
+    try:
+        account_id = ca_lookup_account(username)
+    except CommunityArchiveRetired as e:
+        # No key past the REST API's retirement (#688): not "not found".
+        logger.error("Community Archive fetch for user %s: %s", user_id, e)
+        return {"status": "unavailable", "username": username,
+                "message": str(e)}
+    if account_id is None:
+        return {"status": "not_found", "username": username}
+    created, skipped = _upsert_items(
+        user_id, SOURCE_COMMUNITY_ARCHIVE,
+        ca_fetch_tweets(account_id, username, max_items=max_items),
+    )
+    logger.info(
+        "Community Archive fetch for user %s @%s: %d new, %d known",
+        user_id, username, created, skipped)
+    return {"status": "ok", "username": username,
+            "created": created, "skipped": skipped}
 
 
 # Import page anchor of the X Bookmarks card (ExternalImport.js).

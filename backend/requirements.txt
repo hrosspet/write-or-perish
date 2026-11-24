@@ -2,12 +2,14 @@
 flake8>=6.0.0
 
 # Runtime
-Flask>=2.2.5
+# >=2.3: see Werkzeug below. Python 3.9 resolves 3.1.x either way.
+Flask>=2.3
 Flask-SQLAlchemy>=3.0.0
 # <2.1: SQLAlchemy 2.1 (Python 3.11+) connects postgresql:// URLs with
 # psycopg 3 instead of psycopg2, so on Python 3.12 the app could not reach
 # the database. Python 3.9 resolves 2.0.x either way.
-SQLAlchemy>=2.0,<2.1
+# >=2.0.4: hybrid_property.inplace (models.Node.tool_calls_meta).
+SQLAlchemy>=2.0.4,<2.1
 Flask-Migrate>=3.0.0
 Flask-Login>=0.6.3
 Flask-Dance>=6.0.0,<7.0.0
@@ -22,7 +24,11 @@ tiktoken>=0.8
 # catching them. The 0.x line is what Python 3.9 resolves to.
 anthropic>=0.77.0,<1
 pydub>=0.25.1
-Werkzeug>=2.2.0
+# >=2.3: from 2.3 Werkzeug holds a body sent without a Content-Length to
+# the route's limit (backend/utils/request_size.py). Python 3.9 resolves
+# 3.1.x either way. With the Flask floor above, an older install moves
+# both together (Flask 2.2 does not run on Werkzeug 3).
+Werkzeug>=2.3
 gunicorn==23.0.0
 gevent>=24.0.0
 celery==5.3.4

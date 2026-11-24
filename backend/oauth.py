@@ -34,6 +34,34 @@ X_RETURN_SESSION_KEY = "x_sign_in_returned"
 # dropped there, never reused.
 X_AUTHORIZED_SESSION_KEY = "x_sign_in_authorized"
 
+# ── Heuristics (named here, listed in the PR) ─────────────────────────────
+# Starts of Sign in with X and Connect X (each asks X for a request token)
+# one client may make: 60 in 15 minutes and 200 a day, counted per address
+# (utils/send_limits, its own counters). As for the sign-in email, one
+# address can be a household, an office, a campus or a carrier's shared
+# address, and a person who cancels at X and tries again starts a few.
+X_START_LIMITS = ((15 * 60, 60), (24 * 3600, 200))
+X_START_SCOPE = "x-start"
+# Seconds a call to X (request token, access token, the account check)
+# may take before it fails. X answers these in about a second.
+X_CALL_TIMEOUT_SECONDS = 15
+
+
+def _limit_x_starts():
+    """Before flask-dance's start view (it asks X for a request token):
+    a client over X_START_LIMITS is sent back without calling X."""
+    if request.endpoint != "twitter.login":
+        return None
+    from backend.utils import send_limits
+    held = send_limits.claim(X_START_SCOPE, "client",
+                             send_limits.client_bucket(request.remote_addr),
+                             X_START_LIMITS)
+    if held is not None:
+        return None
+    logger.info("X sign-in start refused: over the per-client limit")
+    from backend.routes.auth import refuse_x_start
+    return refuse_x_start()
+
 
 def _note_x_return(sender, message=None, response=None, **kwargs):
     """oauth_error: flask-dance is about to redirect to /auth/login without
@@ -98,6 +126,17 @@ class _ConfiguredCallbackSession(OAuth1Session):
 _make_session = OAuth1ConsumerBlueprint.__dict__["session"].fget
 
 
+def _with_timeout(send):
+    """The provider session's request method, with X_CALL_TIMEOUT_SECONDS
+    unless a call names its own timeout: requests waits for ever by
+    default, and a slow X would hold the request (and its worker's
+    greenlet) as long."""
+    def request_with_timeout(method, url, *args, **kwargs):
+        kwargs.setdefault("timeout", X_CALL_TIMEOUT_SECONDS)
+        return send(method, url, *args, **kwargs)
+    return request_with_timeout
+
+
 class _RequestLocalSessionBlueprint(OAuth1ConsumerBlueprint):
     """An OAuth1 blueprint whose provider session lives on `g`.
 
@@ -117,6 +156,7 @@ class _RequestLocalSessionBlueprint(OAuth1ConsumerBlueprint):
         oauth_session = g.get(key)
         if oauth_session is None:
             oauth_session = _make_session(self)
+            oauth_session.request = _with_timeout(oauth_session.request)
             setattr(g, key, oauth_session)
         return oauth_session
 
@@ -147,6 +187,7 @@ def init_twitter_blueprint(app):
     oauth_authorized.connect(_note_x_authorized, sender=twitter_bp)
     oauth_error.connect(_note_x_return, sender=twitter_bp)
     twitter_bp.before_request(_refuse_foreign_callback)
+    twitter_bp.before_request(_limit_x_starts)
     # Register this blueprint on the app
     app.register_blueprint(twitter_bp, url_prefix="/auth")
     return twitter_bp

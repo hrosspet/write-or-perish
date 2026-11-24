@@ -1046,7 +1046,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       return res.data;
     }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, ai_usage, model: selectedModel, auto_generate: autoGenerateActive,
+      content, privacy_level, ai_usage, model: selectedModel,
+      auto_generate: autoGenerateActive,
     });
     return res.data;
   };

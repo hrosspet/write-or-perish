@@ -10,15 +10,12 @@ from backend.utils.timefmt import iso_utc
 from backend.utils.profile_versions import not_set_internal
 from backend.utils.slugs import permalink_for
 from datetime import datetime
-from openai import OpenAI
 import os
 import re
 # Additional imports for Voice‑Mode functionality
 from functools import wraps
 from werkzeug.utils import secure_filename
 import pathlib
-from pydub import AudioSegment
-import tempfile
 # Privacy utilities
 from backend.utils.privacy import (
     validate_privacy_level,
@@ -63,6 +60,12 @@ from backend.utils.llm_nodes import (
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import ThreadTooLong, thread_too_long_response
+from backend.utils.recording_limits import (
+    FORM_OVERHEAD_BYTES, MAX_STREAMING_CHUNK_BYTES, MAX_UPLOAD_CHUNK_BYTES,
+)
+from backend.utils.request_size import (
+    LONG_TEXT_MAX_BODY_BYTES, UPLOAD_MAX_BODY_BYTES, body_limit,
+)
 
 # ---------------------------------------------------------------------------
 # Voice‑Mode helpers
@@ -114,11 +117,6 @@ def _node_not_found():
 # Root folder (can be overridden via env var)
 AUDIO_STORAGE_ROOT = pathlib.Path(os.environ.get("AUDIO_STORAGE_PATH", "data/audio")).resolve()
 AUDIO_STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
-
-# OpenAI API limits for audio transcription
-OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
-OPENAI_MAX_DURATION_SEC = 1400  # ~23 minutes (OpenAI's actual limit)
-CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk (leaves buffer below limit)
 
 # Allowed extensions and max size (in bytes) - 200 MB.
 ALLOWED_EXTENSIONS = {"webm", "wav", "m4a", "mp3", "mp4", "mpeg", "mpga", "ogg", "oga", "flac", "aac"}
@@ -187,218 +185,31 @@ def _save_audio_file(file_storage, user_id: int, node_id: int, variant: str,
     directory structure `user/{user_id}/node/{node_id}/` exists before saving.
     before_encrypt – called with the saved file's path before it is
     encrypted at rest (an upload is measured there).
+
+    The file is written under a random name of its own and reaches its
+    final name only once encrypted.
     """
+    import uuid
+    from backend.utils.encryption import encrypt_file_atomically
     filename = secure_filename(file_storage.filename or f"{variant}")
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "webm"
     target_dir = AUDIO_STORAGE_ROOT / f"user/{user_id}/node/{node_id}"
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"{variant}.{ext}"
-    file_storage.save(target_path)
-    if before_encrypt is not None:
-        before_encrypt(target_path)
+    staged = target_dir / f"{variant}-upload-{uuid.uuid4().hex}.{ext}"
+    file_storage.save(staged)
+    try:
+        if before_encrypt is not None:
+            before_encrypt(staged)
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
     # Encrypt the audio file at rest (URL stored without .enc)
-    encrypt_file(str(target_path))
+    encrypt_file_atomically(staged, target_path)
     # Produce URL to be consumed externally, routed via /media endpoint.
     # We use the relative path from AUDIO_STORAGE_ROOT for portability.
     rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
     return f"/media/{rel_path.as_posix()}"
-
-
-def _compress_audio_if_needed(file_path: pathlib.Path) -> pathlib.Path:
-    """
-    Compress audio file to MP3 if it's in an uncompressed format (WAV, FLAC)
-    or if it exceeds OpenAI's size limit.
-    Returns the path to the compressed file, or the original file if no compression needed.
-    """
-    file_size = file_path.stat().st_size
-    ext = file_path.suffix.lower()
-
-    # Check if file is uncompressed or too large
-    needs_compression = ext in {".wav", ".flac"} or file_size > OPENAI_MAX_AUDIO_BYTES
-
-    if not needs_compression:
-        return file_path
-
-    try:
-        current_app.logger.info(f"Compressing audio file {file_path.name} (size: {file_size / 1024 / 1024:.1f} MB)")
-
-        # Load audio file
-        audio = AudioSegment.from_file(str(file_path))
-
-        # Create compressed version
-        compressed_path = file_path.with_suffix('.mp3')
-
-        # Export as MP3 with reasonable quality (128kbps is good for speech)
-        audio.export(
-            str(compressed_path),
-            format="mp3",
-            bitrate="128k",
-            parameters=["-q:a", "2"]  # VBR quality setting
-        )
-
-        compressed_size = compressed_path.stat().st_size
-        current_app.logger.info(
-            f"Compressed {file_path.name}: {file_size / 1024 / 1024:.1f} MB -> "
-            f"{compressed_size / 1024 / 1024:.1f} MB"
-        )
-
-        return compressed_path
-
-    except Exception as e:
-        current_app.logger.exception(
-            "Audio compression failed: %s", describe_exception(e))
-        return file_path  # Return original if compression fails
-
-
-def _get_audio_duration(file_path: pathlib.Path) -> float:
-    """Get the duration of an audio file in seconds."""
-    try:
-        audio = AudioSegment.from_file(str(file_path))
-        return len(audio) / 1000.0  # pydub returns milliseconds
-    except Exception as e:
-        current_app.logger.exception(
-            "Failed to get audio duration: %s", describe_exception(e))
-        return 0.0
-
-
-def _chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATION_SEC) -> list:
-    """
-    Split audio file into chunks of specified duration.
-    Returns list of temporary file paths for each chunk.
-    """
-    try:
-        audio = AudioSegment.from_file(str(file_path))
-        chunk_duration_ms = chunk_duration_sec * 1000
-        chunks = []
-
-        for i, start_ms in enumerate(range(0, len(audio), chunk_duration_ms)):
-            chunk = audio[start_ms:start_ms + chunk_duration_ms]
-
-            # Create temporary file for chunk
-            temp_file = tempfile.NamedTemporaryFile(
-                delete=False,
-                suffix='.mp3',
-                prefix=f'chunk_{i}_'
-            )
-            chunk.export(temp_file.name, format="mp3", bitrate="128k")
-            chunks.append(temp_file.name)
-
-            current_app.logger.info(
-                f"Created chunk {i + 1}: {start_ms / 1000:.0f}s - {(start_ms + len(chunk)) / 1000:.0f}s"
-            )
-
-        return chunks
-
-    except Exception as e:
-        current_app.logger.exception(
-            "Audio chunking failed: %s", describe_exception(e))
-        return []
-
-
-def _transcribe_audio_file(client: OpenAI, file_path: pathlib.Path) -> str:
-    """
-    Transcribe an audio file using OpenAI API.
-    Handles large files by compressing and/or chunking as needed.
-    Returns the transcript text.
-    """
-    # Step 1: Compress if needed
-    processed_path = _compress_audio_if_needed(file_path)
-
-    # Step 2: Check file size and duration
-    file_size = processed_path.stat().st_size
-    duration_sec = _get_audio_duration(processed_path)
-
-    current_app.logger.info(
-        f"Transcribing audio: {file_size / 1024 / 1024:.1f} MB, {duration_sec:.0f} seconds"
-    )
-
-    # Step 3: Determine if chunking is needed
-    needs_chunking = (
-        file_size > OPENAI_MAX_AUDIO_BYTES or
-        duration_sec > OPENAI_MAX_DURATION_SEC
-    )
-
-    try:
-        if not needs_chunking:
-            # Simple case: transcribe whole file
-            with open(processed_path, "rb") as audio_file:
-                resp = client.audio.transcriptions.create(
-                    model="gpt-4o-transcribe",
-                    file=audio_file,
-                    response_format="text"
-                )
-
-                # Extract transcript text
-                if hasattr(resp, "text"):
-                    return resp.text
-                elif isinstance(resp, dict):
-                    return resp.get("text") or resp.get("transcript") or ""
-                else:
-                    return str(resp)
-
-        else:
-            # Complex case: chunk and transcribe
-            current_app.logger.info(
-                f"File exceeds OpenAI limits (size: {file_size / 1024 / 1024:.1f} MB, "
-                f"duration: {duration_sec:.0f}s), using chunked transcription"
-            )
-
-            chunk_paths = _chunk_audio(processed_path)
-
-            if not chunk_paths:
-                raise Exception("Failed to create audio chunks")
-
-            transcripts = []
-
-            try:
-                for i, chunk_path in enumerate(chunk_paths):
-                    current_app.logger.info(f"Transcribing chunk {i + 1}/{len(chunk_paths)}")
-
-                    with open(chunk_path, "rb") as audio_file:
-                        resp = client.audio.transcriptions.create(
-                            model="gpt-4o-transcribe",
-                            file=audio_file,
-                            response_format="text"
-                        )
-
-                        # Extract transcript text
-                        if hasattr(resp, "text"):
-                            chunk_text = resp.text
-                        elif isinstance(resp, dict):
-                            chunk_text = resp.get("text") or resp.get("transcript") or ""
-                        else:
-                            chunk_text = str(resp)
-
-                        transcripts.append(chunk_text)
-
-                # Combine transcripts
-                full_transcript = "\n\n".join(transcripts)
-                current_app.logger.info(
-                    f"Chunked transcription complete: {len(chunk_paths)} chunks, "
-                    f"{len(full_transcript)} characters"
-                )
-
-                return full_transcript
-
-            finally:
-                # Clean up temporary chunk files
-                for chunk_path in chunk_paths:
-                    try:
-                        os.unlink(chunk_path)
-                    except Exception as e:
-                        current_app.logger.warning(
-                            "Failed to delete chunk file %s: %s",
-                            chunk_path, describe_exception(e))
-
-    finally:
-        # Clean up compressed file if it's different from original
-        if processed_path != file_path:
-            try:
-                os.unlink(processed_path)
-            except Exception as e:
-                current_app.logger.warning(
-                    "Failed to delete compressed file %s: %s",
-                    processed_path, describe_exception(e))
 
 
 nodes_bp = Blueprint("nodes_bp", __name__)
@@ -614,6 +425,32 @@ def _ai_usage_fields(node):
     return fields
 
 
+def _children_shown(n, user_id):
+    """*n*'s children as a thread view lists them for *user_id*: a
+    living prompt entry the viewer may not read is replaced by the nodes
+    under it that belong to its owner (Text mode continued inside a
+    thread: the prompt entry stays its owner's, the messages under it
+    show where it hangs; utils/public_threads). The callers filter the
+    result by what the viewer may read, as before. The subtree is
+    prefetched by the thread view, so this reads no rows."""
+    from backend.utils.public_threads import passes_through
+    shown = []
+    seen = {n.id}
+    pending = list(n.children)
+    while pending:
+        child = pending.pop(0)
+        if child.id in seen:
+            continue
+        seen.add(child.id)
+        if (child.prompt_key and child.deleted_at is None
+                and not can_user_access_node(child, user_id)):
+            pending.extend(below for below in child.children
+                           if passes_through(child, below))
+            continue
+        shown.append(child)
+    return shown
+
+
 def serialize_node_recursive(n, user_id=None, parent_user_id=None):
     """Recursively serialize a node and its accessible children.
 
@@ -655,7 +492,8 @@ def serialize_node_recursive(n, user_id=None, parent_user_id=None):
         s = serialize_node_status(child, user_id)
         return s is not None and not s.get("inaccessible")
 
-    visible_children = [c for c in n.children if _child_visible(c)]
+    visible_children = [c for c in _children_shown(n, user_id)
+                        if _child_visible(c)]
     # Mirror the focal serializer's parent_user_id derivation (nodes.py
     # ~line 822) so the frontend's ownedByMe check works the same way
     # at every depth.
@@ -727,14 +565,16 @@ def approximate_token_count(text):
 
 
 @nodes_bp.route("/", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES, form=UPLOAD_MAX_BODY_BYTES)
 @login_required
 def create_node():
     """Create a new node.
 
     Two usage modes:
-    1. JSON body     – `{ content, parent_id?, node_type? }` (existing behaviour)
+    1. JSON body     – `{ content, parent_id? }` (existing behaviour)
     2. multipart/form – Field `audio_file` containing a WebM / m4a / wav file.
-       Optional fields: `parent_id`, `node_type`.
+       Optional field: `parent_id`.
+    A `node_type` in either is ignored: the node is the user's ("user").
 
     When an audio file is provided the server stores it and returns the node
     immediately.  Transcription (to populate `content`) is handled
@@ -779,7 +619,10 @@ def create_node():
             return too_many
 
         parent_id = request.form.get("parent_id")
-        node_type = request.form.get("node_type", "user")
+        # What a client creates is its own writing: "llm" and "link"
+        # nodes are made by the server (create_llm_placeholder, the /link
+        # route), whatever node_type a request names.
+        node_type = "user"
 
         # Get privacy settings from form data (with defaults)
         privacy_level = request.form.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -800,6 +643,11 @@ def create_node():
         # Race A guard: lock parent and reject if soft-deleted.
         from backend.utils.node_deletion import assert_parent_alive
         err = assert_parent_alive(parent_id)
+        if err is not None:
+            return err
+        # A day's public replies under other people's posts.
+        from backend.utils.public_reply_limits import public_reply_refusal
+        err = public_reply_refusal(current_user.id, parent_id, privacy_level)
         if err is not None:
             return err
 
@@ -918,8 +766,12 @@ def create_node():
     if not content:
         return jsonify({"error": "Content is required"}), 400
     parent_id = data.get("parent_id")  # May be None for a root node.
-    node_type = data.get("node_type", "user")  # default is "user"
-    linked_node_id = data.get("linked_node_id")  # For linked nodes
+    # What a client creates is its own writing: "llm" and "link"
+    # nodes are made by the server (create_llm_placeholder, the /link
+    # route), whatever node_type a request names.
+    node_type = "user"
+    # Links between nodes go through POST /<id>/link, which checks the
+    # linked node; this route sets none.
 
     # Get privacy settings from request data (with defaults)
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -934,6 +786,11 @@ def create_node():
     # Race A guard: lock parent and reject if soft-deleted.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
+    # A day's public replies under other people's posts.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(current_user.id, parent_id, privacy_level)
     if err is not None:
         return err
 
@@ -974,7 +831,6 @@ def create_node():
         human_owner_id=current_user.id,
         parent_id=parent_id,
         node_type=node_type,
-        linked_node_id=linked_node_id,
         token_count=token_count,
         privacy_level=privacy_level,
         ai_usage=ai_usage
@@ -1091,6 +947,15 @@ def update_node(node_id):
                 "error": REPLY_IN_PROGRESS_MESSAGE,
                 "code": REPLY_IN_PROGRESS_CODE,
             }), 409
+        # Becoming public in someone else's thread counts as a public
+        # reply there.
+        if privacy_level == "public" and node.privacy_level != "public":
+            from backend.utils.public_reply_limits import (
+                public_reply_refusal)
+            err = public_reply_refusal(
+                current_user.id, node.parent_id, privacy_level)
+            if err is not None:
+                return err
         node.set_privacy_level(privacy_level)
         # Auto-unpin if node is made private
         if privacy_level == "private" and node.pinned_at is not None:
@@ -1362,7 +1227,7 @@ def _focal_own_fields(node, viewer_id):
         data["streaming_content"] = node.get_streaming_content()
     # Include tool call metadata for LLM nodes: in full for the reply's
     # owner, each action's name and outcome for anyone else.
-    if node.tool_calls_meta:
+    if node.tool_calls_meta_stored:
         from backend.utils.tool_meta import tool_calls_meta_for
         visible = tool_calls_meta_for(node, viewer_id)
         # A reply whose only entry was the app marker reads as a node
@@ -1588,7 +1453,11 @@ def get_node(node_id):
     from backend.utils.thread_tree import visible_child_counts
     ancestor_child_counts = visible_child_counts(
         [a.id for a in ancestor_nodes], current_user.id)
-    prefetch_deks(_render_set_ciphertexts(render_set))
+    from backend.utils.tool_record import sealed_parts
+    # The focal node's tool record goes to its owner in full.
+    prefetch_deks(_render_set_ciphertexts(render_set)
+                  + (sealed_parts([node])
+                     if is_node_owner(node, current_user.id) else []))
 
     # Build ancestors. Soft-deleted ancestors the viewer had pre-deletion
     # access to render as tombstones — without this the breadcrumb chain
@@ -1606,13 +1475,22 @@ def get_node(node_id):
     # taken here from content the loop decrypts anyway.
     read_prompt_above = False
     tombstone_below = False
+    # The chain node just below hangs under a prompt entry the viewer may
+    # not read, and is shown in its place (utils/public_threads): it is
+    # a child of this ancestor in the breadcrumb, though not in the count.
+    from backend.utils.public_threads import passes_through
+    prompt_below = False
+    chain_below = node
     for current in ancestor_nodes:
         status = serialize_node_status(current, current_user.id)
         # The count above skips deleted children, but the chain child just
         # below, when it is a tombstone in this breadcrumb, is visible.
         child_count = (ancestor_child_counts.get(current.id, 0)
-                       + (1 if tombstone_below else 0))
+                       + (1 if tombstone_below or prompt_below else 0))
         tombstone_below = bool(status and status.get("deleted"))
+        prompt_below = bool(status and status.get("inaccessible")
+                            and passes_through(current, chain_below))
+        chain_below = current
         if status is None:  # alive + accessible
             ancestor_content = current.get_content()
             if not read_prompt_above and (
@@ -1673,7 +1551,8 @@ def get_node(node_id):
         s = serialize_node_status(child, current_user.id)
         return s is not None and not s.get("inaccessible")
 
-    visible_children = [c for c in node.children if _child_visible(c)]
+    visible_children = [c for c in _children_shown(node, current_user.id)
+                        if _child_visible(c)]
 
     # Compute the focal node's effective owner so first-level children
     # carry the right parent_user_id without an N+1.
@@ -2276,38 +2155,97 @@ def get_audio_chunks(node_id):
     # Duration from ffprobe is accurate; browser's audio.duration is not
     # for WebM files with continuous timestamps across chunks
     chunks = []
-    for f in chunk_files:
+    for f, duration in zip(chunk_files, _recorded_files_seconds(chunk_files)):
         # Strip .enc from filename for URL (media route handles .enc fallback)
         fname = f.name
         if fname.endswith('.enc'):
             fname = fname[:-4]
         url = f"/media/nodes/{node.user_id}/{node_id}/{fname}"
-        # For encrypted files, decrypt to temp file to get accurate duration
-        if f.name.endswith('.enc'):
-            temp_path = None
-            try:
-                temp_path = decrypt_file_to_temp(str(f))
-                duration = get_webm_duration(temp_path)
-                if duration is None:
-                    duration = 300.0
-            except Exception as e:
-                current_app.logger.warning(
-                    "Failed to get duration for encrypted chunk %s: %s",
-                    f.name, describe_exception(e))
-                duration = 300.0
-            finally:
-                if temp_path:
-                    try:
-                        os.unlink(temp_path)
-                    except OSError:
-                        pass
-        else:
-            duration = get_webm_duration(str(f))
-            if duration is None:
-                duration = 300.0
+        if duration is None:
+            duration = 300.0
         chunks.append({"url": url, "duration": duration})
 
     return jsonify({"chunks": chunks}), 200
+
+
+# Heuristic: how long a recorded file's length, measured for
+# /audio-chunks, is kept in Redis. The key holds the file's path, size and
+# modification time, so a file that changes is measured again; a
+# recording's files do not change once written. 30 days bounds the keys a
+# recording leaves; a key that expires or is lost costs one more
+# measurement of that file.
+AUDIO_SECONDS_KEPT_FOR = 30 * 24 * 60 * 60
+# Heuristic: how long a measurement that gave no length (ffprobe timed out
+# or stated none) is kept: a few minutes, so a busy moment does not fix a
+# file at the fallback length, while requests in between do not decrypt
+# and probe it again.
+AUDIO_SECONDS_UNKNOWN_KEPT_FOR = 5 * 60
+
+
+def _audio_seconds_key(f):
+    try:
+        st = f.stat()
+    except OSError:
+        return None
+    rel = f.relative_to(AUDIO_STORAGE_ROOT).as_posix()
+    return f"loore:audio_seconds:{rel}:{st.st_size}:{st.st_mtime_ns}"
+
+
+def _measure_recorded_file(f):
+    """The length ffprobe states for the recorded file *f* (decrypted to a
+    temporary file first when encrypted), or None. Raises when it cannot
+    be decrypted."""
+    if not f.name.endswith('.enc'):
+        return get_webm_duration(str(f))
+    temp_path = decrypt_file_to_temp(str(f))
+    try:
+        return get_webm_duration(temp_path)
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
+
+
+def _recorded_files_seconds(files):
+    """The length of each recorded file in *files* for /audio-chunks, in
+    order (None when it cannot be told). Each file is measured once
+    (decrypted and probed) and its length kept in Redis for
+    AUDIO_SECONDS_KEPT_FOR (utils/run_locks.keep_value), read back for
+    all files at once. A measurement that gave no length is kept for
+    AUDIO_SECONDS_UNKNOWN_KEPT_FOR only, and a file that could not be
+    decrypted is not kept: both are measured again. Without Redis every
+    file is measured, as before."""
+    from backend.utils import run_locks
+    keys = [_audio_seconds_key(f) for f in files]
+    present = [key for key in keys if key is not None]
+    kept = dict(zip(present, run_locks.kept_values(present)))
+    keeping = True
+    out = []
+    for f, key in zip(files, keys):
+        value = kept.get(key) if key is not None else None
+        if value is not None:
+            try:
+                out.append(float(value) if value else None)
+                continue
+            except ValueError:
+                pass
+        try:
+            seconds = _measure_recorded_file(f)
+        except Exception as e:
+            current_app.logger.warning(
+                "Failed to get duration for encrypted chunk %s: %s",
+                f.name, describe_exception(e))
+            out.append(None)
+            continue
+        if keeping and key is not None:
+            # Not tried again in this request once Redis is unreachable.
+            keeping = run_locks.keep_value(
+                key, "" if seconds is None else repr(seconds),
+                AUDIO_SECONDS_UNKNOWN_KEPT_FOR if seconds is None
+                else AUDIO_SECONDS_KEPT_FOR)
+        out.append(seconds)
+    return out
 
 
 @nodes_bp.route("/<int:node_id>/audio-download", methods=["GET"])
@@ -2323,10 +2261,14 @@ def download_audio(node_id):
                 'mp3' re-encodes the merged audio to MP3 for portability.
                 'webm' is accepted as a deprecated alias for 'original'
                 — it predates MP4 recording, when source was always WebM.
+
+    One download is prepared at a time per account, and at most
+    AUDIO_DOWNLOAD_SLOTS on the server; a request beyond those is
+    answered 429 (``download_busy``).
     """
-    from flask import send_file
     import subprocess
-    from backend.utils.webm_utils import concat_audio_files
+    from backend.utils.file_responses import send_temporary_file
+    from backend.utils.webm_utils import INPUT_FORMAT_ARGS, concat_audio_files
 
     fmt = request.args.get('format', 'original').lower()
     if fmt == 'webm':
@@ -2352,8 +2294,14 @@ def download_audio(node_id):
     if not chunk_files:
         return jsonify({"error": "No audio files found"}), 404
 
+    holds = _take_audio_download_holds(current_user.id)
+    if holds is None:
+        return jsonify({"error": AUDIO_DOWNLOAD_BUSY_TEXT,
+                        "code": "download_busy"}), 429
+
     # Decrypt encrypted files to temp paths
     temp_files = []
+    handed_off = False
     try:
         decrypted_paths = []
         for f in chunk_files:
@@ -2392,7 +2340,7 @@ def download_audio(node_id):
             os.close(mp3_fd)
             temp_files.append(mp3_path)
             result = subprocess.run(
-                ['ffmpeg', '-y', '-i', merged_path,
+                ['ffmpeg', '-y', *INPUT_FORMAT_ARGS, '-i', merged_path,
                  '-c:a', 'libmp3lame', '-q:a', '2', mp3_path],
                 capture_output=True, text=True, timeout=120,
             )
@@ -2403,29 +2351,72 @@ def download_audio(node_id):
             mimetype = 'audio/mpeg'
             ext = 'mp3'
 
-        resp = send_file(
-            output_path, mimetype=mimetype,
-            as_attachment=True,
+        # The decrypted copies and the intermediate merge go now; the
+        # output's name goes as soon as it is open (send_temporary_file),
+        # and the holds end when the response does.
+        temp_files.remove(output_path)
+        _end_audio_download(temp_files, [])
+        temp_files = [output_path]
+        resp = send_temporary_file(
+            output_path, on_close=lambda: _end_audio_download([], holds),
+            mimetype=mimetype, as_attachment=True,
             download_name=f'node-{node_id}-recording.{ext}',
         )
-
-        @resp.call_on_close
-        def cleanup():
-            for tmp in temp_files:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-
+        handed_off = True
         return resp
 
-    except Exception:
-        for tmp in temp_files:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-        raise
+    finally:
+        # Every other way out (an error, a failed conversion).
+        if not handed_off:
+            _end_audio_download(temp_files, holds)
+
+
+# Heuristics: how many merged recording downloads (audio-download) are
+# prepared at once. Each decrypts the whole recording and runs ffmpeg over
+# all of it; a four-hour iPhone recording passes through about 1.4 GB of
+# WAV on disk. One per account: a person downloads or listens to one
+# recording at a time, and the apps fetch it once per listen. Two on the
+# server: downloads of recordings are rare and most take seconds.
+AUDIO_DOWNLOAD_SLOTS = 2
+# How long a download's holds last when the request that took them never
+# ends them (its worker was killed): longer than one merge's ffmpeg time
+# limits together (600 s to decode, 600 s to encode, 120 s to MP3).
+AUDIO_DOWNLOAD_HOLD_SECONDS = 30 * 60
+AUDIO_DOWNLOAD_BUSY_TEXT = ("Another download of a recording is being "
+                            "prepared. Please try again in a few minutes.")
+
+
+def _take_audio_download_holds(user_id):
+    """The holds a merged download takes (utils/run_locks): its account's
+    and one of AUDIO_DOWNLOAD_SLOTS. None when the account's is taken or
+    every slot is (nothing is held then). Without Redis every hold is
+    granted, unlocked, as for the run locks."""
+    from uuid import uuid4
+    from backend.utils.run_locks import RunLock
+    token = uuid4().hex
+    own = RunLock(f"loore:audio_download:user:{user_id}", token,
+                  AUDIO_DOWNLOAD_HOLD_SECONDS)
+    if not own.acquire():
+        return None
+    for slot in range(AUDIO_DOWNLOAD_SLOTS):
+        held = RunLock(f"loore:audio_download:slot:{slot}", token,
+                       AUDIO_DOWNLOAD_HOLD_SECONDS)
+        if held.acquire():
+            return [own, held]
+    own.release()
+    return None
+
+
+def _end_audio_download(temp_files, holds):
+    """A merged download is over: its temporary files go and its holds
+    are released."""
+    for tmp in temp_files:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    for held in holds:
+        held.release()
 
 
 @nodes_bp.route("/<int:node_id>/tts", methods=["POST"])
@@ -2480,10 +2471,21 @@ def generate_tts(node_id):
     # Enqueue async TTS generation task
     from backend.tasks.tts import generate_tts_audio
 
-    # Set initial task status
-    node.tts_task_status = 'pending'
-    node.tts_task_progress = 0
-    db.session.commit()
+    # Set initial task status: a conditional UPDATE, so of requests at the
+    # same moment one queues the task (the check above read the status
+    # earlier in this request).
+    from backend.utils.audio_storage import claim_tts_start
+    if not claim_tts_start(Node, node.id):
+        db.session.refresh(node)
+        if node.audio_tts_url:
+            return jsonify({"message": "TTS already available",
+                            "tts_url": node.audio_tts_url}), 200
+        return jsonify({
+            "message": "TTS generation already in progress",
+            "task_id": node.tts_task_id,
+            "status": node.tts_task_status,
+            "node_id": node.id
+        }), 202
 
     # Enqueue task
     task = generate_tts_audio.delay(node.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
@@ -2594,12 +2596,18 @@ def get_llm_status(node_id):
                     'failed', 'cancelled'):
                 # A task that returned after marking its node failed or
                 # cancelled (spend cap, a withdrawn batch) keeps that.
-                node.llm_task_status = 'completed'
-                db.session.commit()
-                # Get the created node ID from task result
+                # Written on the owner's poll only; the task itself marks
+                # the node completed too.
+                if is_node_owner(node, current_user.id):
+                    node.llm_task_status = 'completed'
+                    db.session.commit()
+                # Get the created node ID from task result. Its text goes
+                # only to a user who may read that node itself: the final
+                # node of a multi-step reply is private until shared.
                 if task.result and 'llm_node_id' in task.result:
                     llm_node = Node.query.get(task.result['llm_node_id'])
-                    if llm_node:
+                    if llm_node and can_user_access_node(
+                            llm_node, current_user.id):
                         created_node = {
                             "id": llm_node.id,
                             "content": llm_node.get_content(),
@@ -2656,7 +2664,7 @@ def get_llm_status(node_id):
 
     # Include tool call metadata if present: in full for the reply's
     # owner, each action's name and outcome for anyone else.
-    if node.tool_calls_meta:
+    if node.tool_calls_meta_stored:
         from backend.utils.tool_meta import tool_calls_meta_for
         visible = tool_calls_meta_for(node, current_user.id)
         if visible:
@@ -2917,7 +2925,10 @@ def init_chunked_upload():
     total_chunks = data.get("total_chunks")
     upload_id = data.get("upload_id")
     parent_id = data.get("parent_id")
-    node_type = data.get("node_type", "user")
+    # What a client creates is its own writing: "llm" and "link"
+    # nodes are made by the server (create_llm_placeholder, the /link
+    # route), whatever node_type a request names.
+    node_type = "user"
 
     # Get privacy settings (with defaults)
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
@@ -2960,6 +2971,11 @@ def init_chunked_upload():
     # Race A guard: lock parent and reject if soft-deleted.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
+    # A day's public replies under other people's posts.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(current_user.id, parent_id, privacy_level)
     if err is not None:
         return err
 
@@ -3036,6 +3052,7 @@ def init_chunked_upload():
 
 
 @nodes_bp.route("/upload/chunk", methods=["POST"])
+@body_limit(MAX_UPLOAD_CHUNK_BYTES + FORM_OVERHEAD_BYTES)
 @login_required
 def upload_chunk():
     """Receive and store a single chunk.
@@ -3231,6 +3248,17 @@ def finalize_chunked_upload():
     if _uploaded_bytes(chunk_dir) != metadata["filesize"]:
         return _upload_size_mismatch(chunk_dir, node, upload_id)
 
+    # One finalize of an upload goes on: the one that moves its pieces'
+    # folder aside. Another one (sent twice at once, or again while the
+    # first runs) finds no folder and gets the answer a finalize sent after
+    # the upload finished gets.
+    unclaimed = chunk_dir
+    chunk_dir = unclaimed.with_name(unclaimed.name + ".finalizing")
+    try:
+        os.rename(unclaimed, chunk_dir)
+    except OSError:
+        return jsonify({"error": "Upload session not found"}), 404
+
     # Reassemble chunks
     filename = metadata["filename"]
     ext = filename.rsplit(".", 1)[-1] if "." in filename else "webm"
@@ -3238,56 +3266,72 @@ def finalize_chunked_upload():
     target_dir = AUDIO_STORAGE_ROOT / f"user/{current_user.id}/node/{node.id}"
     target_dir.mkdir(parents=True, exist_ok=True)
     target_path = target_dir / f"original.{ext}"
+    # Assembled and measured under a name of its own; it reaches
+    # target_path once encrypted.
+    import uuid
+    staged = target_dir / f"original-upload-{uuid.uuid4().hex}.{ext}"
 
     current_app.logger.info(f"Reassembling {metadata['total_chunks']} chunks for upload {upload_id}")
 
-    # Combine chunks into final file
-    with open(target_path, "wb") as outfile:
-        for chunk_index in range(metadata["total_chunks"]):
-            chunk_path = chunk_dir / f"chunk_{chunk_index:04d}"
-            with open(chunk_path, "rb") as infile:
-                outfile.write(infile.read())
+    try:
+        # Combine chunks into final file
+        with open(staged, "wb") as outfile:
+            for chunk_index in range(metadata["total_chunks"]):
+                chunk_path = chunk_dir / f"chunk_{chunk_index:04d}"
+                with open(chunk_path, "rb") as infile:
+                    outfile.write(infile.read())
 
-    # Verify file size (a piece re-sent while it was assembled)
-    final_size = target_path.stat().st_size
-    if final_size != metadata["filesize"]:
-        target_path.unlink(missing_ok=True)
-        return _upload_size_mismatch(chunk_dir, node, upload_id)
+        # Verify file size
+        final_size = staged.stat().st_size
+        if final_size != metadata["filesize"]:
+            staged.unlink(missing_ok=True)
+            return _upload_size_mismatch(chunk_dir, node, upload_id)
 
-    # Measured before it is encrypted: its seconds count toward the
-    # account's usage at a start until its cost is recorded
-    # (utils/recording_limits.pending_audio_seconds).
-    # Written in this transaction (an UPDATE, so a re-read of the entry
-    # keeps it) and committed below with the file's URL, before the
-    # transcription is queued; `updated_at` stays (not an edit).
-    from backend.utils.recording_limits import finalized_upload_seconds
-    Node.query.filter(Node.id == node.id).update(
-        {Node.audio_pending_seconds: finalized_upload_seconds(target_path),
-         Node.updated_at: Node.updated_at},
-        synchronize_session=False)
+        # Measured before it is encrypted: its seconds count toward the
+        # account's usage at a start until its cost is recorded
+        # (utils/recording_limits.pending_audio_seconds).
+        # Written in this transaction (an UPDATE, so a re-read of the
+        # entry keeps it) and committed below with the file's URL, before
+        # the transcription is queued; `updated_at` stays (not an edit).
+        from backend.utils.recording_limits import finalized_upload_seconds
+        Node.query.filter(Node.id == node.id).update(
+            {Node.audio_pending_seconds: finalized_upload_seconds(staged),
+             Node.updated_at: Node.updated_at},
+            synchronize_session=False)
 
-    # Encrypt the assembled audio file at rest (URL stored without .enc)
-    encrypt_file(str(target_path))
+        # Encrypt the assembled audio file at rest (URL stored without .enc)
+        from backend.utils.encryption import encrypt_file_atomically
+        encrypt_file_atomically(staged, target_path)
 
-    # No AI means no AI (#665): init refused an entry set to None, but the
-    # entry can be set to None while its chunks upload (read again now,
-    # after the reassembly). The audio is kept and not transcribed; the
-    # entry and its transcription status say why.
-    db.session.refresh(node)
-    from backend.utils.recording_ai_usage import (
-        mark_not_transcribed, may_transcribe,
-    )
-    transcribe = may_transcribe(node.ai_usage)
+        # No AI means no AI (#665): init refused an entry set to None, but
+        # the entry can be set to None while its chunks upload (read again
+        # now, after the reassembly). The audio is kept and not
+        # transcribed; the entry and its transcription status say why.
+        db.session.refresh(node)
+        from backend.utils.recording_ai_usage import (
+            mark_not_transcribed, may_transcribe,
+        )
+        transcribe = may_transcribe(node.ai_usage)
 
-    # Update node with audio info
-    rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
-    node.audio_original_url = f"/media/{rel_path.as_posix()}"
-    node.audio_mime_type = f"audio/{ext}"
-    if transcribe:
-        node.set_content("[Voice note – transcription pending]")
-    else:
-        mark_not_transcribed(node, metadata["filename"])
-    db.session.commit()
+        # Update node with audio info
+        rel_path = target_path.relative_to(AUDIO_STORAGE_ROOT)
+        node.audio_original_url = f"/media/{rel_path.as_posix()}"
+        node.audio_mime_type = f"audio/{ext}"
+        if transcribe:
+            node.set_content("[Voice note – transcription pending]")
+        else:
+            mark_not_transcribed(node, metadata["filename"])
+        db.session.commit()
+    except BaseException:
+        # Not finished: the pieces go back, so the upload can be finalized
+        # again.
+        staged.unlink(missing_ok=True)
+        if chunk_dir.exists():
+            try:
+                os.rename(chunk_dir, unclaimed)
+            except OSError:
+                pass
+        raise
 
     # Clean up chunks
     import shutil
@@ -3396,7 +3440,10 @@ def init_streaming_transcription():
     data = request.get_json() or {}
 
     parent_id = data.get("parent_id")
-    node_type = data.get("node_type", "user")
+    # What a client creates is its own writing: "llm" and "link"
+    # nodes are made by the server (create_llm_placeholder, the /link
+    # route), whatever node_type a request names.
+    node_type = "user"
     privacy_level = data.get("privacy_level", PrivacyLevel.PRIVATE)
     ai_usage = data.get("ai_usage", AIUsage.NONE)
     chunk_interval_ms = data.get("chunk_interval_ms", 300000)  # Default 5 minutes
@@ -3416,6 +3463,11 @@ def init_streaming_transcription():
     # Race A guard: lock parent and reject if soft-deleted.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(parent_id)
+    if err is not None:
+        return err
+    # A day's public replies under other people's posts.
+    from backend.utils.public_reply_limits import public_reply_refusal
+    err = public_reply_refusal(current_user.id, parent_id, privacy_level)
     if err is not None:
         return err
     # This path's recordings wait for their transcript as entries, counted
@@ -3475,6 +3527,7 @@ def init_streaming_transcription():
 
 
 @nodes_bp.route("/<int:node_id>/audio-chunk", methods=["POST"])
+@body_limit(MAX_STREAMING_CHUNK_BYTES + FORM_OVERHEAD_BYTES)
 @login_required
 def upload_audio_chunk(node_id):
     """Upload an audio chunk for streaming transcription.

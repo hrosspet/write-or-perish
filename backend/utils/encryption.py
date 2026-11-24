@@ -48,11 +48,85 @@ _kms_client = None
 _kms_client_lock = threading.Lock()
 
 
-def is_encryption_enabled() -> bool:
-    """Check if encryption is enabled (GCP KMS is configured)."""
-    if os.environ.get("ENCRYPTION_DISABLED", "").lower() in ("true", "1", "yes"):
+_TRUE_VALUES = ("true", "1", "yes")
+
+
+class EncryptionNotConfigured(RuntimeError):
+    """Encryption is not turned off here and there is no key name to
+    encrypt with."""
+
+
+ENCRYPTION_OFF_NOTICE = (
+    "Encryption is off on this instance (ENCRYPTION_DISABLED=true): new "
+    "content is stored unencrypted. GCP_KMS_KEY_NAME is set: %s.")
+ENCRYPTION_OFF_KEY_NAME_NOTICE = (
+    " Content that was stored encrypted earlier is still read with that "
+    "key; nothing new is encrypted with it, except text that itself "
+    "begins with ENC:v1: or ENC:v2:.")
+
+
+def encryption_choice(environ=None) -> bool:
+    """Whether this instance encrypts: the one rule every caller follows,
+    the start check (validate_keys in backend/__init__.py) included.
+
+    ENCRYPTION_DISABLED=true (or 1, yes) is the only switch that turns
+    encryption off, in every environment (Peter, 2026-11-23). So:
+
+    - ENCRYPTION_DISABLED=true: off, whether or not GCP_KMS_KEY_NAME is
+      set. A key name beside the switch serves reads of what was stored
+      encrypted earlier (reads_decrypt); the one thing still encrypted
+      with it is text that itself begins with ENC:v1:/ENC:v2:
+      (encrypt_content), so that it reads back as written.
+    - not turned off, GCP_KMS_KEY_NAME set: on.
+    - not turned off, no GCP_KMS_KEY_NAME: EncryptionNotConfigured.
+      Nothing is stored as plain text for want of a key name.
+
+    The message names the settings, never a value."""
+    environ = os.environ if environ is None else environ
+    if (environ.get("ENCRYPTION_DISABLED") or "").lower() in _TRUE_VALUES:
         return False
-    return bool(os.environ.get("GCP_KMS_KEY_NAME"))
+    if not environ.get("GCP_KMS_KEY_NAME"):
+        raise EncryptionNotConfigured(
+            "GCP_KMS_KEY_NAME is not set, so new writing could not be "
+            "encrypted. Set it in the env file this instance reads, or "
+            "set ENCRYPTION_DISABLED=true on an instance that is meant to "
+            "run without encryption (local development, staging, tests).")
+    return True
+
+
+def reads_decrypt(environ=None) -> bool:
+    """Whether a value or file that is stored encrypted is decrypted
+    when it is read: wherever a key name is set, with encryption on or
+    off. An instance that holds encrypted content and is started with
+    ENCRYPTION_DISABLED=true and its key name keeps reading that content
+    as it was written, with the same key-service calls as before; only
+    what it writes from then on is stored unencrypted. Without a key
+    name (and encryption off) nothing can be decrypted, and a stored
+    value comes back as it is. Raises as encryption_choice does."""
+    environ = os.environ if environ is None else environ
+    return encryption_choice(environ) or bool(environ.get("GCP_KMS_KEY_NAME"))
+
+
+def encryption_off_notice(environ=None):
+    """The one line an instance writes to its log when it starts with
+    encryption off, or None when it encrypts. The line says yes or no
+    about a key name set beside the switch, and what that key is then
+    used for, so an instance that was meant to encrypt shows it in its
+    log. No value is in the line."""
+    environ = os.environ if environ is None else environ
+    if encryption_choice(environ):
+        return None
+    if environ.get("GCP_KMS_KEY_NAME"):
+        return ENCRYPTION_OFF_NOTICE % "yes" + ENCRYPTION_OFF_KEY_NAME_NOTICE
+    return ENCRYPTION_OFF_NOTICE % "no"
+
+
+def is_encryption_enabled() -> bool:
+    """True when content is encrypted here, False only under
+    ENCRYPTION_DISABLED=true; raises EncryptionNotConfigured when
+    encryption is not turned off and no key name is set (see
+    encryption_choice)."""
+    return encryption_choice()
 
 
 def get_kms_key_name() -> str:
@@ -164,6 +238,23 @@ def _is_transient_kms_error(e):
         pass
     msg = str(e)
     return bool(_TRANSIENT_STATUS_RE.match(msg)) or any(m in msg for m in _TRANSIENT_MARKERS)
+
+
+def key_service_unavailable(exc) -> bool:
+    """Whether *exc* (or the exception it was raised from) is a key-service
+    failure that _kms_call retries: the service was down, slow or out of
+    reach, which says nothing about the stored value. A pass over many
+    accounts' rows ends on such a failure, as it did before it learned to
+    skip one unreadable row: otherwise every row of the pass would wait
+    out the retries (about 30 s) on its own. Any other failure (a stored
+    value that does not decrypt) skips only that row."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if _is_transient_kms_error(exc):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__
+    return False
 
 
 def _kms_call(op, request):
@@ -285,7 +376,7 @@ def prefetch_deks(ciphertexts):
     hits. Duplicates collapse (many rows share a DEK only if they were
     encrypted together, but the check is free). Returns the number of KMS
     calls issued."""
-    if not is_encryption_enabled():
+    if not reads_decrypt():
         return 0
     missing = {}
     for ciphertext in ciphertexts:
@@ -303,11 +394,11 @@ def prefetch_deks(ciphertexts):
 
 
 def dek_cached(ciphertext) -> bool:
-    """True when decrypting *ciphertext* makes no KMS call: encryption is
-    off, it is no v2 envelope, or its DEK is in the cache. A v1 blob
-    needs KMS on every decrypt, which no prefetch can save, so it counts
-    as cached here too."""
-    if not is_encryption_enabled():
+    """True when decrypting *ciphertext* makes no KMS call: nothing is
+    decrypted here (reads_decrypt), it is no v2 envelope, or its DEK is
+    in the cache. A v1 blob needs KMS on every decrypt, which no
+    prefetch can save, so it counts as cached here too."""
+    if not reads_decrypt():
         return True
     wrapped = wrapped_dek_of(ciphertext)
     if wrapped is None:
@@ -325,8 +416,22 @@ def encrypt_content(plaintext: str) -> str:
     """
     Encrypt content using envelope encryption (AES-GCM + KMS-wrapped DEK).
 
+    Every call encrypts, including text that already begins with
+    ENC:v1:/ENC:v2:. Text is text: what a person or a model writes can
+    look like a stored value, and it must read back as written. A stored
+    value with the prefix is therefore always one this module wrote.
+    Code that holds a value which may already be stored encrypted checks
+    ``is_encrypted`` first (Node.set_privacy_level, the persist check).
+
     Args:
         plaintext: The content to encrypt
+
+    With encryption off the text is returned as it is, with one
+    exception: where a key name is set, stored values with the prefix
+    are decrypted on read (reads_decrypt), so text that itself begins
+    with the prefix is encrypted there too, with that key. It then reads
+    back as written, with the switch and after it is removed. Without a
+    key name nothing is decrypted, and such text is stored as it is.
 
     Returns:
         Encrypted content with v2 prefix, or original if encryption disabled
@@ -334,11 +439,8 @@ def encrypt_content(plaintext: str) -> str:
     if not plaintext:
         return plaintext
 
-    if not is_encryption_enabled():
-        return plaintext
-
-    # Don't double-encrypt
-    if plaintext.startswith((ENCRYPTED_PREFIX_V1, ENCRYPTED_PREFIX_V2)):
+    if not is_encryption_enabled() and not (
+            is_encrypted(plaintext) and reads_decrypt()):
         return plaintext
 
     try:
@@ -356,6 +458,10 @@ def encrypt_content(plaintext: str) -> str:
         # Encode both parts as base64
         wrapped_dek_b64 = base64.b64encode(wrapped_dek).decode("ascii")
         payload_b64 = base64.b64encode(nonce + ciphertext).decode("ascii")
+        # As new_dek() does: this process reads its own write, and stores
+        # a second value of the same row under the same key
+        # (utils/tool_record), without another KMS call.
+        _cache_put(wrapped_dek_b64, dek)
 
         return f"{ENCRYPTED_PREFIX_V2}{wrapped_dek_b64}:{payload_b64}"
 
@@ -379,13 +485,36 @@ def new_dek():
     return dek, wrapped_b64
 
 
+def dek_of(ciphertext):
+    """The data key of a v2 envelope this app stored, in the form
+    encrypt_with_dek takes, or None when *ciphertext* is no such
+    envelope or its key cannot be had. For a second value of the same
+    row (an artifact's title beside its text, a reply's tool record
+    beside its text): stored under the first value's key, the two are
+    read with one KMS call. The key comes from the cache when this
+    process wrote or read the first value, else from one KMS call."""
+    wrapped = wrapped_dek_of(ciphertext)
+    if wrapped is None or not is_encryption_enabled():
+        return None
+    try:
+        return _unwrap_dek(wrapped), base64.b64encode(wrapped).decode("ascii")
+    except Exception as e:  # noqa: BLE001 - the caller takes a new key
+        logger.debug("Data key of a stored value not available: %s",
+                     type(e).__name__)
+        return None
+
+
 def encrypt_with_dek(plaintext: str, dek_pair) -> str:
     """Encrypt *plaintext* with a DEK from new_dek(), in the same v2
     envelope decrypt_content() reads. A fresh nonce per call, so reusing
     the DEK across writes is safe. With no DEK (encryption disabled)
-    returns the plaintext."""
-    if not plaintext or dek_pair is None:
+    returns the plaintext, except text that itself begins with
+    ENC:v1:/ENC:v2:, which goes to encrypt_content (see there)."""
+    if not plaintext:
         return plaintext
+    if dek_pair is None:
+        return (encrypt_content(plaintext) if is_encrypted(plaintext)
+                else plaintext)
     dek, wrapped_b64 = dek_pair
     nonce = os.urandom(NONCE_SIZE)
     ciphertext = AESGCM(dek).encrypt(nonce, plaintext.encode("utf-8"), None)
@@ -410,11 +539,11 @@ def decrypt_content(ciphertext: str) -> str:
     if not ciphertext.startswith((ENCRYPTED_PREFIX_V1, ENCRYPTED_PREFIX_V2)):
         return ciphertext
 
-    if not is_encryption_enabled():
+    if not reads_decrypt():
         import logging
         logging.getLogger(__name__).warning(
-            "Found encrypted content but encryption is disabled. "
-            "Cannot decrypt - returning as-is."
+            "Found encrypted content but encryption is disabled and no "
+            "key name is set. Cannot decrypt - returning as-is."
         )
         return ciphertext
 
@@ -562,7 +691,7 @@ def decrypt_file(filepath: str) -> bytes:
     Returns:
         Decrypted file contents as bytes
     """
-    if not is_encryption_enabled():
+    if not reads_decrypt():
         with open(filepath, 'rb') as f:
             return f.read()
 

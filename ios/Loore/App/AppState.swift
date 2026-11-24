@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Observation
 import os
 
@@ -109,14 +110,20 @@ final class AppState {
     private var pendingLandingPath: String?
     private let secureStore: SecureStore
     private let defaults: UserDefaults
+    /// Whether the app's data showed an earlier run when this launch began (`InstallCheck`).
+    private let earlierInstallData: Bool
     private let log = Logger(subsystem: "org.loore.app", category: "app")
 
     init(launch: LaunchOptions = .current,
          secureStore: SecureStore = KeychainStore(),
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard,
+         earlierInstallData: Bool? = nil) {
         self.launch = launch
         self.secureStore = secureStore
         self.defaults = defaults
+        // Read before `ChunkUploader.shared` (below) creates its folder.
+        self.earlierInstallData = earlierInstallData
+            ?? InstallCheck.hasEarlierData(defaults: defaults, uploadsFolder: ChunkUploader.defaultRoot)
         let env = AppEnvironment.resolveCurrent(launch: launch)
         environment = env
         let api = APIClient(environment: env)
@@ -187,6 +194,13 @@ final class AppState {
             for cookie in api.cookieStorage.cookies ?? [] { api.cookieStorage.deleteCookie(cookie) }
         }
         #endif
+        // The first launch after an install forgets the sign-in an earlier install
+        // left in the Keychain; an update keeps it (`InstallCheck`). Not while the
+        // phone's storage is locked: UserDefaults may not be readable then, and the
+        // check runs at the next launch instead.
+        if UIApplication.shared.isProtectedDataAvailable {
+            InstallCheck.run(defaults: defaults, store: secureStore, hasEarlierData: earlierInstallData)
+        }
         auth.startObservingCookies()
         #if DEBUG
         if let cookie = launch.sessionCookie {
@@ -198,6 +212,7 @@ final class AppState {
         auth.restoreStoredCookies()
         #endif
         guard auth.hasAuthCookies else {
+            DeviceChoices.signedOutAtLaunch(defaults: defaults)
             phase = .signedOut
             return
         }
@@ -228,6 +243,8 @@ final class AppState {
 
     /// Applies a fresh user object and runs the once-per-launch steps (design doc §4.5).
     func didLoad(_ newUser: CurrentUser) {
+        // Before any form reads them: remembered choices stay with their account.
+        DeviceChoices.signedIn(userId: newUser.id, defaults: defaults)
         user = newUser
         phase = .signedIn
         // Waiting for approval, the account cannot open the page its

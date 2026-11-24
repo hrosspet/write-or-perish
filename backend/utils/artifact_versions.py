@@ -6,7 +6,7 @@ rows per (user, kind); the UI numbers them v1, v2, ... oldest first
 copies, in read_artifact results, in the answer to each write, and it
 names the version a write is based on (update_artifact's base_version).
 
-Ids of versions are kept in plaintext tool_calls_meta (an update's
+Ids of versions are kept in tool_calls_meta (an update's
 artifact_id and previous_artifact_id); their content never is. Every
 reader of such an id fetches the row through ``stored_version``, which
 reads live versions only: a deleted artifact (#603) is never replayed,

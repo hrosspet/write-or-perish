@@ -34,6 +34,8 @@ from backend.llm_providers import (
 from backend.utils.chunk_plan import (
     UPDATE_THRESHOLD_UNITS, next_window_budget, max_units_for_cap)
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.encryption import key_service_unavailable
+from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import account_allows_ai
 from backend.utils import refusal_backoff, soft_limit
 from backend.utils.llm_batch import (
@@ -1099,7 +1101,15 @@ def _fail_job(job, reason):
     advance_users = set()
     if set_items:
         from backend.tasks import profile_windows
-        advance_users = profile_windows.collect(job, set_items, {})
+        try:
+            advance_users = profile_windows.collect(job, set_items, {})
+        except Exception as e:
+            # The job is given up all the same: left pending it would be
+            # failed again on every pass.
+            soft_limit.reraise(e)
+            db.session.rollback()
+            logger.error(f"Profile batch {job.batch_id}: recording its "
+                         f"window items failed: {describe_exception(e)}")
     job.status = "failed"
     job.collected_at = datetime.utcnow()
     for item in job.items:
@@ -1379,247 +1389,261 @@ def _poll_profile_batches():
         [(j.provider_key, j.batch_id) for j in live], keys,
         oldest=min((j.submitted_at for j in live), default=None)) \
         if live else {}
-    for job in jobs:
-        if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
-            _fail_job(job, "stale")
-            # Given up: nothing reads the batch again, so it is cancelled
-            # if it still runs and its files go (#667).
-            if (job.provider_key or "").startswith("openai:"):
-                drop_openai_batch(keys.get("openai"), job.batch_id)
-            continue
-        batch = listed.get(job.batch_id)
-        try:
-            if batch is None:
-                results, still_pending, _ = batch_check_and_collect(
-                    {job.provider_key: job.batch_id}, keys)
-            elif not batch_ended(job.provider_key, batch):
-                continue  # not ended yet, and no call made for it
-            else:
-                results, still_pending, _ = batch_check_and_collect(
-                    {job.provider_key: job.batch_id}, keys,
-                    known={job.batch_id: batch})
-        except Exception as e:
-            logger.warning(f"Poll failed for batch {job.batch_id}: {e}")
-            # Unreadable, not merely unfinished: the age check above
-            # fails it once it is older than BATCH_STALE_AFTER.
-            continue
-        if job.provider_key in still_pending:
-            continue  # not ended yet
-        # The batch failed only because the provider's queue was full
-        # (OpenAI's enqueued-token limit): its items wait for the next
-        # pass, with no attempt counted (Peter, 2026-11-03).
-        queue_full = job.provider_key in (
-            getattr(results, "queue_full", None) or ())
-        if queue_full and not _queue_holds_others(job.provider_key, job.id):
-            # Nothing else of ours is queued for that model: the batch is
-            # over the enqueued-token limit by itself and would fail on
-            # every pass. Its items fail as before the queue rule (an
-            # attempt counted; a window stops after three), and it shows.
-            queue_full = False
-            logger.error(
-                f"Profile batch {job.batch_id} ({job.provider_key}) failed "
-                f"on the enqueued-token limit with no other batch of ours "
-                f"queued: the batch is larger than the limit; its items "
-                f"count as failed")
-        # An admin "Cancel batch" may have landed while the provider call
-        # above was in flight: re-read the row, and never collect (or
-        # overflow-resubmit) a job that is no longer pending. Nothing
-        # reads its ended batch again, so its files go (#667).
-        db.session.refresh(job)
-        if job.status != "pending":
-            anthropic_batch_deletion.delete_collected_batches(
-                results, keys, ProfileBatchJob.__tablename__)
-            continue
-
-        set_items = []
-        dropped_set_ids = set()
-        blocked = blocked_items(results)
-        for item in job.items:
-            user = User.query.get(item["user_id"])
-            if not user:
-                continue
-            if corpus_changed(user.id, item_read_at(item)):
-                # The request read content the user then deleted ("Delete
-                # all my content", #590), or read during a deletion she
-                # has restored since (the restored profile is the one in
-                # use), or the account is being deleted: nothing is saved
-                # from it, and a billed result gets its cost row (Peter,
-                # 2026-10-22).
-                _drop_read_before_deletion(user, item,
-                                           results.get(item["custom_id"]))
-                if item.get("kind") in SET_ITEM_KINDS:
-                    dropped_set_ids.add(item["custom_id"])
-                continue
-            if item.get("kind") in SET_ITEM_KINDS:
-                # A window set's item (#545): collected below, together.
-                set_items.append(item)
-                continue
-            result = results.get(item["custom_id"])
-            if item.get("kind") == "intentions":
-                # Admin "Infer intentions" rides the same job table/poller
-                # but never touches the profile pending/attempt flags.
-                from backend.tasks import intentions as intentions_mod
-                try:
-                    if item["custom_id"] in blocked:
-                        # A content-policy block is final: no resubmit.
-                        intentions_mod.mark_intentions_item_gave_up(item, job)
-                        # The model the item ran on (#585); an item
-                        # from before carries none.
-                        refusal_backoff.report_policy_block(
-                            user.id, blocked[item["custom_id"]],
-                            item.get("model_id")
-                            or intentions_mod.PINNED_MODEL_ID,
-                            "intentions batch")
-                    elif result is None:
-                        intentions_mod.handle_failed_intentions_item(user, item, job, keys)
-                    else:
-                        intentions_mod.apply_intentions_item(
-                            user, item, result,
-                            read_at=item_read_at(item))
-                except EmptyTruncatedOutputError as e:
-                    # Refused (cut off before any text, #368): the cost row
-                    # is written and nothing saved. Shown as "failed" in the
-                    # admin column, not as the older version "complete".
-                    db.session.rollback()
-                    intentions_mod.mark_intentions_item_gave_up(item, job)
-                    logger.warning(f"Intentions result refused for user "
-                                   f"{user.id}: {e}")
-                except Exception as e:
-                    logger.error(f"Apply intentions result failed for user "
-                                 f"{user.id}: {e}", exc_info=True)
-                    if result is not None:
-                        # A paid result that was not saved: shown as
-                        # failed, and its batch is kept while the provider
-                        # keeps results, for `backfill_intentions.py
-                        # --collect <batch id>` (#693 review).
-                        db.session.rollback()
-                        intentions_mod.mark_intentions_item_unsaved(
-                            item, job)
-                continue
-            if item["custom_id"] in blocked:
-                _stop_for_policy_block(user, item, blocked[item["custom_id"]])
-                continue
-            if result is None and queue_full:
-                # Nothing ran: the next seed pass builds the step again
-                # (the hold brings in an account not yet activated). No
-                # batch attempt, so no full-price fallback.
-                user.profile_batch_pending = False
-                user.profile_work_held = True
-                db.session.commit()
-                continue
-            if result is None:
-                if item["custom_id"] in getattr(
-                        results, "transient_failures", ()):
-                    # The provider was down or overloaded, or the account
-                    # could not pay: not billed, and nothing wrong with
-                    # the request. Not an attempt, as an account-refused
-                    # submit is not (#406): an outage spanning three
-                    # hourly seeds would otherwise move the user to the
-                    # full-price path for good. The seeder resends it;
-                    # the hold brings in an account not yet activated.
-                    user.profile_batch_pending = False
-                    user.profile_work_held = True
-                    db.session.commit()
-                    logger.warning(
-                        f"Batch item failed for user {user.id} "
-                        f"({item['custom_id']}) for a provider or account "
-                        f"reason; not counted as an attempt")
-                    continue
-                user.profile_batch_attempts = (
-                    user.profile_batch_attempts or 0) + 1
-                user.profile_batch_pending = False
-                user.profile_work_held = True   # re-seeded next cycle
-                db.session.commit()
-                logger.warning(
-                    f"Batch item failed for user {user.id} "
-                    f"({item['custom_id']}); attempt "
-                    f"{user.profile_batch_attempts}")
-                continue
+    try:
+        for job in jobs:
             try:
-                nxt = _apply_result(user, item, result, job.submitted_at)
-            except ReadBeforeDeletion:
-                # Deleted between the check above and the save (#590): the
-                # cost row is written, nothing saved, no attempt counted.
-                user.profile_batch_pending = False
+                if datetime.utcnow() - job.submitted_at > BATCH_STALE_AFTER:
+                    _fail_job(job, "stale")
+                    # Given up: nothing reads the batch again, so it is cancelled
+                    # if it still runs and its files go (#667).
+                    if (job.provider_key or "").startswith("openai:"):
+                        drop_openai_batch(keys.get("openai"), job.batch_id)
+                    continue
+                batch = listed.get(job.batch_id)
+                try:
+                    if batch is None:
+                        results, still_pending, _ = batch_check_and_collect(
+                            {job.provider_key: job.batch_id}, keys)
+                    elif not batch_ended(job.provider_key, batch):
+                        continue  # not ended yet, and no call made for it
+                    else:
+                        results, still_pending, _ = batch_check_and_collect(
+                            {job.provider_key: job.batch_id}, keys,
+                            known={job.batch_id: batch})
+                except Exception as e:
+                    logger.warning(f"Poll failed for batch {job.batch_id}: {e}")
+                    # Unreadable, not merely unfinished: the age check above
+                    # fails it once it is older than BATCH_STALE_AFTER.
+                    continue
+                if job.provider_key in still_pending:
+                    continue  # not ended yet
+                # The batch failed only because the provider's queue was full
+                # (OpenAI's enqueued-token limit): its items wait for the next
+                # pass, with no attempt counted (Peter, 2026-11-03).
+                queue_full = job.provider_key in (
+                    getattr(results, "queue_full", None) or ())
+                if queue_full and not _queue_holds_others(job.provider_key, job.id):
+                    # Nothing else of ours is queued for that model: the batch is
+                    # over the enqueued-token limit by itself and would fail on
+                    # every pass. Its items fail as before the queue rule (an
+                    # attempt counted; a window stops after three), and it shows.
+                    queue_full = False
+                    logger.error(
+                        f"Profile batch {job.batch_id} ({job.provider_key}) failed "
+                        f"on the enqueued-token limit with no other batch of ours "
+                        f"queued: the batch is larger than the limit; its items "
+                        f"count as failed")
+                # An admin "Cancel batch" may have landed while the provider call
+                # above was in flight: re-read the row, and never collect (or
+                # overflow-resubmit) a job that is no longer pending. Nothing
+                # reads its ended batch again, so its files go (#667).
+                db.session.refresh(job)
+                if job.status != "pending":
+                    anthropic_batch_deletion.delete_collected_batches(
+                        results, keys, ProfileBatchJob.__tablename__)
+                    continue
+
+                set_items = []
+                dropped_set_ids = set()
+                blocked = blocked_items(results)
+                for item in job.items:
+                    user = User.query.get(item["user_id"])
+                    if not user:
+                        continue
+                    if corpus_changed(user.id, item_read_at(item)):
+                        # The request read content the user then deleted ("Delete
+                        # all my content", #590), or read during a deletion she
+                        # has restored since (the restored profile is the one in
+                        # use), or the account is being deleted: nothing is saved
+                        # from it, and a billed result gets its cost row (Peter,
+                        # 2026-10-22).
+                        _drop_read_before_deletion(user, item,
+                                                   results.get(item["custom_id"]))
+                        if item.get("kind") in SET_ITEM_KINDS:
+                            dropped_set_ids.add(item["custom_id"])
+                        continue
+                    if item.get("kind") in SET_ITEM_KINDS:
+                        # A window set's item (#545): collected below, together.
+                        set_items.append(item)
+                        continue
+                    result = results.get(item["custom_id"])
+                    if item.get("kind") == "intentions":
+                        # Admin "Infer intentions" rides the same job table/poller
+                        # but never touches the profile pending/attempt flags.
+                        from backend.tasks import intentions as intentions_mod
+                        try:
+                            if item["custom_id"] in blocked:
+                                # A content-policy block is final: no resubmit.
+                                intentions_mod.mark_intentions_item_gave_up(item, job)
+                                # The model the item ran on (#585); an item
+                                # from before carries none.
+                                refusal_backoff.report_policy_block(
+                                    user.id, blocked[item["custom_id"]],
+                                    item.get("model_id")
+                                    or intentions_mod.PINNED_MODEL_ID,
+                                    "intentions batch")
+                            elif result is None:
+                                intentions_mod.handle_failed_intentions_item(user, item, job, keys)
+                            else:
+                                intentions_mod.apply_intentions_item(
+                                    user, item, result,
+                                    read_at=item_read_at(item))
+                        except EmptyTruncatedOutputError as e:
+                            # Refused (cut off before any text, #368): the cost row
+                            # is written and nothing saved. Shown as "failed" in the
+                            # admin column, not as the older version "complete".
+                            db.session.rollback()
+                            intentions_mod.mark_intentions_item_gave_up(item, job)
+                            logger.warning(f"Intentions result refused for user "
+                                           f"{user.id}: {e}")
+                        except Exception as e:
+                            logger.error(f"Apply intentions result failed for user "
+                                         f"{user.id}: {e}", exc_info=True)
+                            if result is not None:
+                                # A paid result that was not saved: shown as
+                                # failed, and its batch is kept while the provider
+                                # keeps results, for `backfill_intentions.py
+                                # --collect <batch id>` (#693 review).
+                                db.session.rollback()
+                                intentions_mod.mark_intentions_item_unsaved(
+                                    item, job)
+                        continue
+                    if item["custom_id"] in blocked:
+                        _stop_for_policy_block(user, item, blocked[item["custom_id"]])
+                        continue
+                    if result is None and queue_full:
+                        # Nothing ran: the next seed pass builds the step again
+                        # (the hold brings in an account not yet activated). No
+                        # batch attempt, so no full-price fallback.
+                        user.profile_batch_pending = False
+                        user.profile_work_held = True
+                        db.session.commit()
+                        continue
+                    if result is None:
+                        if item["custom_id"] in getattr(
+                                results, "transient_failures", ()):
+                            # The provider was down or overloaded, or the account
+                            # could not pay: not billed, and nothing wrong with
+                            # the request. Not an attempt, as an account-refused
+                            # submit is not (#406): an outage spanning three
+                            # hourly seeds would otherwise move the user to the
+                            # full-price path for good. The seeder resends it;
+                            # the hold brings in an account not yet activated.
+                            user.profile_batch_pending = False
+                            user.profile_work_held = True
+                            db.session.commit()
+                            logger.warning(
+                                f"Batch item failed for user {user.id} "
+                                f"({item['custom_id']}) for a provider or account "
+                                f"reason; not counted as an attempt")
+                            continue
+                        user.profile_batch_attempts = (
+                            user.profile_batch_attempts or 0) + 1
+                        user.profile_batch_pending = False
+                        user.profile_work_held = True   # re-seeded next cycle
+                        db.session.commit()
+                        logger.warning(
+                            f"Batch item failed for user {user.id} "
+                            f"({item['custom_id']}); attempt "
+                            f"{user.profile_batch_attempts}")
+                        continue
+                    try:
+                        nxt = _apply_result(user, item, result, job.submitted_at)
+                    except ReadBeforeDeletion:
+                        # Deleted between the check above and the save (#590): the
+                        # cost row is written, nothing saved, no attempt counted.
+                        user.profile_batch_pending = False
+                        db.session.commit()
+                        continue
+                    except Exception as e:
+                        logger.error(
+                            f"Apply batch result failed for user {user.id}: {e}",
+                            exc_info=True)
+                        # Counts as a failed attempt like a provider-side error:
+                        # the step produced nothing, retries stay bounded, and
+                        # the progress endpoint reports the chain as failed.
+                        # Re-seeded after the refusal backoff, also for an account
+                        # not yet activated.
+                        user.profile_batch_attempts = (
+                            user.profile_batch_attempts or 0) + 1
+                        user.profile_batch_pending = False
+                        user.profile_work_held = True
+                        db.session.commit()
+                        continue
+                    if nxt:
+                        next_built.append(nxt)   # stays pending; re-submitted below
+                    else:
+                        user.profile_batch_pending = False
+                        if (item.get("kind") in ("chunk", "merge")
+                                and user_is_capped(user)):
+                            # Stopped by the spend cap, not finished: no
+                            # "pre-fill complete" email for a chain that resumes
+                            # when the cap lifts (the hold marks it for the
+                            # hourly seeder, also for a not-yet-activated account).
+                            # A rebuild's merge step (#183) goes on to the next
+                            # step as a chunk does.
+                            user.profile_cap_held = True
+                            logger.warning(f"User {user.id}: profile chain stopped "
+                                           f"at the spend cap after this step")
+                        else:
+                            _notify_prefill_complete(user)
+                    db.session.commit()
+
+                advance_users = set()
+                if set_items:
+                    from backend.tasks import profile_windows
+                    advance_users = profile_windows.collect(
+                        job, set_items, results, queue_full=queue_full)
+                if dropped_set_ids:
+                    # The window pipeline's attempt history reads the outcomes.
+                    job.items = [dict(i, outcome="dropped")
+                                 if i.get("custom_id") in dropped_set_ids else i
+                                 for i in job.items or []]
+                if queue_full:
+                    logger.warning(
+                        f"Profile batch {job.batch_id} ({job.provider_key}) failed "
+                        f"on the provider's full queue: {len(job.items or [])} "
+                        f"item(s) wait for the next pass, no attempt counted")
+                job.status = "failed" if queue_full else "collected"
+                job.collected_at = datetime.utcnow()
                 db.session.commit()
-                continue
-            except Exception as e:
-                logger.error(
-                    f"Apply batch result failed for user {user.id}: {e}",
-                    exc_info=True)
-                # Counts as a failed attempt like a provider-side error:
-                # the step produced nothing, retries stay bounded, and
-                # the progress endpoint reports the chain as failed.
-                # Re-seeded after the refusal backoff, also for an account
-                # not yet activated.
-                user.profile_batch_attempts = (
-                    user.profile_batch_attempts or 0) + 1
-                user.profile_batch_pending = False
-                user.profile_work_held = True
-                db.session.commit()
-                continue
-            if nxt:
-                next_built.append(nxt)   # stays pending; re-submitted below
-            else:
-                user.profile_batch_pending = False
-                if (item.get("kind") in ("chunk", "merge")
-                        and user_is_capped(user)):
-                    # Stopped by the spend cap, not finished: no
-                    # "pre-fill complete" email for a chain that resumes
-                    # when the cap lifts (the hold marks it for the
-                    # hourly seeder, also for a not-yet-activated account).
-                    # A rebuild's merge step (#183) goes on to the next
-                    # step as a chunk does.
-                    user.profile_cap_held = True
-                    logger.warning(f"User {user.id}: profile chain stopped "
-                                   f"at the spend cap after this step")
+                if anthropic_batch_deletion.holds_unsaved_result(job.items):
+                    # A result a save failed on stays at the provider for a
+                    # --collect; the sweep deletes the batch once the provider no
+                    # longer keeps results.
+                    logger.warning(f"Profile batch {job.batch_id} kept at the "
+                                   f"provider: it holds a result that was not "
+                                   f"saved")
                 else:
-                    _notify_prefill_complete(user)
-            db.session.commit()
-
-        advance_users = set()
-        if set_items:
-            from backend.tasks import profile_windows
-            advance_users = profile_windows.collect(
-                job, set_items, results, queue_full=queue_full)
-        if dropped_set_ids:
-            # The window pipeline's attempt history reads the outcomes.
-            job.items = [dict(i, outcome="dropped")
-                         if i.get("custom_id") in dropped_set_ids else i
-                         for i in job.items or []]
-        if queue_full:
-            logger.warning(
-                f"Profile batch {job.batch_id} ({job.provider_key}) failed "
-                f"on the provider's full queue: {len(job.items or [])} "
-                f"item(s) wait for the next pass, no attempt counted")
-        job.status = "failed" if queue_full else "collected"
-        job.collected_at = datetime.utcnow()
-        db.session.commit()
-        if anthropic_batch_deletion.holds_unsaved_result(job.items):
-            # A result a save failed on stays at the provider for a
-            # --collect; the sweep deletes the batch once the provider no
-            # longer keeps results.
-            logger.warning(f"Profile batch {job.batch_id} kept at the "
-                           f"provider: it holds a result that was not "
-                           f"saved")
-        else:
-            # Saved: the batch's files at OpenAI (#667) and the batch at
-            # Anthropic (#693) can go.
-            anthropic_batch_deletion.delete_collected_batches(
-                results, keys, ProfileBatchJob.__tablename__)
-        if queue_full and set_items:
-            # Nothing of these window sets is in flight any more (unless a
-            # user has another job pending): clear the flag as the chained
-            # branch does, so "Build profile" and an import's seed are not
-            # held, and the hourly R7 clean-up has nothing to report.
-            from backend.tasks import profile_windows
-            for user_id in {i["user_id"] for i in set_items}:
-                u = User.query.get(user_id)
-                if u is not None:
-                    u.profile_batch_pending = bool(
-                        profile_windows.inflight_items(user_id))
-                    u.profile_work_held = True
-            db.session.commit()
-        _advance_users(advance_users)
-
-    _submit_requests(next_built, keys)
+                    # Saved: the batch's files at OpenAI (#667) and the batch at
+                    # Anthropic (#693) can go.
+                    anthropic_batch_deletion.delete_collected_batches(
+                        results, keys, ProfileBatchJob.__tablename__)
+                if queue_full and set_items:
+                    # Nothing of these window sets is in flight any more (unless a
+                    # user has another job pending): clear the flag as the chained
+                    # branch does, so "Build profile" and an import's seed are not
+                    # held, and the hourly R7 clean-up has nothing to report.
+                    from backend.tasks import profile_windows
+                    for user_id in {i["user_id"] for i in set_items}:
+                        u = User.query.get(user_id)
+                        if u is not None:
+                            u.profile_batch_pending = bool(
+                                profile_windows.inflight_items(user_id))
+                            u.profile_work_held = True
+                    db.session.commit()
+                _advance_users(advance_users)
+            except Exception as e:
+                # One job's handling (one account's rows, an answer that
+                # does not parse) must not stop the pass for every job
+                # after it, nor the chained steps of the jobs before it.
+                # A key-service outage ends the pass as before: every
+                # later job would wait out the same retries.
+                soft_limit.reraise(e)
+                db.session.rollback()
+                if key_service_unavailable(e):
+                    raise
+                logger.error(f"Profile batch {job.batch_id}: handling it "
+                             f"failed: {describe_exception(e)}")
+    finally:
+        _submit_requests(next_built, keys)

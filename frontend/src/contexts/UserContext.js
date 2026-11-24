@@ -3,6 +3,7 @@ import api from "../api";
 import { markSpendBlocked } from "../utils/spendCap";
 import { rememberSubscription } from "../utils/subscription";
 import { forgetInvite } from "../utils/invite";
+import { choicesSignedIn, choicesSignedOut } from "../utils/deviceChoices";
 import { isRecordingActive, subscribeRecording } from "../utils/recordingActivity";
 
 // Create a new context
@@ -21,6 +22,9 @@ export const UserProvider = ({ children }) => {
     api.get("/dashboard", { params: { profile: 0 } })
       .then((response) => {
         const fetchedUser = response.data.user;
+        // Before any form reads them: choices this browser remembers stay
+        // with the account that made them (utils/deviceChoices).
+        if (fetchedUser) choicesSignedIn(fetchedUser.id);
         setUser(fetchedUser);
         setLoading(false);
         // Remember an already-capped user so cost actions (e.g. starting a
@@ -58,6 +62,7 @@ export const UserProvider = ({ children }) => {
       })
       .catch((err) => {
         console.error("Error fetching user:", err);
+        if (err?.response?.status === 401) choicesSignedOut();
         setError(err);
         setLoading(false);
       });

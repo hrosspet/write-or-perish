@@ -12,7 +12,9 @@
 // Both sources also carry the date the cap lifts (user.spend_cap_lifts_on,
 // the 402's lifts_on; "YYYY-MM-DD", UTC). It is the first of next month,
 // unless last month's overflow is larger than a whole month's limit and
-// holds the cap for longer (#594).
+// holds the cap for longer (#594). For a subscribed account the limit is
+// counted per paid period, and the date is the day the next period
+// starts, which can be before the first of next month.
 //
 // Payments on (#438): the trial's ceiling and an alpha tester's free
 // month's lift with the first payment, not on a date and not with the
@@ -86,7 +88,7 @@ function spendCapLiftDate(now) {
   const [y, m, d] = _liftsOn.split('-').map(Number);
   const lifts = new Date(Date.UTC(y, m - 1, d));
   // A date from an earlier month of a long session is already past.
-  return lifts > next ? lifts : next;
+  return lifts > now ? lifts : next;
 }
 
 function formatLiftDate(date) {

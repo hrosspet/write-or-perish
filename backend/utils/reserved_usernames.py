@@ -33,6 +33,9 @@ RESERVED_EXACT = frozenset({
     "prompts", "import", "null", "undefined", "anonymous", "guest", "user",
     "test", "demo", "root", "superuser", "sysadmin", "god", "owner",
     "founder", "creator", "www", "mail", "smtp", "lore", "lor",
+    # The authors of imported ChatGPT / Claude replies (import_data's
+    # _CONVERSATION_SOURCES; "claude-web" normalizes to "claudeweb").
+    "chatgpt", "claudeweb",
 })
 
 # Coined brand name -- substring match with any number of repeated letters
