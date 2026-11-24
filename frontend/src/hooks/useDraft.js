@@ -165,9 +165,28 @@ export function useDraft(options = {}) {
     };
   }, [autoSaveInterval, saveDraftToServer]);
 
-  // Delete draft from server. `keepingId`: an older edit on offer stays;
-  // only this form's own row goes (none yet: nothing is deleted).
-  const deleteDraft = useCallback(async ({ keepingId = null } = {}) => {
+  // Saves `content` now, without waiting for the debounce (an edit Save was
+  // refused, #799 review: another device's Save may have deleted this
+  // form's draft, and the text must outlive a reload).
+  const saveDraftNow = useCallback(async (content) => {
+    pendingContentRef.current = content;
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    if (inFlightSaveRef.current) {
+      await inFlightSaveRef.current;
+    }
+    if (pendingContentRef.current !== null) {
+      await saveDraftToServer(pendingContentRef.current);
+    }
+  }, [saveDraftToServer]);
+
+  // Delete draft from server. Without options: every draft of the place.
+  // `keepingId`: an older edit on offer stays; only this form's own row
+  // goes (none yet: nothing is deleted). `shownIds`: this form's own row
+  // and these (the rows the form showed, after an edit's Save, #799
+  // review); a row it never showed stays.
+  const deleteDraft = useCallback(async ({ keepingId = null, shownIds = null } = {}) => {
     // Block new autosaves first, so none can start while we wait below
     deletingRef.current = true;
     // Clear any pending saves
@@ -188,6 +207,10 @@ export function useDraft(options = {}) {
         const own = savedIdRef.current;
         if (own == null || own === keepingId) return;
         params += `&draft_id=${own}`;
+      } else if (shownIds) {
+        const ids = [...new Set([savedIdRef.current, ...shownIds].filter((id) => id != null))];
+        if (ids.length === 0) return;
+        params += ids.map((id) => `&draft_id=${id}`).join('');
       }
       await api.delete(`/drafts/?${params}`);
       savedIdRef.current = null;
@@ -209,6 +232,7 @@ export function useDraft(options = {}) {
     draft,
     isLoaded,
     saveDraft,
+    saveDraftNow,
     deleteDraft,
     lastSaved,
     isSaving,

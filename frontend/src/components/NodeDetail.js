@@ -207,6 +207,26 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setEditTarget(slot === 'edit' ? value : null);
     setDeleteTarget(slot === 'delete' ? value : null);
   }, []);
+  // Edit opens on the entry as it is now, not on the page's copy (#799
+  // review): after a refused Save the page still shows the older text, and
+  // a form opened on it would write into the older edit's draft. The entry
+  // is read first; the page's copy is the fallback (its Save is still
+  // checked against the stored text). The focal entry's text on the page
+  // follows.
+  const openEdit = useCallback(async (target) => {
+    let current = target;
+    try {
+      const fresh = (await api.get(`/nodes/${target.id}`)).data;
+      if (fresh && fresh.id === target.id) {
+        current = { ...target, ...fresh };
+        setNode((prev) => (prev && prev.id === fresh.id && prev.content !== fresh.content
+          ? { ...prev, content: fresh.content } : prev));
+      }
+    } catch (err) {
+      console.error('Could not read the entry before editing:', err);
+    }
+    setExclusiveTarget('edit', current);
+  }, [setExclusiveTarget]);
   // autoGenerate is shared across the whole text-mode experience — the
   // NodeDetailWrapper uses `key={id}` which remounts NodeDetail on every
   // node navigation, so local useState would reset the toggle. Persist to
@@ -720,7 +740,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     if (ownedByMe(n)) {
       actions.push({
         label: 'Edit',
-        action: () => setExclusiveTarget('edit', n),
+        action: () => openEdit(n),
         color: 'var(--text-primary)',
       });
       actions.push({
@@ -1660,7 +1680,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             items={[
               {
                 label: 'Edit',
-                action: () => setExclusiveTarget('edit', node),
+                action: () => openEdit(node),
                 color: 'var(--text-primary)',
               },
               {

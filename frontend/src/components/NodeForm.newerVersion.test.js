@@ -138,3 +138,48 @@ test('a current draft is loaded as before, and the base stays the text the form 
   await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
   expect(mockPut.mock.calls[0][1].base_content).toBe(OPENED_ON);
 });
+
+// #799 review 1: another device's Save deleted every draft of the entry, this
+// form's included. On the refusal the form saves its text again at once (not
+// after the typing debounce), with its base, so a reload offers it.
+test('a refused Save saves the text as a draft at once, with its base', async () => {
+  mockPut.mockRejectedValueOnce(changed());
+  renderEdit();
+  await waitFor(() => expect(mockGet).toHaveBeenCalled());
+  fireEvent.change(textarea(), { target: { value: 'my long edit' } });
+  save();
+
+  // Well before the 1 s typing debounce.
+  await waitFor(() => expect(mockPost).toHaveBeenCalled(), { timeout: 400 });
+  expect(mockPost.mock.calls[0]).toEqual(['/drafts/', {
+    content: 'my long edit', node_id: 7, parent_id: null, base_content: OPENED_ON,
+  }]);
+});
+
+// #799 review 2: a Save deletes only the drafts its form showed: its own row
+// and the older edit on offer. Another device's unsaved edit stays.
+test('a Save deletes only the drafts the form showed', async () => {
+  mockGet.mockResolvedValue({ data: {
+    id: 12, content: 'my older edit', node_id: 7,
+    updated_at: '2026-11-24T09:00:00', older_than_entry: true,
+  } });
+  const onSuccess = renderEdit();
+  await screen.findByLabelText('Your unsaved edit');
+  fireEvent.change(textarea(), { target: { value: 'typed on the current text' } });
+  // The autosave lands (row 31).
+  await waitFor(() => expect(mockPost).toHaveBeenCalled(), { timeout: 3000 });
+  save();
+
+  await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+  await waitFor(() => expect(mockDelete).toHaveBeenCalledTimes(1));
+  expect(mockDelete).toHaveBeenCalledWith('/drafts/?node_id=7&draft_id=31&draft_id=12');
+});
+
+test('a Save with no draft of its own and none on offer deletes no draft', async () => {
+  const onSuccess = renderEdit();
+  await waitFor(() => expect(mockGet).toHaveBeenCalled());
+  save();
+  await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+  await new Promise((r) => setTimeout(r, 20));
+  expect(mockDelete).not.toHaveBeenCalled();
+});

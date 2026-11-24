@@ -154,6 +154,7 @@ const NodeForm = forwardRef(
       draft,
       isLoaded: isDraftLoaded,
       saveDraft,
+      saveDraftNow,
       deleteDraft,
       lastSaved,
       isSaving: isDraftSaving
@@ -801,8 +802,14 @@ const NodeForm = forwardRef(
             ai_usage: aiUsage
           });
         }
-        // Delete draft after successful save
-        deleteDraft();
+        // Delete draft after successful save. An edit deletes only the
+        // rows this form showed (its own, the older edit on offer): another
+        // device's unsaved edit of the entry stays (#799 review).
+        if (editMode) {
+          deleteDraft({ shownIds: olderDraft ? [olderDraft.id] : [] });
+        } else {
+          deleteDraft();
+        }
         setHasDraft(false);
 
         // Auto-generate path (without Agentic Reply): after creating
@@ -854,8 +861,13 @@ const NodeForm = forwardRef(
         } else if (editMode && isContentChanged(err)) {
           // Nothing was saved: the entry changed since the form was opened
           // (#799). The text stays in the form, and the notice says what
-          // to do with it.
+          // to do with it. It is saved as a draft at once, with the form's
+          // base: another device's Save may have deleted this form's draft,
+          // and a reload must not lose it (#799 review). Reopened, the
+          // form offers it beside the entry's current text.
           setNewerVersion(true);
+          saveDraftNow(content);
+          setHasDraft(true);
         } else if (uploadedFile && isSpendCapError(err)) {
           // The client-side cap flag was stale; the server refused the
           // upload before storing anything (#341). The banner is up; the
