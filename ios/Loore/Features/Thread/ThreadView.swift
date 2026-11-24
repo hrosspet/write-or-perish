@@ -367,7 +367,8 @@ private struct ThreadContent: View {
                                  + (model.readActions(craftMode: craftMode) ? " To glean again, use Glean." : "")
                                : "")
             .accessibilityIdentifier("thread.llmResponse")
-            ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply)
+            ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply,
+                        onPick: { [model] id in model.modelPicked(id) })
                 .padding(.leading, -1)
             Spacer(minLength: 0)
         }

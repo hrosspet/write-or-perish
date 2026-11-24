@@ -94,9 +94,9 @@ def create_voice_from_node(node_id):
 
     # The thread's model (voice_turn_model, #784): Voice continues the
     # conversation on the model it runs on, as a Text reply that names
-    # none does. The model the thread page sends is not used: it is the
-    # account's unless the LLM Response picker beside it was shown, and
-    # that picker's choice is for LLM Response.
+    # none does. A model in the body is not used: the thread pages send
+    # none since #791, iPhone builds from before it send the account's,
+    # and the LLM Response picker's choice is for LLM Response.
     model_id = voice_turn_model(node, current_user)
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
