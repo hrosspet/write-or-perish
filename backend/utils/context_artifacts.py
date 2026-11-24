@@ -79,18 +79,27 @@ def attach_context_artifacts(node_id, user_id, prompt_record=None):
     sync_context_artifacts(node_id, user_id, content)
 
 
-def sync_context_artifacts(node_id, user_id, content):
+def _placeholder_types(text):
+    """The pin types the placeholders in *text* need."""
+    return {PLACEHOLDER_TO_ARTIFACT[m.group(1)]
+            for m in _PLACEHOLDER_RE.finditer(text or "")}
+
+
+def sync_context_artifacts(node_id, user_id, content, old_content=None):
     """Sync context artifact rows to match placeholders in content.
 
     Adds artifacts for placeholders that are present but missing,
     removes artifacts for placeholders that were removed.
     Leaves the prompt artifact untouched.
+
+    *old_content*: the node's text before an edit. Given, only the pin
+    types whose placeholders it had and *content* no longer has are
+    removed; a pin that no placeholder in the text accounts for stays
+    (#786 review: the versions a reply's turn read with a tool, pinned
+    on the reply by the retrieval loop, whose text names no placeholder).
+    None, for a new node: every pin no placeholder needs is removed.
     """
-    # Detect which artifact types the content needs
-    needed = set()
-    for match in _PLACEHOLDER_RE.finditer(content):
-        artifact_type = PLACEHOLDER_TO_ARTIFACT[match.group(1)]
-        needed.add(artifact_type)
+    needed = _placeholder_types(content)
 
     # Get existing non-prompt artifacts. 'user_artifact' is a multi-row
     # type (one row per artifact kind), so collect rows in lists.
@@ -104,10 +113,13 @@ def sync_context_artifacts(node_id, user_id, content):
         existing_types.setdefault(row.artifact_type, []).append(row)
 
     # Remove artifacts no longer referenced
-    for artifact_type, rows in existing_types.items():
-        if artifact_type not in needed:
-            for row in rows:
-                db.session.delete(row)
+    if old_content is None:
+        gone = set(existing_types) - needed
+    else:
+        gone = _placeholder_types(old_content) - needed
+    for artifact_type in gone:
+        for row in existing_types.get(artifact_type, ()):
+            db.session.delete(row)
 
     # Add missing artifacts
     for artifact_type in needed:

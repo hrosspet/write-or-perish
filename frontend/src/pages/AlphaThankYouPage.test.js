@@ -146,3 +146,12 @@ test('without account deletion on the server the page offers none', () => {
   renderPage();
   expect(screen.queryByRole('button', { name: /delete my account/i })).toBeNull();
 });
+
+test('the page says Beta and names no opening date', () => {
+  renderPage();
+  expect(screen.getByText(/signing up for the Loore Beta\./)).toBeTruthy();
+  expect(screen.getByText(/they deserve as they begin\.$/)).toBeTruthy();
+  expect(screen.queryByText(/opens on/i)).toBeNull();
+  expect(screen.queryByText(/December/)).toBeNull();
+  expect(screen.queryByText(/Alpha/)).toBeNull();
+});

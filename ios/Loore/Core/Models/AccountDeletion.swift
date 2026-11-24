@@ -140,19 +140,24 @@ struct RestoreOffer: Decodable, Equatable, Sendable {
     /// The deletion replaced a "Delete all my content" whose content is
     /// still hidden: a restore brings it back too (#268).
     var writingComesBack: Bool
+    /// The account's id (#777; nil from servers before it): what this
+    /// phone keeps the account's unsent audio under.
+    var userId: Int?
 
     enum CodingKeys: String, CodingKey {
         case username, restorable
         case deleteOn = "delete_on"
         case writingComesBack = "writing_comes_back"
+        case userId = "user_id"
     }
 
     init(username: String, deleteOn: Date?, restorable: Bool,
-         writingComesBack: Bool = false) {
+         writingComesBack: Bool = false, userId: Int? = nil) {
         self.username = username
         self.deleteOn = deleteOn
         self.restorable = restorable
         self.writingComesBack = writingComesBack
+        self.userId = userId
     }
 
     init(from decoder: Decoder) throws {
@@ -161,6 +166,53 @@ struct RestoreOffer: Decodable, Equatable, Sendable {
         deleteOn = c.tolerant(.deleteOn)
         restorable = c.tolerant(.restorable, default: false)
         writingComesBack = c.tolerant(.writingComesBack, default: false)
+        userId = c.tolerant(.userId)
+    }
+
+    /// What the offer says about the account, for its unsent audio (#777).
+    var deletedAccount: DeletedAccount? {
+        userId.map { DeletedAccount(account: $0, deleteOn: deleteOn, restorable: restorable) }
+    }
+}
+
+/// An account whose deletion this phone learned of (#777): deleted here
+/// (`AppState.accountDeletionScheduled`), refused by the server with a 401
+/// that says so (`init(body:)`), or reached by a sign-in that asks the
+/// restore question (`RestoreOffer.deletedAccount`). Its recorded audio
+/// that has not reached Loore stays on the phone while the account can
+/// still be restored, and goes when it no longer can
+/// (`ChunkUploader.accountDeleted`).
+struct DeletedAccount: Equatable, Sendable {
+    var account: Int
+    /// When the deletion happens, at the end of the 30 days (nil: not known).
+    var deleteOn: Date?
+    /// False once the deletion has started or the account is gone: nothing
+    /// brings it back.
+    var restorable: Bool
+
+    /// When the account's unsent audio leaves this phone: at once when
+    /// nothing can bring the account back, else on `deleteOn`. nil when the
+    /// date is not known: kept as after any sign-out.
+    var audioRemovedAt: Date? { restorable ? deleteOn : .distantPast }
+
+    /// The 401's `code` for a sign-in whose account is deleted
+    /// (backend `refused_sign_in`).
+    static let code = "account_deleted"
+
+    init(account: Int, deleteOn: Date?, restorable: Bool) {
+        self.account = account
+        self.deleteOn = deleteOn
+        self.restorable = restorable
+    }
+
+    /// From a 401's body: nil for any other 401 (no sign-in, an expired
+    /// one, servers before #777).
+    init?(body: ServerErrorBody?) {
+        guard let body, body.code == Self.code, let account = body.extra["user_id"]?.intValue else { return nil }
+        self.account = account
+        deleteOn = body.extra["delete_on"]?.stringValue.flatMap(LooreDate.parse)
+        // Not said: the audio stays (until `deleteOn`, if that was said).
+        restorable = body.extra["restorable"]?.boolValue ?? true
     }
 }
 

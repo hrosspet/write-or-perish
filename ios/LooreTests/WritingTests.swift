@@ -158,6 +158,139 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "public")
     }
 
+    /// Peter, 2026-11-24: a Private reply under one's own Public entry "shouldn't be
+    /// refused, they should adhere to the form's selection". The parent is the
+    /// user's (id 5): an entry they wrote, or an AI reply they asked for.
+    private func stubParent(_ json: String) {
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path(percentEncoded: true) ?? "") {
+            case ("GET", "/api/nodes/7"): return .json(200, json)
+            case ("GET", "/api/drafts/"): return .json(404, #"{"error":"No draft"}"#)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":8}"#)
+            default: return .json(200, "{}")
+            }
+        }
+    }
+
+    private static let ownPublicParents = [
+        #"{"id":7,"content":"p","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"public","ai_usage":"chat"}"#,
+        #"{"id":7,"content":"p","node_type":"llm","user":{"id":99,"username":"gpt-5"},"parent_user_id":5,"privacy_level":"public","ai_usage":"chat"}"#,
+    ]
+
+    func testAPrivateReplyUnderOnesOwnPublicNodeIsSentPrivate() async {
+        for parent in Self.ownPublicParents {
+            StubURLProtocol.reset()
+            stubParent(parent)
+            defaults.removeObject(forKey: DefaultsKey.publicReplyAck)
+            let (model, result) = form(NodeFormConfig(parentId: 7))
+            await model.start()
+            XCTAssertFalse(model.lockPrivacy)
+            XCTAssertEqual(model.privacy, .public)
+            model.privacy = .private
+            XCTAssertFalse(model.autoGenerateLocked)
+            model.content = "for me only"
+            await model.submit()
+            XCTAssertFalse(model.showPublicReplyDialog)
+            XCTAssertEqual(result()?.id, 8)
+            XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "private")
+        }
+    }
+
+    func testAPublicReplyUnderOnesOwnPublicNodeStillAsks() async {
+        stubParent(Self.ownPublicParents[0])
+        defaults.removeObject(forKey: DefaultsKey.publicReplyAck)
+        let (model, result) = form(NodeFormConfig(parentId: 7))
+        await model.start()
+        model.content = "for everyone"
+        await model.submit()
+        XCTAssertTrue(model.showPublicReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/"))
+        model.answerPublicReply()
+        await model.dialogSubmit?.value
+        XCTAssertEqual(result()?.id, 8)
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "public")
+    }
+
+    func testUnderSomeoneElsesPublicNodeTheReplyStaysLockedEvenIfTheHostGuessedOwn() async {
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":6,"username":"anna"},"privacy_level":"public","ai_usage":"chat"}"#)
+        var config = NodeFormConfig(parentId: 7)
+        config.parentOwned = true
+        let (model, _) = form(config)
+        await model.start()
+        XCTAssertTrue(model.lockPrivacy)
+        model.privacy = .private
+        XCTAssertEqual(model.effectivePrivacy, .public)
+    }
+
+    /// The user's edit wins: a Private and a None picked while the form's request
+    /// for the parent is still open stay when it answers, and are sent.
+    func testChoicesMadeBeforeTheParentLoadsAreKept() async {
+        let gate = DispatchSemaphore(value: 0)
+        let parent = Self.ownPublicParents[0]
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path(percentEncoded: true) ?? "") {
+            case ("GET", "/api/nodes/7"):
+                gate.wait()
+                return .json(200, parent)
+            case ("GET", "/api/drafts/"): return .json(404, #"{"error":"No draft"}"#)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":8}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        defaults.set("true", forKey: DefaultsKey.publicReplyAck)
+        var config = NodeFormConfig(parentId: 7)
+        config.parentPrivacy = .public
+        config.parentOwned = true
+        let (model, result) = form(config)
+        let starting = Task { await model.start() }
+        for _ in 0..<100 where model.parentPrivacy != .public { await Task.yield() }
+        XCTAssertFalse(model.lockPrivacy)
+        model.choosePrivacy(.private)
+        model.chooseAIUsage(.off)
+        gate.signal()
+        await starting.value
+        XCTAssertEqual(model.privacy, .private)
+        XCTAssertEqual(model.aiUsage, .off)
+        model.content = "for me only"
+        await model.submit()
+        XCTAssertEqual(result()?.id, 8)
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "private")
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["ai_usage"] as? String, "none")
+    }
+
+    /// Untouched selectors still take the parent's settings, and someone else's
+    /// public parent still pins the reply to public whatever was picked.
+    func testTheParentsSettingsStillApplyWhereNothingWasChosenOrItIsLocked() async {
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"private","ai_usage":"none"}"#)
+        let (untouched, _) = form(NodeFormConfig(parentId: 7))
+        await untouched.start()
+        XCTAssertEqual(untouched.privacy, .private)
+        XCTAssertEqual(untouched.aiUsage, .off)
+
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":6,"username":"anna"},"privacy_level":"public","ai_usage":"chat"}"#)
+        let (theirs, _) = form(NodeFormConfig(parentId: 7))
+        theirs.choosePrivacy(.private)
+        await theirs.start()
+        XCTAssertTrue(theirs.lockPrivacy)
+        XCTAssertEqual(theirs.effectivePrivacy, .public)
+    }
+
+    /// The form's request for the parent failed: the host's knowledge decides.
+    func testWhenTheParentCannotBeLoadedTheHostsOwnershipDecides() async {
+        StubURLProtocol.install { request in
+            request.url?.path(percentEncoded: true) == "/api/nodes/7"
+                ? .json(500, #"{"error":"boom"}"#) : .json(404, #"{"error":"No draft"}"#)
+        }
+        for owned in [true, false] {
+            var config = NodeFormConfig(parentId: 7)
+            config.parentPrivacy = .public
+            config.parentOwned = owned
+            let (model, _) = form(config)
+            await model.start()
+            XCTAssertEqual(model.lockPrivacy, !owned)
+        }
+    }
+
     func testWriteNewEntryAgenticStartsATextmodeThread() async {
         StubURLProtocol.install { _ in .json(202, #"{"conversation_id":1,"user_node_id":2,"llm_node_id":3}"#) }
         defaults.set(true, forKey: DefaultsKey.agenticReply)
@@ -585,7 +718,9 @@ final class ThreadModelTests: StubbedAppTestCase {
         var auto = true
         let binding = Binding(get: { auto }, set: { auto = $0 })
         await model.inlineReplySent(NodeFormResult(id: 11), autoGenerate: binding)
-        XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["model"] as? String, "gpt-6-luna")
+        // No model, so the server continues on the thread's (#791).
+        XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["auto_generate"] as? Bool, true)
+        XCTAssertNil(body(of: "POST /api/nodes/11/llm")?["model"])
         // The entry's page opens once its node is fetched (NodePrefetch).
         let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: 77) }
         XCTAssertTrue(opened)

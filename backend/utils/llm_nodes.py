@@ -127,7 +127,9 @@ def is_chat_model(model_id):
 # from SUPPORTED_MODELS) can still be saved: an account preference, a
 # thread's last reply, a stored session's model, a page opened before the
 # deprecation. What runs in its place is a model of the same provider:
-# the user's own model there if they have one, else that provider's
+# the newer model named to replace it ("replaced_by": GPT-6 Astra →
+# GPT-6.2 Astra, GPT-6 Sol → GPT-6.2 Sol, Peter 2026-11-24), else the
+# user's own model there if they have one, else that provider's
 # default. Never another provider's: "A user's model is theirs" (Peter,
 # 2026-10-02; #418, #487).
 CHAT_MODEL_KEYS = {
@@ -176,16 +178,54 @@ def provider_chat_model(provider):
     return None
 
 
+def successor_model(model_id):
+    """The active model named to take the place of *model_id*, a retired
+    model: its SUPPORTED_MODELS entry's ``replaced_by`` (GPT-6 Sol →
+    GPT-6.2 Sol), followed on while the named model is retired too (a
+    later retirement of GPT-6.2 Sol with a replacement of its own). Only
+    a model of the same provider counts (the boot check,
+    validate_model_successors, rules out any other). None when no
+    entry on the way names one."""
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+    provider = saved_model_provider(model_id)
+    seen = {model_id}
+    current = model_id
+    while True:
+        named = (supported.get(current) or {}).get("replaced_by")
+        if (not named or named in seen
+                or saved_model_provider(named) != provider):
+            return None
+        if is_active_model(named):
+            return named
+        seen.add(named)
+        current = named
+
+
+def current_read_model(model_id):
+    """*model_id* while it is an active read model, else the read model
+    named to replace it (successor_model; GPT-6 Sol → GPT-6.2 Sol), else
+    None."""
+    if is_read_model(model_id):
+        return model_id
+    successor = successor_model(model_id)
+    return successor if is_read_model(successor) else None
+
+
 def same_provider_chat_model(model_id, *candidates):
     """The chat model that runs in place of *model_id*, a saved model no
-    longer offered for chat: the first of *candidates* (the thread's and
-    the user's own models, nearest first) that is an active chat model
-    of the same provider, else that provider's default
+    longer offered for chat: the model named to replace it
+    (successor_model: GPT-6 Astra → GPT-6.2 Astra) while it is an active
+    chat model; else the first of *candidates* (the thread's and the
+    user's own models, nearest first) that is an active chat model of
+    the same provider, else that provider's default
     (provider_chat_model). None when the provider can't be told or has
     no chat model."""
     provider = saved_model_provider(model_id)
     if provider is None:
         return None
+    successor = successor_model(model_id)
+    if is_chat_model(successor):
+        return successor
     for candidate in candidates:
         if (is_chat_model(candidate)
                 and saved_model_provider(candidate) == provider):
@@ -249,13 +289,14 @@ class _Chain:
         from backend.models import NodeContextArtifact, UserPrompt
         from backend.utils.thread_tree import ancestor_chain
         # token_count and continuation_node_id: the size of the reply's
-        # prompt (utils/thread_size, #648).
+        # prompt (utils/thread_size, #648). origin: an imported reply is
+        # no model Loore ran for the user (resolve_chat_model, #784).
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta_stored,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
             Node.privacy_level, Node.token_count, Node.continuation_node_id,
-            max_depth=_MAX_ANCESTRY_HOPS)
+            Node.origin, max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -313,32 +354,49 @@ class _Chain:
                 if n.deleted_at is None and n.node_type == "llm" and n.llm_model]
 
 
+def _loore_reply_for(node, user_id):
+    """Whether the AI reply *node* is one Loore made for *user_id*: the
+    user is its human owner (as glean_provider counts them), and it was
+    written in Loore, not imported (Node.origin NULL). Another member's
+    reply in a shared thread, and a reply from an imported ChatGPT or
+    Claude conversation, are not models this user chose in Loore."""
+    return (user_id is not None
+            and (node.human_owner_id or node.user_id) == user_id
+            and getattr(node, "origin", None) is None)
+
+
 def resolve_chat_model(parent_node, user, chain=None):
     """The model for a (non-read) reply under *parent_node* when the
     caller supplied none, and where it came from:
 
-      1. ("predecessor") the closest ancestor LLM reply's ``llm_model``,
-         skipping reads: a read runs on a read model (Luna), and that
-         must not become the default for the conversation around it.
+      1. ("predecessor") the closest ancestor LLM reply that Loore made
+         for *user* (_loore_reply_for): its ``llm_model``. Reads are
+         skipped: a read runs on a read model (Luna), and that must not
+         become the default for the conversation around it. Another
+         member's reply and an imported reply are skipped too (#784):
+         following them would send the user's words to a provider they
+         never chose in Loore.
       2. ("user_preference") ``user.preferred_model``
          (effective_preferred_model: its provider's default once it is
          no longer offered).
       3. ("default") ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
-    If the closest non-read LLM ancestor is recognized but not usable for
+    If the closest such reply is on a model recognized but not usable for
     chat (deprecated, read only, or the historical ``gpt-4.5-preview``
     legacy id), the walk stops there and the thread stays with that
-    model's provider (#487): the user's account model when it is that
+    model's provider (#487): the model named to replace it (GPT-6 Astra
+    → GPT-6.2 Astra), else the user's account model when it is that
     provider's, else the provider's default (same_provider_chat_model),
     still "predecessor". Walking past it to find an even older active
     model would pick a model nobody chose for this point of the thread.
-    Truly-unknown ancestors keep walking — they're typically placeholder
-    rows from data migrations and imports ("chatgpt", "claude-web").
+    Truly-unknown ids keep walking: placeholder rows from data
+    migrations ("chatgpt", "claude-web").
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(parent_node)
+    user_id = getattr(user, "id", None)
     for node in chain.llm_replies():
-        if node.id in chain.reads:
+        if node.id in chain.reads or not _loore_reply_for(node, user_id):
             continue
         if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
@@ -418,8 +476,11 @@ def resolve_read_model(anchor_node, chain=None, user=None):
         for node in chain.llm_replies():
             if node.id not in chain.reads:
                 continue
-            if is_read_model(node.llm_model):
-                return node.llm_model, "predecessor"
+            # A read on a retired read model: the one named to replace it
+            # (current_read_model), else the default.
+            read_model = current_read_model(node.llm_model)
+            if read_model:
+                return read_model, "predecessor"
             break
         return current_app.config["READ_DEFAULT_MODEL"], "default"
     provider = glean_provider(anchor_node, user, chain=chain)
@@ -432,9 +493,11 @@ def resolve_read_model(anchor_node, chain=None, user=None):
             if (node.id not in chain.reads
                     or (node.human_owner_id or node.user_id) != user.id):
                 continue
-            if (is_read_model(node.llm_model)
-                    and model_provider(node.llm_model) == provider):
-                return node.llm_model, "predecessor"
+            # Also the user's read on a retired read model: the one named
+            # to replace it (GPT-6 Sol → GPT-6.2 Sol, current_read_model).
+            read_model = current_read_model(node.llm_model)
+            if read_model and model_provider(read_model) == provider:
+                return read_model, "predecessor"
             break
     return glean_model_for_provider(provider), "provider_default"
 
@@ -443,6 +506,29 @@ def pick_model_for_generation(parent_node, user):
     """Pick the LLM model for an auto-generated (chat) response when the
     caller has not supplied an explicit model. See resolve_chat_model."""
     return resolve_chat_model(parent_node, user)[0]
+
+
+def voice_turn_model(parent_node, user, sent_model=None):
+    """The model of a Voice turn's reply (#784). A turn that continues a
+    thread (*parent_node*: where the turn's entry or reply goes) runs on
+    the thread's model, by the rule a Text reply follows when it names no
+    model (resolve_chat_model): the model of the closest earlier chat
+    reply Loore made for this user (never another member's reply or an
+    imported one), kept to that reply's provider when the model is no
+    longer offered (#487), else the account's model, else the server
+    default. So the turn reads the thread's prompt cache, as a Text
+    reply on that model would.
+
+    *sent_model*, the model the client sent, is not used for such a
+    turn: Voice has no model picker, and both apps send the account's
+    model with every turn (the iPhone builds already installed too), so
+    it names no choice for this thread. A new thread (*parent_node*
+    None) runs on *sent_model*, else the account's model, else the
+    default. Every Voice route asks here: streaming finalize, POST
+    /voice and POST /voice/from-node."""
+    if parent_node is None and sent_model:
+        return sent_model
+    return pick_model_for_generation(parent_node, user)
 
 
 def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
@@ -669,9 +755,11 @@ def _read_turn_model(parent, owner, model_id, chain):
     # their own: nobody picks a model for someone else's thread.
     owns_parent = owner is not None and (
         (parent.human_owner_id or parent.user_id) == owner.id)
-    if (owns_parent and is_read_model(model_id)
-            and may_choose_glean_model(owner)):
-        return model_id
+    # A retired read model (a page opened before it was retired) counts
+    # as the one named to replace it (current_read_model).
+    named = current_read_model(model_id)
+    if owns_parent and named and may_choose_glean_model(owner):
+        return named
     new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
     if new_model_id != model_id:
         current_app.logger.info(

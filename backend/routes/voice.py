@@ -7,8 +7,8 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     TooManyReplies, ai_usage_refused_response, create_llm_placeholder,
-    pick_model_for_generation, read_only_model_refusal,
-    read_only_model_response, reply_ai_usage, voice_turn_refusal,
+    read_only_model_refusal, read_only_model_response, reply_ai_usage,
+    voice_turn_model, voice_turn_refusal,
 )
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import (
@@ -76,7 +76,9 @@ def create_voice_from_node(node_id):
     POST /nodes/ gives for a deleted parent, before any prompt node or
     reply is created (#480). The check locks the row as POST /nodes/
     does, so a delete that arrives meanwhile waits until this request's
-    nodes are written."""
+    nodes are written.
+    A reply made here runs on the thread's model (voice_turn_model,
+    #784); a ``model`` in the body is not used."""
     node = Node.query.get(node_id)
     if not node:
         return jsonify({"error": "Node not found"}), 404
@@ -90,11 +92,12 @@ def create_voice_from_node(node_id):
     if refused is not None:
         return ai_usage_refused_response(refused)
 
-    data = request.get_json() or {}
-    model_id = data.get("model")
-    if not model_id:
-        # Walks ancestry from `node` → user.preferred_model → DEFAULT.
-        model_id = pick_model_for_generation(node, current_user)
+    # The thread's model (voice_turn_model, #784): Voice continues the
+    # conversation on the model it runs on, as a Text reply that names
+    # none does. A model in the body is not used: the thread pages send
+    # none since #791, iPhone builds from before it send the account's,
+    # and the LLM Response picker's choice is for LLM Response.
+    model_id = voice_turn_model(node, current_user)
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400
     # Inherit ai_usage from the target node, looking through a read (#362)
@@ -224,7 +227,8 @@ def create_voice_session():
     Body: { content: string, model?: string, parent_id?: int,
             session_id?: string }
     Without parent_id: creates system node (prompt) -> user node -> LLM node
-    With parent_id: continues thread
+    With parent_id: continues thread, on the thread's model; ``model`` is
+    used for a new thread only (voice_turn_model, #784)
 
     Payments on and no AI replies for the account (#438): 402
     ``subscription_required`` and nothing written, unless the turn names
@@ -253,10 +257,11 @@ def create_voice_session():
         ai_usage = reply_ai_usage(parent_node, current_user)
         user_parent_id = parent_id
 
-    if not model_id:
-        # Walks ancestry from parent_node (or skips ancestry for fresh
-        # sessions) → user.preferred_model → DEFAULT.
-        model_id = pick_model_for_generation(parent_node, current_user)
+    # A turn that continues a thread runs on the thread's model, whatever
+    # model the client sent (both apps send the account's); a new thread
+    # on the sent model, else the account's, else DEFAULT
+    # (voice_turn_model, #784).
+    model_id = voice_turn_model(parent_node, current_user, model_id)
 
     if model_id not in current_app.config["SUPPORTED_MODELS"]:
         return jsonify({"error": f"Unsupported model: {model_id}"}), 400

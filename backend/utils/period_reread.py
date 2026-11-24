@@ -27,13 +27,33 @@ event goes through:
 
 Nothing about the ceiling, the carry or the access is decided here.
 
-* One read at Stripe per account and run; at most
+A payment whose events were lost is recorded too (Peter, 2026-11-24:
+"the usage ceiling should be updated too"). Only the event invoice.paid
+records that an account paid (User.subscription_ever_paid), and until it
+is recorded a subscription that came out of a trial keeps the trial's
+usage ceiling (spend.under_trial_ceiling). When Stripe answers that the
+subscription is active and the account has no payment recorded, the
+subscription's latest invoice is read too, and the payment is recorded
+(stripe_billing.record_payment, what invoice.paid does with the account)
+only when Stripe has that invoice paid, above zero
+(stripe_billing.paid_above_zero), and it belongs to this subscription.
+A trial, a first invoice not charged yet, an unpaid or a zero invoice
+record nothing. The rest of what invoice.paid does is left to it: the
+referral's free weeks are a credit written at Stripe, given once when
+the event arrives (referrals.grant_on_first_payment, guarded by
+Referral.rewarded_at, not by the recorded payment).
+
+* One read at Stripe per account and run, and a second (the latest
+  invoice) only for an account in the state above; at most
   PERIOD_REREAD_MAX_PER_RUN accounts a run, the earliest period end
   first (an account whose period end is not stored comes last).
 * Stripe cannot be asked: the run ends there, and the next hour starts
   again. Nothing is tried twice within a run. A read Stripe refuses for
   one account alone (400), or an account that cannot be settled, counts
-  as failed for that account, and the run goes on.
+  as failed for that account, and the run goes on. When it is the
+  invoice Stripe refuses (or does not have), the subscription is still
+  settled, so access comes back, and the payment is left to its event,
+  with an error in the log.
 * Beside an event of the same account: the subscription is read first,
   then the account is locked (the lock settle_subscription takes) and
   compared with what it was before the read. Changed meanwhile: an event
@@ -82,15 +102,15 @@ REREAD_STATUSES = ("trialing", "active", "past_due")
 # renewal reaches "canceled", not "unpaid".
 LATE_PAYMENT_STATUSES = ("past_due",)
 
-# What settle_subscription writes from the subscription: an account whose
-# values changed between the read at Stripe and the lock had an event
-# applied meanwhile.
+# What settle_subscription writes from the subscription, and the payment
+# invoice.paid records: an account whose values changed between the read
+# at Stripe and the lock had an event applied meanwhile.
 _COMPARED = (
     "stripe_subscription_id", "stripe_customer_id", "subscription_status",
     "subscription_level", "subscription_period_start",
     "subscription_period_end", "subscription_trial_start",
     "subscription_trial_end", "subscription_cancel_at_period_end",
-    "subscription_revoked",
+    "subscription_revoked", "subscription_ever_paid",
 )
 
 
@@ -194,44 +214,107 @@ def _read(gateway, sub_id, user_id):
         raise StripeNotReached(type(e).__name__)
 
 
+def _payment_unrecorded(user, sub):
+    """Stripe has the account's subscription active and the account has
+    no payment recorded: the one state in which the latest invoice is
+    read."""
+    return (sub.get("status") == "active"
+            and sub.get("id") == user.stripe_subscription_id
+            and not user.subscription_ever_paid)
+
+
+def _paid_invoice(gateway, sub, user_id):
+    """The latest invoice of *sub*, read from Stripe, when Stripe has it
+    paid above zero and it is an invoice of *sub*: what invoice.paid
+    would record as a payment. None for any other invoice (a draft not
+    charged yet, open, void, of zero) or none at all, and when Stripe
+    refuses this read or does not have the invoice (logged as an error:
+    the payment is then left to its event). Raises StripeNotReached when
+    Stripe cannot be asked."""
+    invoice_id = sub.get("latest_invoice")
+    if isinstance(invoice_id, dict):
+        invoice_id = invoice_id.get("id")
+    if not invoice_id:
+        return None
+    try:
+        invoice = gateway.retrieve_invoice(invoice_id) or {}
+    except Exception as e:  # noqa: BLE001 - one Stripe refuses or lacks
+        db.session.rollback()
+        if stripe_billing._missing(e) or _refused_for_this_account(e):
+            logger.error("Period read again: Stripe refused the read of "
+                         "invoice %s of subscription %s (user %s): %s; "
+                         "the payment is left to its event", invoice_id,
+                         sub.get("id"), user_id, type(e).__name__)
+            return None
+        raise StripeNotReached(type(e).__name__)
+    if (invoice.get("status") == "paid"
+            and stripe_billing.subscription_id_of_invoice(invoice)
+            == sub.get("id")
+            and stripe_billing.paid_above_zero(invoice)):
+        return invoice
+    return None
+
+
+def _settle_locked(reads, user, sub, before, invoice, config):
+    """Under the account's lock (the one settle_subscription takes):
+    settle *sub* and, with *invoice* (_paid_invoice), record the payment
+    as invoice.paid would. Returns whether the payment was recorded, or
+    None, with nothing written, when the account changed since the read
+    (*before*): an event was applied meanwhile. Does not commit."""
+    db.session.query(User).filter(
+        User.id == user.id).with_for_update().one()
+    db.session.refresh(user)
+    if _stored(user) != before:
+        db.session.rollback()
+        return None
+    stripe_billing.settle_subscription(reads, sub, config, lock=False)
+    if (invoice is None or user.subscription_status != "active"
+            or not _payment_unrecorded(user, sub)):
+        return False
+    # The same fact invoice.paid records, read at Stripe; the event, when
+    # it arrives, finds it recorded.
+    stripe_billing.record_payment(user, config)
+    return True
+
+
 def _reread_one(gateway, user_id, config, now):
-    """Read one account's subscription and settle it. Returns what
-    happened: "changed", "unchanged", "skipped" (the account is not due
-    any more; Stripe was not asked), "event_first" (an event was applied
-    between the read and the lock), "unknown" (Stripe has no such
-    subscription, or it is not this account's), "failed" (it could not
-    be written, or settling it would change something at Stripe; nothing
-    of it is kept). Raises StripeNotReached when Stripe cannot be asked.
-    Commits."""
+    """Read one account's subscription and settle it. Returns (what
+    happened, whether a payment was recorded). What happened: "changed",
+    "unchanged", "skipped" (the account is not due any more; Stripe was
+    not asked), "event_first" (an event was applied between the read and
+    the lock), "unknown" (Stripe has no such subscription, or it is not
+    this account's), "failed" (it could not be written, or settling it
+    would change something at Stripe; nothing of it is kept). Raises
+    StripeNotReached when Stripe cannot be asked; nothing of the account
+    is written then. Commits."""
     user = db.session.get(User, user_id)
     if user is None:
-        return "skipped"
+        return "skipped", False
     before = _stored(user)
     status_before = user.subscription_status
     sub_id = user.stripe_subscription_id
     if not _is_due(user, now):
-        return "skipped"
+        return "skipped", False
     sub, outcome = _read(gateway, sub_id, user_id)
     if outcome is not None:
-        return outcome
+        return outcome, False
+    sub = sub or {}
+    reads = ReadOnlyGateway(gateway)
+    # Read before the lock, as the subscription is: the lock is not held
+    # while Stripe answers. Raises StripeNotReached as _read does.
+    invoice = (_paid_invoice(reads, sub, user_id)
+               if _payment_unrecorded(user, sub) else None)
     try:
-        owner = stripe_billing._user_for_subscription(sub or {})
+        owner = stripe_billing._user_for_subscription(sub)
         if owner is None or owner.id != user_id:
             db.session.rollback()
             logger.warning("Period read again: subscription %s is not "
                            "user %s's at Stripe; nothing changed", sub_id,
                            user_id)
-            return "unknown"
-        # The account's lock, as settle_subscription takes it; then the
-        # same account as before the read, or nothing is written.
-        db.session.query(User).filter(
-            User.id == user_id).with_for_update().one()
-        db.session.refresh(user)
-        if _stored(user) != before:
-            db.session.rollback()
-            return "event_first"
-        stripe_billing.settle_subscription(
-            ReadOnlyGateway(gateway), sub, config, lock=False)
+            return "unknown", False
+        paid = _settle_locked(reads, user, sub, before, invoice, config)
+        if paid is None:
+            return "event_first", False
         after = _stored(user)
         status_after = user.subscription_status
         db.session.commit()
@@ -240,24 +323,26 @@ def _reread_one(gateway, user_id, config, now):
         logger.warning("Period read again: subscription %s of user %s "
                        "needs a change at Stripe (%s); nothing written, "
                        "left to its event", sub_id, user_id, e)
-        return "failed"
+        return "failed", False
     except Exception as e:  # noqa: BLE001 - this account waits an hour
         db.session.rollback()
         logger.error("Period read again: subscription %s of user %s not "
                      "applied: %s", sub_id, user_id, type(e).__name__)
-        return "failed"
+        return "failed", False
     if after == before:
-        return "unchanged"
-    logger.info("Period read again: user %s, subscription %s: %s -> %s",
-                user_id, sub_id, status_before, status_after)
-    return "changed"
+        return "unchanged", False
+    logger.info("Period read again: user %s, subscription %s: %s -> %s%s",
+                user_id, sub_id, status_before, status_after,
+                f", payment recorded (invoice {invoice.get('id')} paid)"
+                if paid else "")
+    return "changed", paid
 
 
 def reread_ended_periods(config, now=None):
     """Hourly: read from Stripe the subscription of every account whose
     stored period has ended, or whose renewal payment failed, and settle
-    it as its event would. Returns counts. Nothing while payments are
-    off."""
+    it as its event would; record a payment Stripe has and the account
+    does not. Returns counts. Nothing while payments are off."""
     if not config.get("PAYMENTS_ENABLED"):
         return {"status": "off"}
     now = now or datetime.utcnow()
@@ -266,7 +351,8 @@ def reread_ended_periods(config, now=None):
     ids = ids[:PERIOD_REREAD_MAX_PER_RUN]
     result = {"status": "ok", "due": len(ids), "more_waiting": more,
               "asked": 0, "changed": 0, "unchanged": 0, "skipped": 0,
-              "event_first": 0, "unknown": 0, "failed": 0}
+              "event_first": 0, "unknown": 0, "failed": 0,
+              "payment_recorded": 0}
     db.session.rollback()
     if not ids:
         return result
@@ -280,8 +366,9 @@ def reread_ended_periods(config, now=None):
                        "the rest wait for the next run",
                        PERIOD_REREAD_MAX_PER_RUN)
     for user_id in ids:
+        paid = False
         try:
-            outcome = _reread_one(gateway, user_id, config, now)
+            outcome, paid = _reread_one(gateway, user_id, config, now)
         except StripeNotReached as e:   # the next hour starts again
             result["asked"] += 1
             result["status"] = "stripe_unreachable"
@@ -296,4 +383,5 @@ def reread_ended_periods(config, now=None):
         if outcome != "skipped":
             result["asked"] += 1
         result[outcome] += 1
+        result["payment_recorded"] += int(paid)
     return result

@@ -74,8 +74,9 @@ def reread_periods():
     renewal payment failed, is read again from Stripe and settled as its
     event would be, so a renewal whose event is late still starts the
     account's next period, and a late payment whose events were lost
-    still gives access again (utils/period_reread). Not retried: the next
-    hour starts again. Nothing while payments are off."""
+    still gives access again and, when it is the account's first, ends
+    the trial's usage ceiling (utils/period_reread). Not retried: the
+    next hour starts again. Nothing while payments are off."""
     with flask_app.app_context():
         result = reread_ended_periods(flask_app.config)
         if result.get("status") not in ("ok", "off") \

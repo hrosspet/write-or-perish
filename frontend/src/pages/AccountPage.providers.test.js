@@ -106,6 +106,20 @@ test('the default the picker fills in when the page opens does not ask', async (
   expect(screen.queryByRole('dialog')).toBeNull();
 });
 
+test('the default the picker fills in is not saved to the account (#785)', async () => {
+  renderPage({ preferred_model: null });
+  await act(async () => { await mockPickModel('claude-opus-5.5'); });
+  expect(mockPut).not.toHaveBeenCalled();
+  expect(mockUserCtx.setUser).not.toHaveBeenCalled();
+});
+
+test('a model the person picks is saved (#785)', async () => {
+  mockPut.mockResolvedValue({ data: { user: { ...baseUser, preferred_model: 'gpt-6-astra' } } });
+  renderPage({ preferred_model: null });
+  await act(async () => { await mockPickModel('gpt-6-astra', { picked: true }); });
+  expect(mockPut).toHaveBeenCalledWith('/dashboard/user', { preferred_model: 'gpt-6-astra' });
+});
+
 test('a changed default model does not ask after an answer', async () => {
   mockPut.mockResolvedValue({ data: { user: {
     ...baseUser, profile_both_providers: false,

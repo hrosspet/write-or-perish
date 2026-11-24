@@ -162,7 +162,8 @@ const ModelSelector = ({
     }
     // The second argument tells a pick from the default the picker fills
     // in by itself (the Account page asks the both-providers question
-    // only after a pick, #599).
+    // only after a pick, #599; the thread page names a model in its
+    // reply requests only after one, #791).
     if (id !== selectedModel) onModelChange(id, { picked: true });
     closeMenu();
   };

@@ -18,6 +18,9 @@ struct ProposalCard: View {
     var canAct = true
     /// Owner only: the card edits the reply's text (tick, "+") and saves it.
     var onContentChange: ((String) -> Void)?
+    /// The reply's text as the screen holds it now (the `content` this card was
+    /// made with can be older while a save is out, #795). Nil: `content`.
+    var currentContent: (() -> String?)?
     /// Keeps the page's `tool_calls_meta` in step after an accept.
     var onApplied: (String, [String: JSONValue]) -> Void = { _, _ in }
 
@@ -44,6 +47,8 @@ struct ProposalCard: View {
     @State private var selectedKey: String?
     @State private var addText = ""
     @State private var pollTask: Task<Void, Never>?
+    /// The card's ticks and "+" saves, in order (#795).
+    @State private var edits = ContentEditQueue()
     @FocusState private var addFocused: Bool
 
     private var parsed: ProposalParser.Sections { ProposalParser.parseOrientResponse(content) }
@@ -314,33 +319,41 @@ struct ProposalCard: View {
     }
 
     private func toggle(_ item: String, from: String, to: String, prepend: Bool) {
-        guard toggleable, let onContentChange else { return }
+        guard toggleable else { return }
         selectedKey = nil
-        let updated = ProposalParser.moveProposalItem(content, itemText: item, from: from, to: to, prepend: prepend)
-        guard updated != content else { return }
-        save(updated, previous: content, onContentChange: onContentChange) { "Couldn't save change — reverted (\($0))" }
+        save({ ProposalParser.moveProposalItem($0, itemText: item, from: from, to: to, prepend: prepend) }) {
+            "Couldn't save change — reverted (\($0))"
+        }
     }
 
     private func insert(after item: String, _ text: String) {
-        guard toggleable, let onContentChange else { return }
+        guard toggleable else { return }
         selectedKey = nil
-        let updated = MarkdownEdits.insertItemAfter(content, afterItemText: item, newText: text)
-        guard updated != content else { return }
-        save(updated, previous: content, onContentChange: onContentChange) { "Couldn't add task — reverted (\($0))" }
+        save({ MarkdownEdits.insertItemAfter($0, afterItemText: item, newText: text) }) {
+            "Couldn't add task — reverted (\($0))"
+        }
     }
 
-    private func save(_ updated: String, previous: String, onContentChange: @escaping (String) -> Void,
-                      message: @escaping (String) -> String) {
-        onContentChange(updated)
-        Task {
-            do {
-                let _: NodeUpdateResponse = try await app.api.put(APIPath.node(nodeId), json: .object(["content": .string(updated)]))
-            } catch {
-                onContentChange(previous)
-                let reason = (error as? APIError)?.serverMessage ?? error.localizedDescription
-                app.toasts.show(message(reason))
-            }
-        }
+    /// Shown at once, saved one after the other, each only over the text the
+    /// card shows (#795): when the reply changed elsewhere nothing is saved,
+    /// the change is undone and a toast says so.
+    private func save(_ edit: @escaping (String) -> String, failure: @escaping (String) -> String) {
+        guard let onContentChange else { return }
+        let api = app.api
+        let id = nodeId
+        let shown = content
+        edits.apply(edit, to: ContentEditQueue.Target(
+            onScreen: currentContent ?? { shown },
+            show: onContentChange,
+            save: { text, base in
+                let _: NodeUpdateResponse = try await api.put(APIPath.node(id), json: .object([
+                    "content": .string(text),
+                    "base_content": .string(base),
+                ]))
+            },
+            notify: { [weak app] in app?.toasts.show($0, duration: 8) },
+            newerMessage: ThreadModel.newerEntryMessage
+        ), failure: failure)
     }
 
     private var applyTodoArea: some View {

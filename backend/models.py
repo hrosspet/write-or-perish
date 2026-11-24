@@ -1239,9 +1239,18 @@ class NodeContextArtifact(db.Model):
     artifact_id = db.Column(db.Integer, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+    # The cascade is on the node's side (#786): deleting a node through
+    # the ORM deletes its pins (one SELECT; no passive_deletes, so it also
+    # holds where foreign keys are not enforced, e.g. sqlite tests), and
+    # deleting a pin deletes nothing else. It used to sit on this side, so
+    # an edit that dropped a placeholder (sync_context_artifacts deletes
+    # the pin) deleted the entry: a 500 on Postgres, the entry gone on
+    # sqlite. Bulk deletes of nodes bypass this; the foreign key's
+    # ON DELETE CASCADE covers them where it is enforced (Postgres).
     node = db.relationship(
-        "Node", backref="context_artifacts", cascade="all,delete-orphan",
-        single_parent=True,
+        "Node",
+        backref=db.backref("context_artifacts",
+                           cascade="all, delete-orphan"),
     )
 
     # artifact_id is part of the key because "user_artifact" is a multi-row

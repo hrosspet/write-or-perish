@@ -15,6 +15,9 @@ enum LLMRequestError {
     /// the refusal came from or on the entry's page.
     static func toastMessage(_ error: Error) -> String? {
         if SpendCap.isSpendCapError(error) { return nil }
+        // No AI replies on the account (#438): the "REPLIES PAUSED" banner is on
+        // screen and says it; a toast with the same sentence repeats it (#776).
+        if case .subscriptionRequired? = error as? APIError { return nil }
         guard let apiError = error as? APIError else { return fallbackMessage }
         if apiError.isAutoGenerateOff || apiError.isThreadTooLong { return nil }
         return apiError.userMessage(fallback: fallbackMessage)

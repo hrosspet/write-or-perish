@@ -84,6 +84,9 @@ struct ModelPicker: View {
     @Binding var selectedModel: String?
     var purpose: ModelPurpose = .chat
     var disabled = false
+    /// Told when the person chooses another row, not when the picker fills in its
+    /// default (the thread page names a model only after a pick, #791).
+    var onPick: ((String) -> Void)?
 
     @Environment(AppState.self) private var app
     @State private var catalog = ModelCatalog.shared
@@ -166,7 +169,10 @@ struct ModelPicker: View {
 
     private func row(_ model: ModelInfo) -> some View {
         Button {
-            if model.id != selectedModel { selectedModel = model.id }
+            if model.id != selectedModel {
+                selectedModel = model.id
+                onPick?(model.id)
+            }
             open = false
         } label: {
             HStack(spacing: 16) {
