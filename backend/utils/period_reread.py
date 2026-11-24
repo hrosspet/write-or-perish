@@ -7,18 +7,33 @@ ceiling is counted over, change only when an event from Stripe arrives
 arrives, the account keeps the ended period: a subscriber at the ceiling
 stays there past the day the next period started.
 
-Hourly (tasks/spend_monitor.reread_periods), every account whose stored
-period end has passed by PERIOD_REREAD_MARGIN, and whose subscription
-still runs as far as Loore knows, has its subscription read from Stripe
-and settled by stripe_billing.settle_subscription, the function every
-subscription event goes through. Nothing about the ceiling, the carry or
-the access is decided here.
+A renewal whose payment failed has the same problem (Peter, 2026-11-24):
+the account is stored as a late payment (past_due), which gives no
+access, and when the person pays later and Stripe's events of that
+payment are lost, the account stays without access although it paid.
+
+Hourly (tasks/spend_monitor.reread_periods), these accounts have their
+subscription read from Stripe and settled by
+stripe_billing.settle_subscription, the function every subscription
+event goes through:
+
+* every account whose stored period end has passed by
+  PERIOD_REREAD_MARGIN, and whose subscription still runs as far as
+  Loore knows;
+* every account stored as a late payment, whatever its period end. It is
+  asked every hour until Stripe answers otherwise: paid (active, access
+  again), or ended (canceled when every retry failed, as Peter sets
+  Stripe to do), after which it is not asked again.
+
+Nothing about the ceiling, the carry or the access is decided here.
 
 * One read at Stripe per account and run; at most
   PERIOD_REREAD_MAX_PER_RUN accounts a run, the earliest period end
-  first.
+  first (an account whose period end is not stored comes last).
 * Stripe cannot be asked: the run ends there, and the next hour starts
-  again. Nothing is tried twice within a run.
+  again. Nothing is tried twice within a run. A read Stripe refuses for
+  one account alone (400), or an account that cannot be settled, counts
+  as failed for that account, and the run goes on.
 * Beside an event of the same account: the subscription is read first,
   then the account is locked (the lock settle_subscription takes) and
   compared with what it was before the read. Changed meanwhile: an event
@@ -59,6 +74,14 @@ PERIOD_REREAD_MAX_PER_RUN = 200
 # that has not gone through (no period has been paid).
 REREAD_STATUSES = ("trialing", "active", "past_due")
 
+# The stored state of a renewal whose payment failed, read every run
+# whatever its period end (Peter, 2026-11-24). Stripe's "unpaid" is
+# stored as "ended" (stripe_billing.STATUS_MAP), like "canceled", so an
+# account whose subscription Stripe marked unpaid is not asked; with
+# Stripe set to cancel a subscription when every retry failed, a failed
+# renewal reaches "canceled", not "unpaid".
+LATE_PAYMENT_STATUSES = ("past_due",)
+
 # What settle_subscription writes from the subscription: an account whose
 # values changed between the read at Stripe and the lock had an event
 # applied meanwhile.
@@ -78,19 +101,35 @@ def _stored(user):
 def _due(cutoff):
     return db.and_(
         User.stripe_subscription_id.isnot(None),
-        User.subscription_status.in_(REREAD_STATUSES),
-        User.subscription_period_end.isnot(None),
-        User.subscription_period_end < cutoff)
+        db.or_(
+            User.subscription_status.in_(LATE_PAYMENT_STATUSES),
+            db.and_(
+                User.subscription_status.in_(REREAD_STATUSES),
+                User.subscription_period_end.isnot(None),
+                User.subscription_period_end < cutoff)))
+
+
+def _is_due(user, now):
+    """The same test as _due, on an account already loaded."""
+    if not user.stripe_subscription_id:
+        return False
+    if user.subscription_status in LATE_PAYMENT_STATUSES:
+        return True
+    return (user.subscription_status in REREAD_STATUSES
+            and user.subscription_period_end is not None
+            and user.subscription_period_end < now - PERIOD_REREAD_MARGIN)
 
 
 def due_account_ids(now=None, limit=None):
-    """Ids of the accounts whose stored period end passed
+    """Ids of the accounts to read: those whose stored period end passed
     PERIOD_REREAD_MARGIN ago or earlier and whose subscription still runs
-    as far as Loore knows, the earliest period end first."""
+    as far as Loore knows, and those stored as a late payment; the
+    earliest period end first, an account without one last."""
     now = now or datetime.utcnow()
     q = (db.session.query(User.id)
          .filter(_due(now - PERIOD_REREAD_MARGIN))
-         .order_by(User.subscription_period_end.asc(), User.id.asc()))
+         .order_by(User.subscription_period_end.asc().nullslast(),
+                   User.id.asc()))
     if limit is not None:
         q = q.limit(limit)
     return [uid for (uid,) in q.all()]
@@ -121,7 +160,38 @@ class ReadOnlyGateway:
 
 class StripeNotReached(Exception):
     """The read at Stripe failed for a reason other than a subscription
-    Stripe does not have: the run ends."""
+    Stripe does not have, or a request Stripe refused for this account
+    alone: the run ends."""
+
+
+def _refused_for_this_account(exc):
+    """Stripe answered and refused this one request (400, an invalid
+    request): the next account is asked, so one account's error cannot
+    stop every later account's read, hour after hour. Any other failure
+    (no connection, too many requests, Stripe's own error, a key Stripe
+    does not accept) would be the same for every account."""
+    return getattr(exc, "http_status", None) == 400
+
+
+def _read(gateway, sub_id, user_id):
+    """(the subscription as Stripe has it, None), or (None, "unknown")
+    when Stripe has no such subscription, or (None, "failed") when Stripe
+    refused this account's read. Raises StripeNotReached when Stripe
+    cannot be asked."""
+    try:
+        return gateway.retrieve_subscription(sub_id), None
+    except Exception as e:  # noqa: BLE001 - one Stripe does not know
+        db.session.rollback()
+        if stripe_billing._missing(e):
+            logger.warning("Period read again: Stripe has no subscription "
+                           "%s (user %s); nothing changed", sub_id, user_id)
+            return None, "unknown"
+        if _refused_for_this_account(e):
+            logger.error("Period read again: Stripe refused the read of "
+                         "subscription %s (user %s): %s; nothing changed",
+                         sub_id, user_id, type(e).__name__)
+            return None, "failed"
+        raise StripeNotReached(type(e).__name__)
 
 
 def _reread_one(gateway, user_id, config, now):
@@ -139,19 +209,11 @@ def _reread_one(gateway, user_id, config, now):
     before = _stored(user)
     status_before = user.subscription_status
     sub_id = user.stripe_subscription_id
-    if (not sub_id or status_before not in REREAD_STATUSES
-            or user.subscription_period_end is None
-            or user.subscription_period_end >= now - PERIOD_REREAD_MARGIN):
+    if not _is_due(user, now):
         return "skipped"
-    try:
-        sub = gateway.retrieve_subscription(sub_id)
-    except Exception as e:  # noqa: BLE001 - one Stripe does not know
-        db.session.rollback()
-        if not stripe_billing._missing(e):
-            raise StripeNotReached(type(e).__name__)
-        logger.warning("Period read again: Stripe has no subscription %s "
-                       "(user %s); nothing changed", sub_id, user_id)
-        return "unknown"
+    sub, outcome = _read(gateway, sub_id, user_id)
+    if outcome is not None:
+        return outcome
     try:
         owner = stripe_billing._user_for_subscription(sub or {})
         if owner is None or owner.id != user_id:
@@ -193,8 +255,9 @@ def _reread_one(gateway, user_id, config, now):
 
 def reread_ended_periods(config, now=None):
     """Hourly: read from Stripe the subscription of every account whose
-    stored period has ended, and settle it as its event would. Returns
-    counts. Nothing while payments are off."""
+    stored period has ended, or whose renewal payment failed, and settle
+    it as its event would. Returns counts. Nothing while payments are
+    off."""
     if not config.get("PAYMENTS_ENABLED"):
         return {"status": "off"}
     now = now or datetime.utcnow()

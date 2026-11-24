@@ -140,11 +140,12 @@ celery.conf.update(
             'task': 'backend.tasks.spend_monitor.check_trials',
             'schedule': schedules.crontab(minute=22),  # hourly, at :22 UTC
         },
-        # A subscription whose stored period has ended is read again from
-        # Stripe and settled as its event would be (utils/period_reread):
-        # a renewal whose event is late still starts the next period. A
-        # fixed minute, so a deploy does not put the run off. Nothing
-        # while payments are off.
+        # A subscription whose stored period has ended, or whose renewal
+        # payment failed, is read again from Stripe and settled as its
+        # event would be (utils/period_reread): a renewal whose event is
+        # late still starts the next period, and a late payment whose
+        # events were lost still gives access again. A fixed minute, so a
+        # deploy does not put the run off. Nothing while payments are off.
         'reread-ended-periods': {
             'task': 'backend.tasks.spend_monitor.reread_periods',
             'schedule': schedules.crontab(minute=37),  # hourly, at :37 UTC
