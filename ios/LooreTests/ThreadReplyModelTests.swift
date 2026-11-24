@@ -98,6 +98,8 @@ final class ThreadReplyModelTests: StubbedAppTestCase {
         let typed = body(of: "POST /api/textmode/from-node/10")
         XCTAssertEqual(typed?["auto_generate"] as? Bool, true)
         XCTAssertNil(typed?["model"])
+        // The form's level still goes along (#794).
+        XCTAssertEqual(typed?["privacy_level"] as? String, "private")
 
         _ = try await model.submitReadReply(NodeFormSubmission(content: "why?", parentId: 10, privacy: .private,
                                                                aiUsage: .chat, streamingSessionId: "s1"),

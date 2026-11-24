@@ -195,8 +195,11 @@ describe('a reply typed in a thread on another model', () => {
       });
     });
 
+    // The form's level goes along (#794: the reply keeps the level the
+    // form shows); the model does not.
     expect(bodyOf('/textmode/from-node/50')).toEqual({
-      content: 'Tell me more.', ai_usage: 'chat', auto_generate: true,
+      content: 'Tell me more.', privacy_level: 'private', ai_usage: 'chat',
+      auto_generate: true,
     });
   });
 

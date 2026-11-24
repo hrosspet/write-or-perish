@@ -15,6 +15,8 @@ choice (#784 review).
 Routes run in the test_no_replies_for_none harness (in-memory sqlite, the
 completion task stubbed), so nothing reaches a model.
 """
+import pytest
+
 from backend.tests.test_no_replies_for_none import (  # noqa: F401 (fixtures)
     app, task_mod, _client, _node, _user,
 )
@@ -121,3 +123,35 @@ class TestAPickWins:
         typed = _own_thread(alice)
         assert _reply_model(models, alice, typed,
                             {**AUTOMATIC, "model": ACCOUNT}) == ACCOUNT
+
+
+class TestWithTheFormsLevel:
+    """The reply box under a Glean reply sends the form's privacy level
+    (#794: the message keeps the level the form shows) and, with nothing
+    picked, no model (#791). Both hold in one request: the message, its
+    prompt entry and the automatic reply follow the level, and the reply
+    runs on the thread's model, or on the model picked."""
+
+    @pytest.mark.parametrize("sent, expected", [
+        (None, THREAD), (ACCOUNT, ACCOUNT)])
+    def test_a_private_reply_under_a_public_reply(
+            self, models, task_mod, sent, expected):  # noqa: F811
+        alice = _speaker()
+        first = _node(alice, content="a thought", privacy_level="public")
+        reply = _reply_on(first, alice, THREAD, privacy_level="public")
+        _db.session.commit()
+        body = {"content": "tell me more", "privacy_level": "private",
+                "ai_usage": "chat", "auto_generate": True}
+        if sent:
+            body["model"] = sent
+        resp = _client(models, alice).post(
+            f"/api/textmode/from-node/{reply.id}", json=body)
+        assert resp.status_code == 202, resp.get_json()
+        data = resp.get_json()
+        assert Node.query.get(data["user_node_id"]).privacy_level \
+            == "private"
+        assert Node.query.get(data["prompt_node_id"]).privacy_level \
+            == "private"
+        answer = Node.query.get(data["llm_node_id"])
+        assert answer.llm_model == expected
+        assert answer.privacy_level == "private"
