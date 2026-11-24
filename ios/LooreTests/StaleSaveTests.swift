@@ -173,6 +173,29 @@ final class EditFormBaseTests: StubbedAppTestCase {
         XCTAssertEqual(model.openedPrivacy, .private)
     }
 
+    // #797 meets #799: a choice made in the selector (the view's path) is never
+    // reset, also when the person picked the page's value again before the
+    // entry's settings arrived. Untouched settings still take the entry's.
+    func testSettingsPickedInTheSelectorStayTheirsWhileTheFormReadsTheEntry() async {
+        let (model, _) = editForm(pagePrivacy: .public, entryPrivacy: "private") { _ in
+            .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+        }
+        model.choosePrivacy(.circles)
+        model.choosePrivacy(.public)
+        await model.start()
+        XCTAssertEqual(model.privacy, .public)
+        XCTAssertEqual(model.openedPrivacy, .private)
+        XCTAssertEqual(model.aiUsage, .chat, "untouched: the entry's")
+
+        let (untouched, _) = editForm(pagePrivacy: .public, entryPrivacy: "private") { _ in
+            .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+        }
+        untouched.chooseAIUsage(.off)
+        await untouched.start()
+        XCTAssertEqual(untouched.privacy, .private, "untouched: the entry's")
+        XCTAssertEqual(untouched.aiUsage, .off)
+    }
+
     // #799 second review, 2: a refused Save whose text is untouched (only a
     // setting widened) keeps no draft: the old text is not "your unsaved edit".
     func testARefusedSaveWithUntouchedTextSavesNoDraft() async {

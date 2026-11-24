@@ -874,6 +874,7 @@ def create_node():
         "tip_id": parts[-1].id if parts else node.id
     }), 201
 
+
 # Who may read an entry, narrowest first: a setting later in either list
 # lets more people (privacy) or more AI use (AI usage) read it.
 _PRIVACY_REACH = ("private", "circles", "public")

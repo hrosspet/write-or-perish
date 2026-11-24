@@ -303,10 +303,11 @@ final class NodeFormModel {
         // Its privacy and AI usage too (#799 second review): a page left open
         // may still show Public after the entry was made Private elsewhere, and
         // a Save from it would make the newer text public. A setting the person
-        // already changed here stays theirs.
-        if privacy == openedPrivacy { privacy = fresh.privacyLevel }
+        // already changed here stays theirs, and so does one they picked in the
+        // selector (#797), even when it is the page's value again.
+        if !privacyChosen && privacy == openedPrivacy { privacy = fresh.privacyLevel }
         openedPrivacy = fresh.privacyLevel
-        if aiUsage == openedAIUsage { aiUsage = fresh.aiUsage }
+        if !aiUsageChosen && aiUsage == openedAIUsage { aiUsage = fresh.aiUsage }
         openedAIUsage = fresh.aiUsage
     }
 
