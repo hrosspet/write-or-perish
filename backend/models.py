@@ -1399,6 +1399,15 @@ class Draft(db.Model):
     # #388. See backend/utils/recording_device.py.
     streaming_device_key = db.Column(db.String(64), nullable=True)
 
+    # An edit draft (node_id): the entry's text the form was opened on, as
+    # the form sends it with each autosave; encrypted like content. When it
+    # is no longer the entry's text, the draft was written on an older
+    # version (routes/drafts._older_than_entry): it is offered beside the
+    # entry's current text instead of being loaded, so its Save can't put
+    # the older text over a newer one. NULL for new-entry drafts and for
+    # drafts saved by clients that don't send it.
+    base_content = db.Column(db.Text, nullable=True)
+
     # Relationships
     user = db.relationship("User", backref="drafts")
     node = db.relationship("Node", foreign_keys=[node_id])
@@ -1411,6 +1420,17 @@ class Draft(db.Model):
     def get_content(self) -> str:
         """Get decrypted content."""
         return decrypt_content(self.content)
+
+    def set_base_content(self, plaintext):
+        """The entry's text the edit draft was written on (None: unknown)."""
+        self.base_content = (None if plaintext is None
+                             else encrypt_content(plaintext))
+
+    def get_base_content(self):
+        """The entry's text the edit draft was written on, or None."""
+        if self.base_content is None:
+            return None
+        return decrypt_content(self.base_content)
 
 
 class UserProfile(db.Model):

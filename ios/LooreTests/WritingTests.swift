@@ -443,9 +443,15 @@ final class NodeFormModelTests: StubbedAppTestCase {
 
     /// The entry as the thread page shows it: the checkbox ticked after the edit was left.
     private func editForm(_ draftJSON: String, entry: String = "- [x] milk") -> NodeFormModel {
+        let node = String(data: try! JSONSerialization.data(withJSONObject: [
+            "id": 9, "content": entry, "node_type": "user", "user": ["id": 5, "username": "seowriter"],
+            "privacy_level": "private", "ai_usage": "chat", "child_count": 0, "children": [], "ancestors": [],
+        ] as [String: Any]), encoding: .utf8)!
         StubURLProtocol.install { request in
             let path = request.url?.path(percentEncoded: true)
             if request.httpMethod == "GET" && path == "/api/drafts/" { return .json(200, draftJSON) }
+            // The form reads the entry when it opens (#799 review): as the page has it.
+            if request.httpMethod == "GET" && path == "/api/nodes/9" { return .json(200, node) }
             if request.httpMethod == "PUT" {
                 return .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
             }
@@ -562,7 +568,8 @@ final class NodeFormModelTests: StubbedAppTestCase {
     }
 
     // Save with the older edit on screen keeps the entry's text, and the
-    // successful save clears the entry's drafts, the older edit included.
+    // successful save clears the drafts the form showed, the older edit
+    // included (#799 review: only those; another device's stays).
     func testSavingTheEditClearsTheEntrysDraft() async {
         let model = editForm(Self.olderDraft)
         await model.start()
@@ -570,7 +577,7 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["content"] as? String, "- [x] milk")
         let delete = StubURLProtocol.requests.last { $0.httpMethod == "DELETE" }
         XCTAssertEqual(delete?.url?.path(percentEncoded: true), "/api/drafts/")
-        XCTAssertEqual(delete?.url?.query, "node_id=9")
+        XCTAssertEqual(delete?.url?.query, "node_id=9&draft_id=3")
         XCTAssertNil(model.olderDraft)
     }
 

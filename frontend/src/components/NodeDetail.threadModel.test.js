@@ -56,7 +56,7 @@ jest.mock('./NodeFooter', () => ({ children }) => <div>{children}</div>);
 jest.mock('./QuotedContent', () => ({ content }) => <div>{content}</div>);
 
 import React from 'react';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import NodeDetailWrapper from './NodeDetailWrapper';
 
@@ -175,7 +175,8 @@ describe('a reply typed in a thread on another model', () => {
     await show(answeredEntryPage());
 
     fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
-    expect(mockModalProps).not.toBeNull();
+    // Edit reads the entry before the form opens (#799).
+    await waitFor(() => expect(mockModalProps).not.toBeNull());
     await act(async () => {
       await mockModalProps.onSuccess({
         node: { id: 12, content: 'My second entry, rewritten.' },

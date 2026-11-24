@@ -874,6 +874,26 @@ def create_node():
         "tip_id": parts[-1].id if parts else node.id
     }), 201
 
+
+# Who may read an entry, narrowest first: a setting later in either list
+# lets more people (privacy) or more AI use (AI usage) read it.
+_PRIVACY_REACH = ("private", "circles", "public")
+_AI_USAGE_REACH = ("none", "chat", "train")
+
+
+def _widens_access(node, data):
+    """Whether the edit request *data* sets the privacy or the AI usage of
+    *node* to one that lets more people or AI read it than now (#799
+    review: a form opened on an older text may narrow access to the
+    newer one, but not widen it)."""
+    def wider(levels, new, old):
+        return (new in levels and old in levels
+                and levels.index(new) > levels.index(old))
+    return (wider(_PRIVACY_REACH, data.get("privacy_level"),
+                  node.privacy_level)
+            or wider(_AI_USAGE_REACH, data.get("ai_usage"), node.ai_usage))
+
+
 # Update (edit) a node. (The node's prior content is saved in NodeVersion.)
 @nodes_bp.route("/<int:node_id>", methods=["PUT"])
 @login_required
@@ -888,10 +908,13 @@ def update_node(node_id):
     if new_content is None:
         return jsonify({"error": "Content required for update"}), 400
 
-    # A checklist tick or row "+" names the text the page showed (#795):
-    # saved only while that is still the entry's text, so a page left open
-    # never puts its older text over a newer edit. The row is locked first,
-    # so two such saves from two tabs can't both pass the check.
+    # A checklist tick or row "+" (#795) and the edit form's Save name the
+    # text the page or the form was opened on: saved only while that is
+    # still the entry's text, so a page left open never puts its older
+    # text over a newer edit. The row is locked first, so two such saves
+    # from two tabs can't both pass the check. A Save whose text is the
+    # one it was opened on (only privacy or AI usage changed) has no text
+    # of its own to save: the entry keeps its text, whatever it is now.
     from backend.utils.content_base import (
         base_content_of, content_changed_response)
     base_content, bad_base = base_content_of(data)
@@ -900,9 +923,17 @@ def update_node(node_id):
     if base_content is not None:
         node = Node.query.filter_by(id=node.id).populate_existing() \
             .with_for_update().one()
-        if node.get_content() != base_content:
+        stored = node.get_content()
+        if stored != base_content and (
+                new_content != base_content
+                or _widens_access(node, data)):
+            # A text made on an older version, or a setting that lets more
+            # people or AI read a text the form never showed (#799
+            # review): nothing is saved.
             db.session.rollback()
             return content_changed_response()
+        if new_content == base_content:
+            new_content = stored if stored is not None else new_content
 
     # Edits don't auto-split (re-parenting children mid-edit would be
     # surprising); above-cap content is rejected and the UI guides the

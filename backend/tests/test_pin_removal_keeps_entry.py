@@ -1,5 +1,5 @@
 """Editing an entry so that a personal placeholder disappears keeps the
-entry (#786).
+entry (#786), also with the edit form's base_content (#799).
 
 An entry carries pins (NodeContextArtifact): one row per personal
 document its text names ({user_profile}, {user_todo}, {user_intentions}
@@ -445,4 +445,99 @@ def test_thirty_day_cleanup_purges_a_pinned_entry(app, world, pins_loaded):
     assert _pins(reply_id) == {}
     assert _pins(kept_id) == kept_pins
     assert _pins(entry.id) == entry_pins
+    _documents_kept(world)
+
+
+# ── With the edit form's base (#799) ────────────────────────────────────
+#
+# Both apps' edit forms now send the text they were opened on
+# (base_content): the route locks the row and reads it again before the
+# edit, and saves only over that text. These are the edits above as the
+# forms send them, and the two refusals that must leave the pins alone.
+
+
+def test_edit_with_its_base_that_drops_the_profile_keeps_the_entry(
+        app, world):
+    """The first test's edit with the base the form showed (the resolved
+    prompt): saved, the same pins go, the entry and its replies stay."""
+    root, reply, answer = _prompt_entry(world)
+    root_id, reply_id, answer_id = root.id, reply.id, answer.id
+    before = _pins(root_id)
+    new_text = "You are Loore, but terser.\n{user_intentions}\n{user_todo}"
+
+    resp = _client(app, world.alice).put(f"/nodes/{root_id}", json={
+        "content": new_text, "base_content": PROMPT_TEXT,
+        "privacy_level": "private", "ai_usage": "chat",
+        "detach_prompt": True,
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    _db.session.expire_all()
+    _unchanged(root_id, None, new_text)
+    assert _pins(root_id) == {k: v for k, v in before.items()
+                              if k[0] not in ("prompt", "profile")}
+    _unchanged(reply_id, root_id, "A reply.")
+    _unchanged(answer_id, reply_id, "An answer to the reply.")
+    _documents_kept(world)
+
+
+def test_stale_edit_that_drops_a_placeholder_saves_nothing(app, world):
+    """A form opened before another device's edit drops a placeholder:
+    refused (409 content_changed); the text, the pins and the edit
+    history stay as the other device left them."""
+    entry, _ = _plain_entry(world)
+    entry_id = entry.id
+    client = _client(app, world.alice)
+    newer = ENTRY_TEXT.replace(" {user_todo}", "")
+    assert client.put(f"/nodes/{entry_id}", json={
+        "content": newer, "base_content": ENTRY_TEXT,
+        "privacy_level": "private", "ai_usage": "chat",
+    }).status_code == 200
+    _db.session.expire_all()
+    pins = _pins(entry_id)
+    versions = NodeVersion.query.filter_by(node_id=entry_id).count()
+
+    resp = client.put(f"/nodes/{entry_id}", json={
+        "content": ENTRY_TEXT.replace(" {user_profile}", ""),
+        "base_content": ENTRY_TEXT,
+        "privacy_level": "private", "ai_usage": "chat",
+    })
+
+    assert resp.status_code == 409
+    assert resp.get_json()["code"] == "content_changed"
+    _db.session.expire_all()
+    _unchanged(entry_id, None, newer)
+    assert _pins(entry_id) == pins
+    assert NodeVersion.query.filter_by(node_id=entry_id).count() == versions
+    _documents_kept(world)
+
+
+def test_stale_settings_only_save_does_not_bring_a_dropped_pin_back(
+        app, world):
+    """A form opened before another device took {user_todo} out saves only
+    a narrower setting, its text untouched: the entry keeps the newer
+    text, and the to-do pin that edit removed is not made again from the
+    form's older text."""
+    entry, _ = _plain_entry(world)
+    entry_id = entry.id
+    client = _client(app, world.alice)
+    newer = ENTRY_TEXT.replace(" {user_todo}", "")
+    assert client.put(f"/nodes/{entry_id}", json={
+        "content": newer, "base_content": ENTRY_TEXT,
+        "privacy_level": "private", "ai_usage": "chat",
+    }).status_code == 200
+    _db.session.expire_all()
+    pins = _pins(entry_id)
+    assert "todo" not in {t for t, _ in pins}
+
+    resp = client.put(f"/nodes/{entry_id}", json={
+        "content": ENTRY_TEXT, "base_content": ENTRY_TEXT,
+        "privacy_level": "private", "ai_usage": "none",
+    })
+
+    assert resp.status_code == 200, resp.get_json()
+    _db.session.expire_all()
+    _unchanged(entry_id, None, newer)
+    assert _db.session.get(Node, entry_id).ai_usage == "none"
+    assert _pins(entry_id) == pins
     _documents_kept(world)

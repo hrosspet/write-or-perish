@@ -121,6 +121,11 @@ final class TodoModel {
     static let newerTodoMessage =
         "There's a newer version of your todo list, so your change wasn't saved. Leave the list and open it again before continuing."
 
+    /// A tick or "+" undone because a quick-add saved before it landed on a newer
+    /// list, which the page then shows (#799 review).
+    static let newerTodoShownMessage =
+        "Your todo list changed elsewhere, so your change wasn't saved. The newest list is shown now: make your change again."
+
     /// Tick / untick by the item's stripped label (every matching line). Saved
     /// only on the version the page shows (#795).
     func toggle(_ item: TodoSections.Item) async {
@@ -219,14 +224,22 @@ final class TodoModel {
             finish(entry, server: confirmed)
             return false
         }
+        // The list the page showed this edit on; a re-fetch or a 409 that
+        // brings another one moves the page to a version it never showed.
+        let shownBase = confirmed
+        var moved = false
         do {
             let fresh: TodoEnvelope = try await app.api.get(APIPath.todo, poll: true)
-            if let latest = fresh.todo { confirmed = latest }
+            if let latest = fresh.todo {
+                moved = latest.revision != shownBase?.revision || latest.content != shownBase?.content
+                confirmed = latest
+            }
             var base = fresh.todo
             var retried = false
             while true {
                 do {
                     let saved = try await sendPatch(entry, on: base, fallback: fallback, app: app)
+                    undoTicksMadeBefore(moved: moved, app: app)
                     finish(entry, server: saved)
                     return true
                 } catch {
@@ -235,12 +248,17 @@ final class TodoModel {
                     // and saved once more. A second 409 in a row is reported.
                     guard !retried, let newest = Self.newestTodo(in: error) else { throw error }
                     retried = true
+                    moved = true
                     confirmed = newest
                     base = newest
                 }
             }
         } catch {
-            if let newest = Self.newestTodo(in: error) { confirmed = newest }
+            if let newest = Self.newestTodo(in: error) {
+                confirmed = newest
+                moved = true
+            }
+            undoTicksMadeBefore(moved: moved, app: app)
             finish(entry, server: confirmed)
             if let failure {
                 let apiError = error as? APIError
@@ -249,6 +267,17 @@ final class TodoModel {
             }
             return false
         }
+    }
+
+    /// A quick-add landed on a newer list than the page showed (its re-fetch or a
+    /// 409 brought one): the ticks and "+" tapped while it was saving wait for it
+    /// (the queue) and were made on the older list. They are undone, with one
+    /// toast, instead of being saved on a version the page never showed (#799
+    /// review). The page then shows the newer list.
+    private func undoTicksMadeBefore(moved: Bool, app: AppState) {
+        guard moved, pending.contains(where: { $0.onShownVersion }) else { return }
+        pending.removeAll { $0.onShownVersion }
+        app.toasts.show(Self.newerTodoShownMessage, duration: 8)
     }
 
     /// `PATCH` the edit applied to `base` (the newest list the app has), with

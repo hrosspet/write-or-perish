@@ -219,7 +219,9 @@ def test_a_write_approved_after_the_artifact_changed_saves_nothing(
     _db.session.commit()
 
     assert outcome == "failed"
-    assert "changed since" in result["error"]
+    # The person's sentence, not the model's (#799 review).
+    from backend.utils.tool_approvals import ARTIFACT_CHANGED_MESSAGE
+    assert result["error"] == ARTIFACT_CHANGED_MESSAGE
     assert _latest_memory(ben) == "- likes coffee"
 
 

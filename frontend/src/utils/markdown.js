@@ -196,8 +196,20 @@ export const NEWER_ARTIFACT_MESSAGE = "There's a newer version of this artifact,
   + 'Reload the page before continuing.';
 export const NEWER_TODO_MESSAGE = "There's a newer version of your todo list, so your change wasn't saved. "
   + 'Reload the page before continuing.';
+// A tick (or "+") made while a quick-add was saving, when the quick-add
+// landed on a newer list (#799 review): the page then shows that list.
+export const NEWER_TODO_SHOWN_MESSAGE = "Your todo list changed elsewhere, so your change wasn't saved. "
+  + 'The newest list is shown now: make your change again.';
 // Long enough to read the instruction in it.
 export const NEWER_MESSAGE_MS = 8000;
+
+// What an edit form says when its Save was refused because the text changed
+// since the form was opened (#799). The form stays open with the person's
+// text; nothing is merged.
+export const NEWER_ENTRY_EDIT_MESSAGE = "There's a newer version of this entry, so your edit wasn't saved. "
+  + 'Your text is still here: copy it, reload the page, and apply your changes to the newer version.';
+export const NEWER_ARTIFACT_EDIT_MESSAGE = "There's a newer version of this artifact, so your edit wasn't saved. "
+  + 'Your text is still here: copy it, reload the page, and apply your changes to the newer version.';
 
 /** Whether `err` is the server's "the text changed since the page showed it" (409). */
 export function isContentChanged(err) {

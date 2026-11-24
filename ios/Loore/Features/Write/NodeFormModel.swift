@@ -173,14 +173,40 @@ final class NodeFormModel {
     private(set) var olderDraft: Draft.OlderEdit?
     /// When the entry last changed (the box's words).
     @ObservationIgnored private(set) var entryChangedAt: Date?
+    /// The edit's Save was refused: the entry changed since the form was opened
+    /// (#799). The form keeps its text; `error` says what to do and the view
+    /// offers "Copy my text".
+    private(set) var newerVersion = false
+    /// The entry's text this edit form works on: `initialContent`, then the
+    /// entry as the server has it, read when the form opens (#799 review: the
+    /// page that opened it may still show an older text). Its Save sends it
+    /// as `base_content`, and its draft is filed under it.
+    private(set) var base: String
+    /// False while an edit form reads the entry and its draft: the editor waits,
+    /// so no typing lands on the page's older text.
+    private(set) var ready: Bool
+    /// The privacy and AI usage the edit form opened on: the page's, then the
+    /// entry's as just read (#799 second review). A Save that changes either
+    /// asks whether replies follow.
+    private(set) var openedPrivacy: PrivacyLevel?
+    private(set) var openedAIUsage: AIUsage?
+
+    /// What the form says when its Save was refused for a newer version (#799).
+    static let newerEntryEditMessage =
+        "There's a newer version of this entry, so your edit wasn't saved. Your text is still here: copy it, go back and open the entry again, then apply your changes to the newer version."
 
     init(config: NodeFormConfig, app: AppState, defaults: UserDefaults = .standard) {
         self.config = config
         self.app = app
         self.defaults = defaults
         drafts = DraftAutosaver(api: app.api, nodeId: config.edit?.nodeId,
-                                parentId: config.isEdit ? nil : config.parentId)
+                                parentId: config.isEdit ? nil : config.parentId,
+                                base: config.edit?.initialContent)
         content = config.edit?.initialContent ?? ""
+        base = config.edit?.initialContent ?? ""
+        ready = !config.isEdit
+        openedPrivacy = config.edit?.initialPrivacy
+        openedAIUsage = config.edit?.initialAIUsage
         let user = app.user
         let remembers = !config.isEdit && config.parentId == nil
         func remembered(_ key: String) -> String? { remembers ? defaults.string(forKey: key) : nil }
@@ -214,6 +240,9 @@ final class NodeFormModel {
         guard !started else { return }
         started = true
         async let draftLoad: Void = drafts.load()
+        if let edit = config.edit {
+            await readCurrentEntry(edit)
+        }
         if config.parentId != nil, !config.isEdit, let known = config.parentPrivacy {
             parentPrivacyChanged(known)
         }
@@ -238,7 +267,7 @@ final class NodeFormModel {
                 // Save would put the older text over the newer one (#761). The
                 // form keeps the entry's text and offers the draft; one with
                 // the entry's own text has nothing to offer.
-                if draft.content != edit.initialContent {
+                if draft.content != base {
                     olderDraft = .init(id: draft.id, content: draft.content, updatedAt: draft.updatedAt)
                     entryChangedAt = draft.entryUpdatedAt
                 }
@@ -252,9 +281,34 @@ final class NodeFormModel {
                 }
             }
         }
+        ready = true
         if let draft = drafts.draft, let sid = draft.sessionId, draft.hasStoredChunks {
             await recoverAudio(sessionId: sid)
         }
+    }
+
+    /// An edit form works on the entry as the server has it now (#799 review):
+    /// after a refused Save the thread page still shows the older text, and a
+    /// form opened on it would type into the older edit's draft. The editor
+    /// takes the current text (it is untouched: it waits until `ready`), and so
+    /// do the Save's base and the draft's. Offline: the page's copy (its Save is
+    /// still checked against the stored text).
+    private func readCurrentEntry(_ edit: NodeFormConfig.Edit) async {
+        guard let fresh = try? await app.api.nodeDetail(edit.nodeId) else { return }
+        if fresh.content != base {
+            if content == base { content = fresh.content }
+            base = fresh.content
+            drafts.base = fresh.content
+        }
+        // Its privacy and AI usage too (#799 second review): a page left open
+        // may still show Public after the entry was made Private elsewhere, and
+        // a Save from it would make the newer text public. A setting the person
+        // already changed here stays theirs, and so does one they picked in the
+        // selector (#797), even when it is the page's value again.
+        if !privacyChosen && privacy == openedPrivacy { privacy = fresh.privacyLevel }
+        openedPrivacy = fresh.privacyLevel
+        if !aiUsageChosen && aiUsage == openedAIUsage { aiUsage = fresh.aiUsage }
+        openedAIUsage = fresh.aiUsage
     }
 
     /// The parent's privacy now (on load, and after it was edited while the form
@@ -372,7 +426,7 @@ final class NodeFormModel {
             Task { await drafts.delete() }
         }
         hasDraft = false
-        content = config.edit?.initialContent ?? ""
+        content = config.isEdit ? base : ""
     }
 
     // MARK: An older edit draft (#761, #766)
@@ -390,7 +444,7 @@ final class NodeFormModel {
     /// "Use my edit" is offered while the form still shows the entry's text:
     /// it never replaces text typed here.
     var canUseOlderDraft: Bool {
-        olderDraft != nil && content == (config.edit?.initialContent ?? "")
+        olderDraft != nil && content == (config.isEdit ? base : "")
     }
 
     /// "Use my edit": the older unsaved edit becomes the form's text and the
@@ -522,13 +576,13 @@ final class NodeFormModel {
             error = "Content is required."
             return
         }
-        if let edit, edit.hasGeneratedTTS, regenerateTts == nil, content != edit.initialContent {
+        if let edit, edit.hasGeneratedTTS, regenerateTts == nil, content != base {
             dialog = .tts
             return
         }
         if let edit, edit.hasChildren, applyToReplies == nil,
-           (edit.initialPrivacy != nil && privacy != edit.initialPrivacy)
-            || (edit.initialAIUsage != nil && aiUsage != edit.initialAIUsage) {
+           (openedPrivacy != nil && privacy != openedPrivacy)
+            || (openedAIUsage != nil && aiUsage != openedAIUsage) {
             pendingRegenerateTts = regenerateTts
             dialog = .scope
             return
@@ -553,6 +607,7 @@ final class NodeFormModel {
         dialog = nil
         loading = true
         error = nil
+        newerVersion = false
         do {
             if let result = try await send(regenerateTts: regenerateTts, applyToReplies: applyToReplies) {
                 loading = false
@@ -565,6 +620,22 @@ final class NodeFormModel {
             if let refusal = QuotesNotPublic(error) {
                 // Nothing was saved: the form keeps its text and settings.
                 dialog = .quotesNotPublic(refusal)
+            } else if config.isEdit, ContentEditQueue.isContentChanged(error) {
+                // Nothing was saved: the entry changed since the form was opened
+                // (#799). The text stays in the form and on the server (its draft).
+                newerVersion = true
+                self.error = Self.newerEntryEditMessage
+                // Saved as a draft at once, with the form's base: another
+                // device's Save may have deleted this form's draft, and going
+                // back must not lose the text (#799 review). Reopened, the form
+                // offers it beside the entry's current text.
+                // Only typed text: a refused settings-only Save keeps no copy of
+                // the old text as "your unsaved edit" (#799 second review).
+                if content != base {
+                    drafts.save(content)
+                    await drafts.flush()
+                    hasDraft = true
+                }
             } else if uploadedFile != nil, SpendCap.isSpendCapError(error) {
                 app.toasts.show(SpendCap.toastMessage(.upload), duration: 8)
             } else if let apiError = error as? APIError {
@@ -646,8 +717,11 @@ final class NodeFormModel {
             var body: [String: JSONValue] = [
                 "content": .string(content), "privacy_level": .string(privacy.rawString),
                 "ai_usage": .string(aiUsage.rawString),
+                // The text the form was opened on (#799): saved only while it is
+                // still the entry's text; untouched text saves only the settings.
+                "base_content": .string(base),
             ]
-            if edit.detachPrompt && content != edit.initialContent { body["detach_prompt"] = .bool(true) }
+            if edit.detachPrompt && content != base { body["detach_prompt"] = .bool(true) }
             if regenerateTts == true { body["regenerate_tts"] = .bool(true) }
             if applyToReplies == true { body["apply_to_descendants"] = .bool(true) }
             let answer: NodeUpdateResponse = try await api.put(APIPath.node(edit.nodeId), json: .object(body))
@@ -703,7 +777,13 @@ final class NodeFormModel {
     /// A successful send deletes the place's drafts, an older edit on offer
     /// included (#761: Save with it on screen keeps the form's text).
     private func clearAfterSend() async {
-        await drafts.delete()
+        if config.isEdit {
+            // Only the rows this form showed: another device's unsaved edit of
+            // the entry stays, to be offered next time (#799 review).
+            await drafts.deleteShown(also: olderDraft?.id)
+        } else {
+            await drafts.delete()
+        }
         hasDraft = false
         olderDraft = nil
     }
