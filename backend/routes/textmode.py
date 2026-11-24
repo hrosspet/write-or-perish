@@ -27,6 +27,10 @@ textmode_bp = Blueprint("textmode", __name__)
 
 PROMPT_KEY = 'textmode'
 
+# Who can read a level, from fewest to most people; an unknown level
+# counts as private.
+_VISIBILITY = {"private": 0, "circles": 1, "public": 2}
+
 
 def _serialize_message(node, viewer_id):
     """Serialize a node as a conversation message for *viewer_id*.
@@ -472,11 +476,18 @@ def continue_from_node(node_id):
 
     Body: { content: string, model?: string, auto_generate?: bool,
             ai_usage?: string, privacy_level?: string }.
-    Privacy is the one the reply form sent, as for a typed reply
-    (POST /nodes/) and a recorded one (save-as-node); a client that
+    Privacy is the one the reply form sent, whatever the node's level
+    is now (Peter, 2026-11-24: "The privacy form is clear and it should
+    be adhered to"): a form that still shows Private after the node was
+    made public in another tab saves a private message. A client that
     sends none (an installed iPhone build, a page loaded earlier) gets
-    the node's, as before. The prompt node attached under the node keeps
-    the node's. AI usage is the one the reply form sent,
+    the node's, as before. The prompt node attached under the node takes
+    the more private of the node's level and the message's, so nobody
+    sees a prompt node whose message they cannot read. An automatic reply
+    follows the message's level: none to a public or circles message, one
+    to a private message also under a public node (a private branch under
+    a public node is not a shared thread, #644). AI usage is the one the
+    reply form sent,
     else the thread's with the read looked through (reply_ai_usage,
     #362): a read reply is 'chat' for the tweets it quotes, which says
     nothing about what the user writes under it.
@@ -524,15 +535,9 @@ def continue_from_node(node_id):
                 or not validate_privacy_level(privacy_level)):
             return jsonify(
                 {"error": f"Invalid privacy_level: {privacy_level}"}), 400
-        if node_privacy == "public" and privacy_level != "public":
-            # As for a typed entry (#228): replies under public posts
-            # are public. The form shows the node's level as it knew it;
-            # when the node has become public since, nothing is written
-            # and the answer says so.
-            return jsonify({
-                "error": "Replies under public posts are public.",
-                "code": "public_reply_required",
-            }), 400
+    # The prompt node is no more visible than the node or the message.
+    prompt_privacy = min(node_privacy, privacy_level,
+                         key=lambda level: _VISIBILITY.get(level, 0))
     # A public message quotes only public nodes (Peter, 2026-11-12).
     if privacy_level == "public":
         from backend.utils.publish_quotes import publish_refusal
@@ -540,13 +545,13 @@ def continue_from_node(node_id):
         if refusal is not None:
             return refusal
     auto_generate = bool(data.get("auto_generate", True))
-    # No automatic reply in a public (or circles) thread, nor to a public
-    # (or circles) message: the message is written, the answer says why
-    # (Peter, 2026-11-12).
+    # No automatic reply to a public (or circles) message: the message is
+    # written, the answer says why (Peter, 2026-11-12). The reply would
+    # answer the message, so its level decides, as in save-as-node; with
+    # no level sent it is the node's.
     auto_off = None
     if auto_generate:
-        auto_off = (auto_generate_refusal(node)
-                    or auto_generate_refusal(privacy_level=privacy_level))
+        auto_off = auto_generate_refusal(privacy_level=privacy_level)
     if auto_off is not None:
         auto_generate = False
     if auto_generate:
@@ -570,7 +575,7 @@ def continue_from_node(node_id):
             return read_only_model_response(refused)
 
     prompt_node = attach_agentic_prompt_under(
-        node, current_user.id, PROMPT_KEY, node_privacy, ai_usage)
+        node, current_user.id, PROMPT_KEY, prompt_privacy, ai_usage)
     parent_id = prompt_node.id if prompt_node is not None else node.id
 
     from backend.utils.tokens import approximate_token_count

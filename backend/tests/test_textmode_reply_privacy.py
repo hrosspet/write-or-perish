@@ -2,10 +2,12 @@
 (POST /textmode/from-node/<id>, the reply box under a gleaning).
 
 The reply form shows a privacy selector that starts at the node's level.
-The message is saved at the level the form sent, by the rules a typed
-reply (POST /nodes/) and a recorded one (save-as-node) follow: under a
-public node only a public message is taken. A client that sends no
-level gets the node's.
+The message is saved at the level the form sent, whatever the node's
+level is now (Peter, 2026-11-24: "The privacy form is clear and it should
+be adhered to"); nothing is refused for a difference between the two. A
+client that sends no level gets the node's. The prompt node attached
+under the node takes the more private of the two levels, and an
+automatic reply follows the message's level.
 
 Route-level tests; the generation task is mocked.
 """
@@ -169,27 +171,40 @@ def _message(resp):
 # ── The form's level is the message's level ───────────────────────────
 
 
-def test_private_chosen_under_a_node_that_is_public_writes_nothing(app):
+@pytest.mark.parametrize("node_level", ["public", "circles"])
+def test_private_chosen_under_a_shared_node_is_saved_private(
+        app, node_level):
     """The form still shows Private (it was opened before the node was
-    made public): nothing is written, and the answer is the one a typed
-    reply gets."""
-    gleaning = _gleaning("public")
-    before = Node.query.count()
+    made public, or the user chose Private): the message is saved
+    private, the prompt node above it is private, and the automatic
+    reply comes, private, since it answers a private message (#644: a
+    private branch under a public node is not a shared thread)."""
+    gleaning = _gleaning(node_level)
 
-    resp = _post(app, gleaning, privacy_level="private")
-
-    assert resp.status_code == 400, resp.get_json()
-    assert resp.get_json()["code"] == "public_reply_required"
-    assert Node.query.count() == before
-
-
-def test_private_chosen_under_a_circles_node_is_saved_private(app):
-    gleaning = _gleaning("circles")
-
-    resp = _post(app, gleaning, privacy_level="private")
+    resp = _post(app, gleaning, privacy_level="private", auto_generate=True)
 
     assert resp.status_code == 202, resp.get_json()
+    data = resp.get_json()
     assert _message(resp).privacy_level == "private"
+    prompt = _db.session.get(Node, data["prompt_node_id"])
+    assert prompt.privacy_level == "private"
+    assert "llm_error_code" not in data
+    reply = _db.session.get(Node, data["llm_node_id"])
+    assert reply.privacy_level == "private"
+
+
+def test_circles_chosen_under_a_public_node_is_saved_circles(app):
+    gleaning = _gleaning("public")
+
+    resp = _post(app, gleaning, privacy_level="circles")
+
+    assert resp.status_code == 202, resp.get_json()
+    data = resp.get_json()
+    assert _message(resp).privacy_level == "circles"
+    prompt = _db.session.get(Node, data["prompt_node_id"])
+    assert prompt.privacy_level == "circles"
+    assert "llm_node_id" not in data
+    assert data["llm_error_code"]
 
 
 def test_public_chosen_under_a_private_node_is_saved_public(app):
@@ -216,8 +231,11 @@ def test_public_chosen_under_a_public_node_is_saved_public(app):
     resp = _post(app, gleaning, privacy_level="public")
 
     assert resp.status_code == 202, resp.get_json()
+    data = resp.get_json()
     assert _message(resp).privacy_level == "public"
-    assert "llm_node_id" not in resp.get_json()
+    assert "llm_node_id" not in data
+    prompt = _db.session.get(Node, data["prompt_node_id"])
+    assert prompt.privacy_level == "public"
 
 
 def test_private_chosen_under_a_private_node_gets_a_private_reply(app):
@@ -275,7 +293,10 @@ def test_a_null_level_reads_as_none_sent(app):
 # ── The neighbouring routes, for comparison ───────────────────────────
 
 
-def test_typed_reply_route_follows_the_same_rules(app):
+def test_typed_reply_route_keeps_its_rule_from_main(app):
+    """POST /nodes/ (the same form's path for a note with AI usage None)
+    keeps the rule it had before this route took the form's level (#228:
+    a reply under a public post must be public). Not changed here."""
     public = _gleaning("public")
     private = _gleaning("private")
     client = _client(app, "ben")
