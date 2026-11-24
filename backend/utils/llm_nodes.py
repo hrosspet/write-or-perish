@@ -440,6 +440,28 @@ def pick_model_for_generation(parent_node, user):
     return resolve_chat_model(parent_node, user)[0]
 
 
+def voice_turn_model(parent_node, user, sent_model=None):
+    """The model of a Voice turn's reply (#784). A turn that continues a
+    thread (*parent_node*: where the turn's entry or reply goes) runs on
+    the thread's model, by the rule a Text reply follows when it names no
+    model (resolve_chat_model): the closest earlier chat reply's model,
+    kept to that reply's provider when the model is no longer offered
+    (#487), else the account's model, else the server default. So the
+    turn reads the thread's prompt cache, as a Text reply on that model
+    would.
+
+    *sent_model*, the model the client sent, is not used for such a
+    turn: Voice has no model picker, and both apps send the account's
+    model with every turn (the iPhone builds already installed too), so
+    it names no choice for this thread. A new thread (*parent_node*
+    None) runs on *sent_model*, else the account's model, else the
+    default. Every Voice route asks here: streaming finalize, POST
+    /voice and POST /voice/from-node."""
+    if parent_node is None and sent_model:
+        return sent_model
+    return pick_model_for_generation(parent_node, user)
+
+
 def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
     """The turn a reply under *parent* will be in the completion task —
     "read", "read_again" or "chat" (ca_feed.ca_turn, the rule the task

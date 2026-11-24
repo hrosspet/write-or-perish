@@ -28,7 +28,7 @@ from backend.utils.recording_device import (
 )
 from backend.utils.llm_nodes import (
     AIUsageRefused, ReadOnlyModelRefused, ai_usage_refused_response,
-    pick_model_for_generation, voice_turn_refusal,
+    pick_model_for_generation, voice_turn_model, voice_turn_refusal,
 )
 from backend.utils.spend import require_spend_headroom
 from backend.utils.webm_utils import (
@@ -1425,6 +1425,11 @@ def finalize_streaming(session_id):
     {
         "total_chunks": 5  // Total number of chunks sent
         "device_key": "..."  // optional, the recording device (#388)
+        "label": "Voice",  // optional
+        "parent_id": 123,  // optional, the thread a Voice turn continues
+        "model": "..."  // optional, a new Voice thread's model; a turn
+                        // that continues a thread runs on the thread's
+                        // (voice_turn_model, #784)
     }
 
     Returns: { "message": "Finalization started", "draft_id": 123 }
@@ -1461,14 +1466,18 @@ def finalize_streaming(session_id):
     # "glean": a fresh Voice session started from the Glean card (#435);
     # the thread's root is stamped when the chain creates it.
     entry = data.get("entry") if data.get("entry") == "glean" else None
-    if not model and label in ("Reflect", "Orient", "Voice"):
-        # Resolve a model when the client didn't send one (e.g. user has no
-        # preferred_model). Without this, should_chain is False for Voice and
-        # node creation falls back to the frontend POST /voice path, which
-        # re-posts the draft's titled content. Walks ancestry from parent_id
-        # (if any) → user.preferred_model → DEFAULT.
+    if label in ("Reflect", "Orient", "Voice"):
+        # The reply's model (voice_turn_model, #784): a turn that continues
+        # a thread runs on the thread's model, as a Text reply that names
+        # none does, whatever model the client sent (both apps send the
+        # account's); a new thread on the sent model, else the account's,
+        # else DEFAULT. Also resolved when the client sent none: without
+        # a model, should_chain is False for Voice and node creation falls
+        # back to the frontend POST /voice path, which re-posts the
+        # draft's titled content. The cache pre-warm and the reply both
+        # get this model.
         parent_node = Node.query.get(parent_id) if parent_id else None
-        model = pick_model_for_generation(parent_node, current_user)
+        model = voice_turn_model(parent_node, current_user, model)
 
     if total_chunks is None:
         return jsonify({"error": "Missing total_chunks"}), 400
