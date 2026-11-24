@@ -140,6 +140,34 @@ class _TimedInlineParser(mistune.InlineParser):
         return super().parse_method(m, state)
 
 
+def _check_deadline_in_link_index():
+    """mistune 3.3.4 (the last release for Python 3.9; 3.3.3 and 3.4.0
+    have no such index) indexes every link of an inline text when it
+    parses the first link: one destination scan per bracket pair, each
+    to the text's end when a parenthesis stays open. A run of "[a](" of
+    100,000 characters takes minutes, all inside the one parse step the
+    parsers above check the deadline before. Each scan of the index now
+    checks it first; one scan is linear in the text's length. Without a
+    render deadline the check does nothing, so other users of mistune in
+    the process parse as before."""
+    try:
+        from mistune._inline import links
+    except ImportError:
+        return
+    scan = getattr(links, "find_link_range_end", None)
+    if scan is None or getattr(scan, "_checks_deadline", False):
+        return
+
+    def checked_scan(src, label_start, close_pos, state):
+        _check_deadline(state)
+        return scan(src, label_start, close_pos, state)
+    checked_scan._checks_deadline = True
+    links.find_link_range_end = checked_scan
+
+
+_check_deadline_in_link_index()
+
+
 def _create_markdown(renderer_cls=_PublicRenderer):
     md = mistune.Markdown(
         renderer=renderer_cls(escape=True),

@@ -15,8 +15,10 @@ from backend.tests.test_public_pages import (  # noqa: F401 (fixtures)
 )
 
 # Each of these took from seconds to many minutes to render at this size
-# before the bound (100,000 characters is the node size cap).
-SLOW_RUNS = ["[", "![", "*a ", "~~a ", "[a](", "[a][", "|"]
+# before the bound (100,000 characters is the node size cap). "[a](" and
+# "[a](b (" (a destination, then a title left open) take minutes inside
+# mistune 3.3.4's link index, which Python 3.9 installs.
+SLOW_RUNS = ["[", "![", "*a ", "~~a ", "[a](", "[a](b (", "[a][", "|"]
 
 # Generous: the bound is 0.5 s of CPU per body. Measured as this thread's
 # CPU time, as the bound is, so a busy machine does not fail the tests.
