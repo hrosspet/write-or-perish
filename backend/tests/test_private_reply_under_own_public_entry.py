@@ -515,3 +515,53 @@ def test_an_ai_reply_of_someone_else_never_reads_them(app, thread):
     assert [n.id for n in chain] == [bens_public.id, annas_node.id]
     for node in chain:
         _assert_no_secret(node.get_content())
+
+
+# ── With the checklist tick (#795, train #787) ────────────────────────
+
+
+def test_a_tick_keeps_a_private_reply_private_and_refuses_a_stale_page(app):
+    """#798 checks a tick's base_content on PUT /nodes/<id>; this PR lets
+    a Private reply sit under one's own public entry. A tick on that
+    reply and on the public entry above saves only over the text the page
+    showed, and changes no level: the reply stays Private, the entry
+    Public, and Anna still gets nothing of the reply."""
+    checklist = "- [ ] deploy\n- [ ] write the note"
+    entry = _entry("ben", checklist, slug="a-public-list")
+    resp = _type(app, "ben", entry, TYPED + "\n" + checklist, "private")
+    assert resp.status_code == 201, resp.get_json()
+    reply_id = resp.get_json()["id"]
+    reply_text = TYPED + "\n" + checklist
+    ben = _client(app, "ben")
+
+    ticked = reply_text.replace("- [ ] deploy", "- [x] deploy")
+    r = ben.put(f"/api/nodes/{reply_id}",
+                json={"content": ticked, "base_content": reply_text})
+    assert r.status_code == 200, r.get_json()
+
+    # A second page still shows the text before that tick.
+    stale = reply_text.replace("- [ ] write the note", "- [x] write the note")
+    r = ben.put(f"/api/nodes/{reply_id}",
+                json={"content": stale, "base_content": reply_text})
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "content_changed"
+
+    on_entry = checklist.replace("- [ ] deploy", "- [x] deploy")
+    r = ben.put(f"/api/nodes/{entry.id}",
+                json={"content": on_entry, "base_content": checklist})
+    assert r.status_code == 200, r.get_json()
+
+    _db.session.expire_all()
+    reply = _db.session.get(Node, reply_id)
+    above = _db.session.get(Node, entry.id)
+    assert (reply.get_content(), reply.privacy_level) == (ticked, "private")
+    assert (above.get_content(), above.privacy_level) == (on_entry, "public")
+    assert reply.public_slug is None
+
+    anna = _client(app, "anna")
+    assert anna.get(f"/api/nodes/{reply_id}").status_code in (403, 404)
+    page = anna.get(f"/api/nodes/{entry.id}")
+    assert page.status_code == 200
+    _assert_no_secret(page.get_data(as_text=True))
+    assert anna.put(f"/api/nodes/{reply_id}", json={
+        "content": stale, "base_content": ticked}).status_code in (403, 404)
