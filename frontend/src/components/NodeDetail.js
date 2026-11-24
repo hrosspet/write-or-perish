@@ -2047,6 +2047,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
             parentPrivacyLevel={node.privacy_level}
+            parentOwnedByViewer={!!isOwner}
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact

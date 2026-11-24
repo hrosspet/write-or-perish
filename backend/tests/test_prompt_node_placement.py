@@ -5,9 +5,11 @@ an existing node (POST /drafts/streaming/<session>/save-as-node with
 A Text-mode session starts only under a node of the user's own: the
 prompt node is attached under it and the message hangs under that.
 Under someone else's node the message is a plain reply, directly under
-that node. The prompt node takes the account's default level (Private
-for these accounts), whatever the levels of the node above it and of
-the message under it.
+that node. The prompt node is Public only when the message and the node
+above it are both Public and the account's default level is Public;
+in every other case it is Private (session_helpers.prompt_entry_privacy,
+given "private" by save-as-node when the two levels differ). These
+accounts' default is Private, so every prompt node here is Private.
 
 Route-level tests; the generation task is mocked.
 """
