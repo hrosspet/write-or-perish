@@ -40,11 +40,14 @@ from backend.models import (  # noqa: E402
 
 
 def _make_app():
+    from backend.config import Config
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["ANTHROPIC_API_KEY"] = "fake-key"
+    # The account's own models: Opus 5 for an account without a
+    # preference, GPT-6 Astra for an OpenAI one.
     app.config["DEFAULT_LLM_MODEL"] = "claude-opus-5"
     app.config["SUPPORTED_MODELS"] = {
         "claude-opus-5": {
@@ -59,7 +62,13 @@ def _make_app():
             "input_price_per_mtok": 10.0,
             "output_price_per_mtok": 50.0,
         },
+        # The digest's models, with their real entries (prices included).
+        "claude-sonnet-5.5": Config.SUPPORTED_MODELS["claude-sonnet-5.5"],
+        "gpt-6.2-sol": Config.SUPPORTED_MODELS["gpt-6.2-sol"],
     }
+    app.config["DIGEST_MODEL_ANTHROPIC"] = "claude-sonnet-5.5"
+    app.config["DIGEST_MODEL_OPENAI"] = "gpt-6.2-sol"
+    app.config["DIGEST_MAX_UNITS"] = Config.DIGEST_MAX_UNITS
     _db.init_app(app)
     return app
 
@@ -199,20 +208,25 @@ def test_rebuild_skips_a_current_digest_without_calling_the_model(
     assert len(calls) == 1
 
 
-def test_rebuild_uses_the_configured_default_model(app, monkeypatch):
-    """Users without a preferred_model fall back to DEFAULT_LLM_MODEL —
-    the config key. (LLM_NAME is only the env var it reads from, and
-    asking config for it yielded None, i.e. no model at all.)"""
+def test_rebuild_uses_the_digest_model_of_the_default_models_provider(
+        app, monkeypatch):
+    """Users without a preferred_model are on DEFAULT_LLM_MODEL's
+    provider — the config key. (LLM_NAME is only the env var it reads
+    from, and asking config for it yielded None, i.e. no model at all.)
+    The digest runs on that provider's digest model (2026-11-24), not on
+    the default model itself."""
     uid = User.query.first().id
     _mk_item(uid, "a")
     calls = _stub_llm(monkeypatch)
 
     result = _digest.rebuild_external_digest(_FakeSelf(), uid)
     assert result["status"] == "ok"
-    assert calls[0]["model_id"] == "claude-opus-5"
+    assert calls[0]["model_id"] == "claude-sonnet-5.5"
     artifact = UserArtifact.latest_for(uid, _digest.DIGEST_KIND)
-    assert artifact.generated_by == "claude-opus-5"
-    assert APICostLog.query.one().request_type == "external_digest"
+    assert artifact.generated_by == "claude-sonnet-5.5"
+    log = APICostLog.query.one()
+    assert (log.request_type, log.model_id) == (
+        "external_digest", "claude-sonnet-5.5")
 
 
 def test_rebuild_stamps_the_corpus_state_not_the_finish_time(
@@ -336,14 +350,16 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
         f"external-digest-{oai_user.id}"]
     prompt = by_provider["anthropic"][0]["messages"][0]["content"]
     assert "The corpus holds 20 saved items" in prompt
-    assert by_provider["openai"][0]["api_model"] == "gpt-6-astra"
+    # Each on its provider's digest model (2026-11-24).
+    assert by_provider["anthropic"][0]["model_id"] == "claude-sonnet-5.5"
+    assert by_provider["openai"][0]["api_model"] == "gpt-6.2-sol"
 
     # Each provider batch persisted with its own routing metadata.
     jobs = {j.provider_key: j for j in ExternalDigestBatchJob.query.filter_by(
         status="pending").all() if j.batch_id != "older"}
-    assert set(jobs) == {"anthropic", "openai:gpt-6-astra"}
+    assert set(jobs) == {"anthropic", "openai:gpt-6.2-sol"}
     assert jobs["anthropic"].items[0]["user_id"] == night_user.id
-    assert jobs["openai:gpt-6-astra"].items[0]["model_id"] == "gpt-6-astra"
+    assert jobs["openai:gpt-6.2-sol"].items[0]["model_id"] == "gpt-6.2-sol"
 
     # Nothing is billed at submit time, and the sync path was not used.
     assert APICostLog.query.count() == 0
@@ -935,7 +951,8 @@ def test_direct_rebuild_logs_the_cost_of_an_empty_output(app, monkeypatch):
     log = APICostLog.query.one()
     assert log.request_type == "external_digest"
     assert log.request_ref == REFUSED_REF   # cut off before any text
-    assert log.cost_microdollars == 7500    # full price, direct call
+    # Full price (direct call) on Sonnet 5.5: 1000 x $2 + 100 x $10.
+    assert log.cost_microdollars == 3000
     assert _digest.digest_is_stale(uid) is True
 
 

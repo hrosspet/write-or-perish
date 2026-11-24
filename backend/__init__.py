@@ -48,6 +48,12 @@ PROFILE_CROSS_PROVIDER_KEYS = ("PROFILE_VERSION_MODEL_CROSS_PROVIDER",
                                "PROFILE_MERGE_MODEL_CROSS_PROVIDER")
 PROFILE_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high",
                              "xhigh")
+# The Saved References Digest's model per provider of the account's own
+# model (Peter, 2026-11-24: the middle model of that provider).
+DIGEST_MODEL_KEYS = (
+    ("DIGEST_MODEL_ANTHROPIC", "anthropic"),
+    ("DIGEST_MODEL_OPENAI", "openai"),
+)
 
 
 def validate_profile_models(config):
@@ -90,6 +96,28 @@ def validate_profile_models(config):
     if size is not None and int(size) < 2:
         raise RuntimeError(
             f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
+
+
+def validate_digest_settings(config):
+    """Refuse to boot on a digest model that is not an active
+    SUPPORTED_MODELS key of the provider its setting names, as for the
+    profile models: an account's references reach only models of its own
+    provider. No "chat" requirement: Sonnet 5.5 is read only in the
+    pickers and still runs background jobs. A cap below one unit would
+    leave every digest empty."""
+    supported = config.get("SUPPORTED_MODELS") or {}
+    for key, provider in DIGEST_MODEL_KEYS:
+        model_id = config.get(key)
+        if not model_id:
+            continue
+        cfg = supported.get(model_id) or {}
+        if not cfg or cfg.get("deprecated") or cfg.get("provider") != provider:
+            raise RuntimeError(
+                f"{key}={model_id!r} is not an active {provider} model.")
+    units = config.get("DIGEST_MAX_UNITS")
+    if units is not None and int(units) < 1:
+        raise RuntimeError(
+            f"DIGEST_MAX_UNITS={units!r} must be at least 1.")
 
 
 _encryption_off_noted = False
@@ -196,6 +224,7 @@ MODEL_SETTINGS = (
     ("GLEAN_MODEL_OPENAI", "GLEAN_MODEL_OPENAI", None, "read"),
     *((key, key, provider, None) for key, provider in PROFILE_MODEL_KEYS),
     *((key, key, None, None) for key in PROFILE_CROSS_PROVIDER_KEYS),
+    *((key, key, provider, None) for key, provider in DIGEST_MODEL_KEYS),
 )
 
 
@@ -337,6 +366,7 @@ def validate_default_model(config, warn=None):
                     f"{key}={chat_model!r} is not an active {provider} "
                     f"chat model. Active chat models: {chat_models}")
         validate_profile_models(config)
+        validate_digest_settings(config)
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")

@@ -442,6 +442,37 @@ class Config:
     PROFILE_WINDOW_RENDER_SECONDS = int(
         os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "600")
 
+    # --- Saved References Digest (backend/tasks/external_digest.py) ---
+    # The digest's model, one per provider of the account's own model
+    # (llm_nodes.default_model_for): the middle model of that provider
+    # (Peter, 2026-11-23/24: "The digest runs on the middle model of the
+    # account's own provider: Sonnet 5.5 for Anthropic accounts, Sol for
+    # OpenAI accounts"; Haiku 5.5 and Luna are not used for it). Each must
+    # be an active model of THAT provider (checked at boot,
+    # validate_digest_settings): an account's references never reach
+    # another provider, and the digest never falls back to another model.
+    # Before 2026-11-24 the digest ran on the account's own chat model.
+    DIGEST_MODEL_ANTHROPIC = (
+        os.environ.get("DIGEST_MODEL_ANTHROPIC") or "claude-sonnet-5.5")
+    DIGEST_MODEL_OPENAI = (
+        os.environ.get("DIGEST_MODEL_OPENAI") or "gpt-6.2-sol")
+    # Heuristic: the most of the saved list one digest reads, in units of
+    # 4 characters of its rendered lines (each line and its line break),
+    # the unit of the profile planner (utils/chunk_plan). The newest items
+    # come first; the oldest beyond it are left out and counted in the
+    # corpus header. One cap for both providers (Peter, 2026-11-24).
+    # 250,000: GPT-6.2 Sol bills the whole request at 2x input and 1.5x
+    # output above 272,000 input tokens. Measured on the owner's list
+    # (2026-11-23), a unit is 1.038 OpenAI tokens and 1.491 Claude tokens,
+    # so a list at the cap is about 259,500 tokens on Sol plus about 275
+    # for the instructions and the header (o200k), 4.5 % under the step,
+    # and about 373,000 tokens on Sonnet 5.5, whose price is flat across
+    # its 1M window. A list denser than 1.087 tokens per unit (more
+    # non-English text, for one) crosses the step on Sol at the cap.
+    # Before: 300,000 characters (75,000 units) and 1,500 items; there is
+    # no item cap any more.
+    DIGEST_MAX_UNITS = int(os.environ.get("DIGEST_MAX_UNITS") or "250000")
+
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search
     # as a within-turn LLM tool (and the read_full / {quote:ID} pull it
@@ -586,7 +617,8 @@ class Config:
     #                to an active model of the same provider. Without it
     #                the rule above applies. A server setting that names
     #                the retired model (LLM_NAME, CHAT_MODEL_*,
-    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*) runs on the
+    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*, DIGEST_MODEL_*)
+    #                runs on the
     #                replacement, with one warning line at boot
     #                (replace_retired_settings); without a replacement it
     #                is refused at boot.
