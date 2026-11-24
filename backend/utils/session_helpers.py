@@ -77,7 +77,15 @@ def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
     the prompt that is there). The node is created empty and linked to
     the user's prompt record through attach_context_artifacts, which
     also pins the artifact snapshots its placeholders name; the caller
-    hangs the message under it and commits."""
+    hangs the message under it and commits.
+
+    A session starts only under a node of the user's own (for an AI
+    reply: one they asked for). Under someone else's node the answer is
+    None as well: the message is a plain reply there, directly under
+    that node, as one sent to POST /nodes/ is."""
+    from backend.utils.privacy import is_node_owner
+    if not is_node_owner(node, user_id):
+        return None
     if ancestors_have_prompt(node, user_id, AGENTIC_PROMPT_KEYS):
         return None
     from backend.extensions import db
