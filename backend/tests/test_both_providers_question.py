@@ -204,7 +204,7 @@ def test_the_consent_is_read_from_the_database(app):
 # ── the route and the payload ─────────────────────────────────────────────
 
 def test_the_payload_before_any_answer(app):
-    u = _user(preferred_model="gpt-6-astra")
+    u = _user(preferred_model="gpt-6.2-astra")
     _entry(u)
     client = app.test_client()
     _login(client, u.id)
@@ -270,7 +270,7 @@ def test_other_settings_leave_the_answer_alone(app):
     client = app.test_client()
     _login(client, u.id)
     resp = client.put("/api/dashboard/user",
-                      json={"preferred_model": "gpt-6-astra"})
+                      json={"preferred_model": "gpt-6.2-astra"})
     assert resp.status_code == 200
     data = resp.get_json()["user"]
     # A changed preferred model: the client asks ("model"), and a no would

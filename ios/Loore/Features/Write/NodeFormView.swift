@@ -60,7 +60,9 @@ private struct NodeFormBody: View {
             editor
             olderDraftBox
             if !config.hidePowerFeatures {
-                PrivacySelectorView(privacy: $model.privacy, aiUsage: $model.aiUsage, disabled: model.loading,
+                PrivacySelectorView(privacy: Binding(get: { model.privacy }, set: { model.choosePrivacy($0) }),
+                                    aiUsage: Binding(get: { model.aiUsage }, set: { model.chooseAIUsage($0) }),
+                                    disabled: model.loading,
                                     lockPrivacy: model.lockPrivacy,
                                     trainRefused: config.edit?.trainRefused ?? false)
             }

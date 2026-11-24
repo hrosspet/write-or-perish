@@ -664,7 +664,8 @@ def model_input_cap(model_cfg, max_output_tokens=None, price_tier=True):
       window whatever you request, so a 1.05M-window model takes 922k);
     - ``long_context_threshold``, the pricing tier above which the whole
       request is repriced (OpenAI: 272k input → ×2 input, ×1.5 output).
-      The profile pipeline never plans a prompt across it (#259).
+      The profile pipeline never plans a prompt across it (#259), nor
+      does a Glean (#733: ca_feed.glean_prompt_budget).
       ``price_tier=False`` leaves it out, for a job that reads the whole
       archive in one call (intentions).
     """

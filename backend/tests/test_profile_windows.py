@@ -36,7 +36,9 @@ from backend.models import (  # noqa: E402
 pb = pw = ex = None
 
 CUSTOM_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-MODEL_IDS = ("claude-opus-5.5", "claude-haiku-5.5", "gpt-6-astra",
+# GPT-6.2 Astra is the OpenAI users' chat model here (GPT-6 Astra, used
+# until 2026-11-24, is retired).
+MODEL_IDS = ("claude-opus-5.5", "claude-haiku-5.5", "gpt-6.2-astra",
              "gpt-6-luna", "gpt-6.1-sol")
 T0 = datetime(2024, 1, 1)
 
@@ -394,7 +396,7 @@ def test_models_follow_the_users_provider(app):
     m = pw.profile_models_for(anth)
     assert (m.provider, m.version, m.merge) == (
         "anthropic", "claude-haiku-5.5", "claude-opus-5.5")
-    oai = _user(preferred_model="gpt-6-astra")
+    oai = _user(preferred_model="gpt-6.2-astra")
     m = pw.profile_models_for(oai)
     assert (m.provider, m.version, m.merge) == (
         "openai", "gpt-6-luna", "gpt-6.1-sol")
@@ -403,7 +405,7 @@ def test_models_follow_the_users_provider(app):
 def test_a_cross_provider_setting_raises(app):
     app.config["PROFILE_MERGE_MODEL_OPENAI"] = "claude-opus-5.5"
     with pytest.raises(pw.ProfileModelError):
-        pw.profile_models_for(_user(preferred_model="gpt-6-astra"))
+        pw.profile_models_for(_user(preferred_model="gpt-6.2-astra"))
 
 
 def test_boot_check_rejects_cross_provider_deprecated_and_unknown():
@@ -449,7 +451,7 @@ def test_the_shipped_profile_model_defaults_pass():
 def test_openai_merge_carries_the_configured_effort(app, world):
     app.config["PROFILE_MERGE_REASONING_EFFORT_OPENAI"] = "high"
     world.corpus = Corpus(800)                  # Luna: about 4 windows
-    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    u = _user(preferred_model="gpt-6.2-astra", profile_needs_full_regen=True)
     _advance(u)
     assert all(r["api_model"] == "gpt-6-luna"
                and "reasoning_effort" not in r
@@ -469,7 +471,7 @@ def test_openai_merge_carries_the_configured_effort(app, world):
 
 def test_an_openai_merge_without_an_effort_sends_none(world):
     world.corpus = Corpus(800)
-    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    u = _user(preferred_model="gpt-6.2-astra", profile_needs_full_regen=True)
     _advance(u)
     _poll()
     _advance(u)
@@ -2569,7 +2571,7 @@ def _one_chunk_user(app, **kw):
     app.config["PROFILE_ONE_CHUNK_WINDOW_OPENAI"] = True
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
     kw.setdefault("profile_needs_full_regen", True)
-    return _user(preferred_model="gpt-6-astra", **kw)
+    return _user(preferred_model="gpt-6.2-astra", **kw)
 
 
 def _finals(user):
@@ -2587,7 +2589,7 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     assert pw.wants_window_build(u)
     _advance(u)
     reqs = world.provider.requests()
-    assert len(reqs) == 1 and reqs[0]["api_model"] == "gpt-6-astra"
+    assert len(reqs) == 1 and reqs[0]["api_model"] == "gpt-6.2-astra"
     assert ex.EVENTS_IN_WINDOW_PARAGRAPH in (
         reqs[0]["messages"][0]["content"][0]["text"])
     assert _items("window")[0]["total"] == 1
@@ -2600,7 +2602,7 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     final_reqs = [r for r in _all_requests(world) if "_f_" in r["custom_id"]]
     assert len(final_reqs) == 1
     req = final_reqs[0]
-    assert req["api_model"] == "gpt-6-astra"
+    assert req["api_model"] == "gpt-6.2-astra"
     assert req["endpoint"] == "/v1/responses"
     # No reasoning effort on the chat model, as the live replies send.
     assert "reasoning_effort" not in req
@@ -2620,7 +2622,7 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     f = finals[0]
     assert (f.window_set, f.parent_profile_id) == (
         windows[0].window_set, windows[0].id)
-    assert f.generated_by == "gpt-6-astra"
+    assert f.generated_by == "gpt-6.2-astra"
     assert f.source_tokens_used == windows[0].source_tokens_used == 50_000
     assert get_latest_profile(u)["id"] == f.id
     # Done: nothing more goes out.
@@ -2628,12 +2630,12 @@ def test_a_one_chunk_build_is_one_window_and_its_integration(app, world):
     _advance(u)
     assert len(world.provider.submits) == n
     # The user's writing reached their own chat model only.
-    assert {r["api_model"] for r in _all_requests(world)} == {"gpt-6-astra"}
+    assert {r["api_model"] for r in _all_requests(world)} == {"gpt-6.2-astra"}
 
 
 def test_the_one_chunk_switch_is_per_provider(app, world):
     world.corpus = Corpus(50)
-    oai = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    oai = _user(preferred_model="gpt-6.2-astra", profile_needs_full_regen=True)
     anth = _user(profile_needs_full_regen=True)
     # A config without the keys: the chained path for both.
     assert not pw.wants_window_build(oai)
@@ -2662,7 +2664,7 @@ def test_the_shipped_one_chunk_defaults(app, world, monkeypatch):
     world.corpus = Corpus(50)
     monkeypatch.setattr(pb._exports, "count_remaining_units",
                         lambda uid, cutoff=None: world.corpus.count(uid, cutoff))
-    for n, model in enumerate((None, "gpt-6-astra"), 1):
+    for n, model in enumerate((None, "gpt-6.2-astra"), 1):
         u = _user(preferred_model=model, profile_needs_full_regen=True)
         _seed(u)
         assert world.provider.submits == []      # no chained chunk
@@ -2738,7 +2740,7 @@ def test_the_sync_task_hands_a_one_chunk_build_to_the_advance(app, world):
     result = ex.window_hand_off(u, "sync-task-1")
     assert result is not None and result["status"] == "completed"
     assert [r["api_model"] for r in world.provider.requests()] == [
-        "gpt-6-astra"]
+        "gpt-6.2-astra"]
 
 
 def test_a_chained_one_chunk_update_stays_chained_with_the_switch_on(
@@ -2806,7 +2808,7 @@ def test_the_many_version_prompt_is_unchanged(app, world):
         assert hashlib.sha256(fh.read()).hexdigest() == (
             "2d12819e3c450c74c0c65db1b3a70516eb1a9272b99c0eb786c47568f27a4e52")
     app.config["PROFILE_MERGE_STRUCTURE"] = "flat"
-    u = _user(preferred_model="gpt-6-astra")
+    u = _user(preferred_model="gpt-6.2-astra")
     rows = _set_of(u, 2)
     _corpus_for(world, rows)
     _advance(u)
@@ -2930,7 +2932,7 @@ def test_a_one_window_set_past_the_ladder_is_updated_as_a_set(app, world):
                  if "_f_" in r["custom_id"]][-1]
     assert final_req["messages"] == pw._exports._integration_messages(
         u.id, [window, chained], independent=True)
-    assert final_req["api_model"] == "gpt-6-astra"
+    assert final_req["api_model"] == "gpt-6.2-astra"
     assert len(_finals(u)) == 2
 
 
@@ -2952,7 +2954,7 @@ def test_a_one_window_build_whose_window_is_given_up_sends_no_final(
     assert not pw.set_work_due(u, ex.profile_update_base(u.id))
 
 
-def _other_batch(provider_key="openai:gpt-6-astra"):
+def _other_batch(provider_key="openai:gpt-6.2-astra"):
     """Another account's batch of ours, pending in the same queue (the
     one-chunk user's chat model, GPT-6 Astra, reads the window)."""
     other = _user()
@@ -3088,7 +3090,7 @@ def test_an_unactivated_prefills_window_sent_back_by_a_full_queue_is_resent(
     db.session.refresh(u)
     assert u.profile_work_held is False and u.profile_batch_pending
     assert [r["api_model"] for r in world.provider.requests()] == [
-        "gpt-6-astra"]
+        "gpt-6.2-astra"]
 
 
 def _unactivated_prefill(app):
@@ -3777,7 +3779,7 @@ def _backfill_module():
 
 def _openai_world(app, world):
     """A user on an OpenAI chat model (windows on Luna), a 3-window corpus."""
-    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    u = _user(preferred_model="gpt-6.2-astra", profile_needs_full_regen=True)
     world.corpus = _windows_corpus(3)
     return u
 
@@ -4167,7 +4169,7 @@ def test_public_only_writing_is_read_from_metadata(app):
 
 
 def test_the_model_table(app):
-    anth, oai = _user(), _user(preferred_model="gpt-6-astra")
+    anth, oai = _user(), _user(preferred_model="gpt-6.2-astra")
     for user, own in ((anth, ("claude-haiku-5.5", "claude-opus-5.5")),
                       (oai, ("gpt-6-luna", "gpt-6.1-sol"))):
         assert pw.cross_provider_allowed(user) is False
@@ -4178,7 +4180,7 @@ def test_the_model_table(app):
             "gpt-6-luna", "claude-opus-5.5", True)
         assert m.merge_effort is None          # Opus takes none
     c = pw.chained_models_for(oai)
-    assert (c.version, c.merge, c.chained) == ("gpt-6-astra", "gpt-6-astra",
+    assert (c.version, c.merge, c.chained) == ("gpt-6.2-astra", "gpt-6.2-astra",
                                                True)
     c = pw.chained_models_for(anth)
     assert (c.version, c.merge) == ("claude-opus-5.5", "claude-opus-5.5")
@@ -4204,7 +4206,7 @@ def _build_then_update(world, user):
 
 
 @pytest.mark.parametrize("chat, provider, version, merge", [
-    ("gpt-6-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
+    ("gpt-6.2-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
     (None, "anthropic", "claude-haiku-5.5", "claude-opus-5.5")])
 def test_private_writing_never_reaches_the_other_provider(
         world, chat, provider, version, merge):
@@ -4304,7 +4306,7 @@ def test_a_retried_window_of_a_build_is_not_a_chained_update(world):
 def test_the_estimate_prices_the_chained_update_at_the_chat_model(
         world, monkeypatch):
     import backend.utils.cost as cost
-    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True)
+    u = _user(preferred_model="gpt-6.2-astra", profile_needs_full_regen=True)
     world.corpus = _windows_corpus(4)
     _finish(world, u)
     world.corpus.add(85, start=datetime.utcnow() + timedelta(days=2))
@@ -4314,7 +4316,7 @@ def test_the_estimate_prices_the_chained_update_at_the_chat_model(
                         lambda model_id, *a, **k: (
                             priced.append(model_id) or real(model_id, *a, **k)))
     _advance(u)
-    assert priced and set(priced) == {"gpt-6-astra"}
+    assert priced and set(priced) == {"gpt-6.2-astra"}
 
 
 def test_every_chained_version_keeps_its_place_in_the_merges(world):
@@ -4405,10 +4407,10 @@ def test_a_purged_private_base_never_reaches_the_other_provider(world):
     from private Loore entries, which were deleted and purged; only
     pre-filled tweets remain. The next build of two or more windows takes
     that profile as its base: it must stay with OpenAI."""
-    u = _user(preferred_model="gpt-6-astra", prefilled_handle="alice")
+    u = _user(preferred_model="gpt-6.2-astra", prefilled_handle="alice")
     _node(u, provenance="prefill_ca")
     base = _profile(u, gen_type="update", cutoff=T0,
-                    generated_by="gpt-6-astra", text=_good(
+                    generated_by="gpt-6.2-astra", text=_good(
                         events=False, tag="PRIVATE-BASE"),
                     source_origin_stats={"loore": {"nodes": 9,
                                                    "tokens": 900}})
@@ -4488,7 +4490,7 @@ def _no_before_the_pass_picks_models(monkeypatch, user):
 
 
 @pytest.mark.parametrize("chat, provider, merge", [
-    ("gpt-6-astra", "openai", "gpt-6.1-sol"),
+    ("gpt-6.2-astra", "openai", "gpt-6.1-sol"),
     (None, "anthropic", "claude-opus-5.5")])
 def test_a_withdrawn_yes_applies_from_the_next_pass(
         world, monkeypatch, chat, provider, merge):
@@ -4516,7 +4518,7 @@ def test_a_no_during_a_pass_sends_no_token_count_to_the_other_provider(
     picked its models must stop the merge prompts (written from the
     user's writing) before they reach Anthropic, also the token count
     that checks them against the merge model's cap."""
-    u, n = _consenting_build_with_windows_in(world, "gpt-6-astra")
+    u, n = _consenting_build_with_windows_in(world, "gpt-6.2-astra")
     counted = []
     import backend.llm_providers as lp
     monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(
@@ -4672,7 +4674,7 @@ def _one_chunk_switches(app):
 
 
 @pytest.mark.parametrize("chat, provider", [
-    ("gpt-6-astra", "openai"), (None, "anthropic")])
+    ("gpt-6.2-astra", "openai"), (None, "anthropic")])
 def test_a_private_one_window_build_stays_on_the_chat_model(
         app, world, chat, provider):
     _one_chunk_switches(app)
@@ -4699,7 +4701,7 @@ def test_a_private_one_window_build_stays_on_the_chat_model(
 
 
 @pytest.mark.parametrize("chat, provider, version, merge", [
-    ("gpt-6-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
+    ("gpt-6.2-astra", "openai", "gpt-6-luna", "gpt-6.1-sol"),
     (None, "anthropic", "claude-haiku-5.5", "claude-opus-5.5")])
 def test_a_private_small_multi_window_build_stays_on_its_provider(
         app, world, chat, provider, version, merge):
@@ -4729,7 +4731,7 @@ def test_a_no_during_a_consented_one_window_build_keeps_its_final_home(
     Anthropic, not even the integration's token count; the next pass
     writes the integration with the user's preferred model."""
     _one_chunk_switches(app)
-    u = _user(preferred_model="gpt-6-astra", profile_needs_full_regen=True,
+    u = _user(preferred_model="gpt-6.2-astra", profile_needs_full_regen=True,
               profile_both_providers=True,
               profile_both_providers_answered_at=datetime.utcnow())
     _node(u)                                   # private, but agreed
@@ -4757,7 +4759,7 @@ def test_a_no_during_a_consented_one_window_build_keeps_its_final_home(
     _finish(world, u)
     after = _all_reqs(world, n)
     assert [(p, r["model_id"]) for p, r in after] == [
-        ("openai", "gpt-6-astra")]
+        ("openai", "gpt-6.2-astra")]
     assert "_f_" in after[0][1]["custom_id"]
     assert "claude-opus-5.5" not in counted
     assert len(_finals(u)) == 1
@@ -4777,7 +4779,7 @@ def _public_prefill(world, monkeypatch, units_k, **kw):
 
 
 @pytest.mark.parametrize("chat, units_k, ratio, n_windows", [
-    ("gpt-6-astra", 50, None, 1),   # one window: Opus, single-version
+    ("gpt-6.2-astra", 50, None, 1),   # one window: Opus, single-version
     (None, 50, None, 1),
     (None, 130, 2.4, 2),            # one Opus chunk, two Luna windows
 ])
@@ -4818,7 +4820,7 @@ def test_a_prefill_signed_into_before_its_final_is_integrated_privately(
     after Luna read the window, so the integration runs on their chat
     model, never on Opus."""
     _one_chunk_switches(app)
-    u = _public_prefill(world, monkeypatch, 50, preferred_model="gpt-6-astra")
+    u = _public_prefill(world, monkeypatch, 50, preferred_model="gpt-6.2-astra")
     _advance(u)
     assert {(p, r["model_id"]) for p, r in _all_reqs(world)} == {
         ("openai", "gpt-6-luna")}
@@ -4829,7 +4831,7 @@ def test_a_prefill_signed_into_before_its_final_is_integrated_privately(
     n = len(world.provider.submits)
     _advance(u)
     [final] = _all_reqs(world, n)
-    assert final[0] == "openai" and final[1]["model_id"] == "gpt-6-astra"
+    assert final[0] == "openai" and final[1]["model_id"] == "gpt-6.2-astra"
     assert "_f_" in final[1]["custom_id"]
 
 

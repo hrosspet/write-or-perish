@@ -294,6 +294,7 @@ private struct ThreadContent: View {
                                     hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode, compact: true,
                                     placeholder: model.isReadReply ? "Ask about these picks, or say what you make of them…"
                                         : "Type what's on your mind…")
+        config.parentOwned = model.isOwner
         if model.isReadReply {
             config.submitOverride = { [model, autoGenerate] submission in
                 try await model.submitReadReply(submission, autoGenerate: autoGenerate)
@@ -367,7 +368,8 @@ private struct ThreadContent: View {
                                  + (model.readActions(craftMode: craftMode) ? " To glean again, use Glean." : "")
                                : "")
             .accessibilityIdentifier("thread.llmResponse")
-            ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply)
+            ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: busy || underReadReply,
+                        onPick: { [model] id in model.modelPicked(id) })
                 .padding(.leading, -1)
             Spacer(minLength: 0)
         }

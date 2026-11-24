@@ -204,8 +204,16 @@ def test_cost_haiku_5_5_from_real_config():
 
 @pytest.mark.parametrize("model_id, page", [
     # $/MTok (input, cached input, cache writes, output) from the OpenAI
-    # pricing page, verified 2026-09-23 (gpt-6.1-sol 2026-10-02): short
-    # context, then >272k input.
+    # pricing page, verified 2026-09-23 (gpt-6.1-sol 2026-10-02,
+    # gpt-6.2-astra 2026-11-23, gpt-6.2-sol and the retired gpt-6-astra
+    # 2026-11-24): short context, then >272k input.
+    ("gpt-6.2-astra", {"short": (8.00, 0.40, 10.00, 40.00),
+                       "long": (16.00, 0.80, 20.00, 60.00)}),
+    ("gpt-6.2-sol", {"short": (2.00, 0.10, 2.50, 10.00),
+                     "long": (4.00, 0.20, 5.00, 15.00)}),
+    # Retired 2026-11-24; the entry still prices its replies.
+    ("gpt-6-astra", {"short": (10.00, 1.00, 12.50, 50.00),
+                     "long": (20.00, 2.00, 25.00, 75.00)}),
     ("gpt-6.1-sol", {"short": (2.00, 0.10, 2.50, 10.00),
                      "long": (4.00, 0.20, 5.00, 15.00)}),
     ("gpt-6-sol", {"short": (2.00, 0.20, 2.50, 10.00),

@@ -86,6 +86,10 @@ final class AccountRestoreModel {
         do {
             let offer: RestoreOffer = try await app.api.get(APIPath.accountRestore)
             state = .offer(offer)
+            // Audio of this account the phone still holds (a sign-out before
+            // the phone knew of the deletion) stays only while it can be
+            // restored; "Restore my account" signs in and sends it (#777).
+            if let deleted = offer.deletedAccount { app.audio.uploader.accountDeleted(deleted) }
         } catch {
             // The web: any failure means there is nothing to restore here.
             state = .none

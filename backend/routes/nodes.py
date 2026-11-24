@@ -651,16 +651,15 @@ def create_node():
         if err is not None:
             return err
 
-        # Public threads stay fully public (#228) — see the text path.
+        # A reply under someone else's public node is public (#228) — see
+        # the text path.
         if parent_id:
-            parent = Node.query.get(parent_id)
-            if (parent is not None
-                    and parent.privacy_level == PrivacyLevel.PUBLIC
-                    and privacy_level != PrivacyLevel.PUBLIC):
-                return jsonify({
-                    "error": "Replies under public posts are public.",
-                    "code": "public_reply_required",
-                }), 400
+            from backend.utils.public_reply_limits import (
+                public_reply_required_refusal)
+            err = public_reply_required_refusal(
+                current_user.id, Node.query.get(parent_id), privacy_level)
+            if err is not None:
+                return err
 
         agentic, auto_reply_model, err, auto_off = _upload_reply_options(
             request.form, parent_id, ai_usage, privacy_level)
@@ -794,19 +793,19 @@ def create_node():
     if err is not None:
         return err
 
-    # Public threads stay fully public (#228): a reply under a public node
-    # must itself be public — private interaction with public content goes
+    # A reply under someone else's public node must itself be public
+    # (#228) — private interaction with other people's public content goes
     # through quoting it in your own threads instead. The frontend shows a
     # consent dialog before sending; this is the structural backstop.
+    # Under a public node of the user's own the reply takes the level the
+    # form sent (Peter, 2026-11-24), as in POST /textmode/from-node.
     if parent_id:
-        parent = Node.query.get(parent_id)
-        if (parent is not None
-                and parent.privacy_level == PrivacyLevel.PUBLIC
-                and privacy_level != PrivacyLevel.PUBLIC):
-            return jsonify({
-                "error": "Replies under public posts are public.",
-                "code": "public_reply_required",
-            }), 400
+        from backend.utils.public_reply_limits import (
+            public_reply_required_refusal)
+        err = public_reply_required_refusal(
+            current_user.id, Node.query.get(parent_id), privacy_level)
+        if err is not None:
+            return err
 
     # A public entry quotes only public nodes (Peter, 2026-11-12).
     if privacy_level == PrivacyLevel.PUBLIC:
@@ -1050,9 +1049,12 @@ def update_node(node_id):
         ).delete()
 
     if content_changed:
-        # Sync context artifacts to match placeholders in new content
+        # Sync context artifacts to match placeholders in new content.
+        # Only placeholders the old text had and the new one lacks lose
+        # their pins: a tool read's pin on an AI reply stays (#786).
         from backend.utils.context_artifacts import sync_context_artifacts
-        sync_context_artifacts(node.id, node.user_id, new_content)
+        sync_context_artifacts(node.id, node.user_id, new_content,
+                               old_content=old_content)
 
         # Save the current version before update.
         version = NodeVersion(node_id=node.id)

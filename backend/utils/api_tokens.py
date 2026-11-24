@@ -60,9 +60,12 @@ def resolve_api_token(plaintext, scope):
     user = row.user
     # counts_as_approved: `approved`, except an account the gate let in by
     # itself while payments were on, once they are off again (#697).
+    # No separate look at `deactivated_at` (#782): Deactivate and Block
+    # clear `approved`, so a deactivated account is refused above, and
+    # Activate leaves the time stored (the terms question reads it), so
+    # it must not refuse an account that is approved again.
     from backend.utils.approval import counts_as_approved
     if (user is None or not counts_as_approved(user)
-            or user.deactivated_at is not None
             or user.deleted_at is not None):   # a deleted account (#269)
         return None
     now = datetime.utcnow()

@@ -628,6 +628,119 @@ final class ChunkUploaderTests: XCTestCase {
         XCTAssertEqual(outcome.stored, 1)
     }
 
+    /// A recording made offline under `account`, held at a sign-out.
+    private func recordOffline(_ sessionId: String, account: Int, chunks: Int = 1) async {
+        uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        uploader.resumePending(account: account)
+        uploader.open(sessionId: sessionId, uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<chunks { uploader.enqueue(sessionId: sessionId, chunk: chunk(i)) }
+        _ = await uploader.settle(sessionId: sessionId)
+        uploader.hold()
+    }
+
+    private func offlineUploader(at clock: @escaping () -> Date) -> ChunkUploader {
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        relaunched.now = clock
+        return relaunched
+    }
+
+    // #777: account 7 is deleted while the phone holds its audio. The audio
+    // stays while the account can be restored, through another account's
+    // sign-in and relaunches, and is never sent under account 8. When the
+    // 30 days end it leaves the phone; account 8's audio stays.
+    func testADeletedAccountsAudioStaysUntilItsDateThenLeavesThePhone() async throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        uploader.now = { clock }
+        await recordOffline("s40", account: 7)
+        await recordOffline("s41", account: 8)
+        let deleteOn = clock.addingTimeInterval(30 * 86_400)
+
+        // Learned after a relaunch: the manifest on disk takes the date.
+        offlineUploader { clock }.accountDeleted(DeletedAccount(account: 7, deleteOn: deleteOn, restorable: true))
+        XCTAssertEqual(files("s40"), ["chunk_0.body", "manifest.json"], "kept while it can be restored")
+        let manifest = root.appendingPathComponent("s40").appendingPathComponent("manifest.json")
+        XCTAssertTrue(try String(contentsOf: manifest, encoding: .utf8).contains("accountDeletedOn"))
+        XCTAssertFalse(try String(contentsOf: root.appendingPathComponent("s41").appendingPathComponent("manifest.json"),
+                                  encoding: .utf8).contains("accountDeletedOn"), "only account 7's")
+
+        clock = deleteOn.addingTimeInterval(-1)
+        var sent = 0
+        let other = offlineUploader { clock }
+        other.transport = { [unowned self] request, _ in
+            sent += 1
+            return self.answer(request, 202)
+        }
+        other.resumePending(account: 8)
+        _ = await other.settle(sessionId: "s41")
+        XCTAssertEqual(sent, 1, "account 8's own piece")
+        XCTAssertEqual(files("s40").count, 2)
+        offlineUploader { clock }.removeEnded()
+        XCTAssertEqual(files("s40").count, 2, "a second before the date it is still here")
+
+        // The 30 days end: the next launch removes it.
+        clock = deleteOn
+        let later = offlineUploader { clock }
+        later.removeEnded()
+        XCTAssertEqual(files("s40"), [])
+        XCTAssertFalse(later.holdsUnsentAudio(account: 7))
+        XCTAssertEqual(sent, 1, "never sent under account 8")
+    }
+
+    // #777: the account is restored and signs in again before its date. Its
+    // audio stays without an end, as after any sign-out, and uploads.
+    func testARestoredAccountsAudioUploadsAndNoLongerHasAnEnd() async throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        uploader.now = { clock }
+        await recordOffline("s42", account: 7, chunks: 2)
+        let deleteOn = clock.addingTimeInterval(30 * 86_400)
+        uploader.accountDeleted(DeletedAccount(account: 7, deleteOn: deleteOn, restorable: true))
+
+        // Restored on day 10 and signed in while still offline, then signed
+        // out by the server again (a 401 without a deletion).
+        clock = clock.addingTimeInterval(10 * 86_400)
+        uploader.resumePending(account: 7)
+        _ = await uploader.settle(sessionId: "s42")
+        uploader.hold()
+        clock = deleteOn.addingTimeInterval(86_400)
+        uploader.removeEnded()
+        offlineUploader { clock }.removeEnded()
+        XCTAssertEqual(files("s42"), ["chunk_0.body", "chunk_1.body", "manifest.json"], "no end any more")
+
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            sent.append(self.index(of: request, file: file))
+            return self.answer(request, 202)
+        }
+        uploader.resumePending(account: 7)
+        let outcome = await uploader.settle(sessionId: "s42")
+        XCTAssertEqual(sent, [0, 1])
+        XCTAssertEqual(outcome.stored, 2)
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 7))
+    }
+
+    // #777: a deletion that has started (or an account that is gone) removes
+    // the audio at once; one whose date is not known keeps it as after any
+    // sign-out; an answer about the account signed in now changes nothing.
+    func testWhenTheAccountCanNoLongerBeRestoredTheAudioGoesAtOnce() async throws {
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+        uploader.now = { clock }
+        await recordOffline("s43", account: 7)
+        await recordOffline("s44", account: 8)
+
+        uploader.accountDeleted(DeletedAccount(account: 7, deleteOn: nil, restorable: false))
+        XCTAssertEqual(files("s43"), [])
+        XCTAssertEqual(files("s44").count, 2)
+
+        uploader.accountDeleted(DeletedAccount(account: 8, deleteOn: nil, restorable: true))
+        offlineUploader { clock.addingTimeInterval(400 * 86_400) }.removeEnded()
+        XCTAssertEqual(files("s44").count, 2, "no date known: kept")
+
+        uploader.resumePending(account: 8)
+        uploader.accountDeleted(DeletedAccount(account: 8, deleteOn: nil, restorable: false))
+        XCTAssertEqual(files("s44").count, 2, "account 8 is signed in: the answer is stale")
+    }
+
     // #754: Stop could not send chunks 2 and 3; "Continue recording" claims the
     // session, whose server holds 0 and 1. The new chunks are numbered after
     // the ones still on the phone, those go first, and their files are the
@@ -1348,10 +1461,174 @@ final class SignOutUnsentAudioTests: StubbedAppTestCase {
         XCTAssertTrue(SignOutQuestion.everyAccount.message.contains("deletes all of it from this phone, for every account"))
     }
 
-    func testDeletingTheAccountDeletesItsAudio() async throws {
+    // MARK: #777: a deleted account's audio stays while it can be restored
+
+    /// A launch of the app on this phone (the queue on disk stays).
+    private func launchAgain() async {
+        let relaunched = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(), defaults: defaults)
+        relaunched.audio.uploader = uploader
+        await relaunched.start()
+        XCTAssertEqual(relaunched.phase, .signedOut, "nobody is signed in on that launch")
+    }
+
+    /// The 401 of a sign-in whose account (5) is deleted (backend `refused_sign_in`).
+    private func deletedAnswer(deleteOn: String?, restorable: Bool = true) -> String {
+        let date = deleteOn.map { "\"\($0)\"" } ?? "null"
+        return #"{"error":"Unauthorized","code":"account_deleted","user_id":5,"delete_on":\#(date),"restorable":\#(restorable)}"#
+    }
+
+    /// The restore question, "Restore my account", and the sign-in after it.
+    private func answerTheRestore(offer: String) {
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path ?? "") {
+            case ("GET", "/api/account/restore"): return .json(200, offer)
+            case ("POST", "/api/account/restore"): return .json(200, #"{"status":"restored","next":"/"}"#)
+            case ("POST", "/api/account/restore/decline"): return .json(200, #"{"status":"declined"}"#)
+            default: return .json(200, #"{"user":\#(Self.userJSON),"nodes":[],"pinned_nodes":[]}"#)
+            }
+        }
+    }
+
+    private func sendEverything() -> () -> Int {
+        var sent = 0
+        uploader.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        return { sent }
+    }
+
+    // (1) Deleting the account on this phone keeps its unsent audio; after a
+    // restore and sign-in it uploads as after any sign-in.
+    func testDeletingTheAccountHereKeepsItsAudioAndARestoreSendsIt() async throws {
+        let clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
         app.audio.didSignIn(account: 5)
         await recordWhileTheSignInIsRefused("s52")
+        let deleteOn = clock.addingTimeInterval(30 * 86_400)
+        await app.accountDeletionScheduled(deleteOn: deleteOn)
+        XCTAssertEqual(app.phase, .accountDeleted(deleteOn: deleteOn))
+        XCTAssertTrue(uploader.isHeld)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "kept while the account can be restored")
+        await app.leaveAccountDeletionScreen()
+        await launchAgain()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        // The person signs in, and restores the account at the question.
+        answerTheRestore(offer: #"{"username":"seowriter","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#)
+        let sent = sendEverything()
+        await app.signInCompleted(landing: "/account-restore")
+        let question = AccountRestoreModel(app: app)
+        await question.load()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+        await question.restore()
+        XCTAssertEqual(app.phase, .signedIn)
+        let outcome = await uploader.settle(sessionId: "s52")
+        XCTAssertEqual(sent(), 1)
+        XCTAssertEqual(outcome.stored, 1)
+        XCTAssertFalse(app.signOutDeletesUnsentAudio)
+    }
+
+    // (1) Without a restore, the audio leaves the phone at the first launch
+    // after the 30 days (here the server's answer had no date: 30 days from
+    // the request, as the page says).
+    func testADeletedAccountsAudioLeavesThePhoneWhenTheThirtyDaysEnd() async throws {
+        var clock = Date()
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s54")
         await app.accountDeletionScheduled(deleteOn: nil)
+        await app.leaveAccountDeletionScreen()
+
+        clock = clock.addingTimeInterval(29 * 86_400)
+        await launchAgain()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "day 29: still restorable")
+        clock = clock.addingTimeInterval(2 * 86_400)
+        await launchAgain()
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil), "day 31: removed")
+    }
+
+    // (2) The deletion was scheduled elsewhere while the app runs: the
+    // server's 401 says until when; the audio stays until then, and goes
+    // when the app comes back after it.
+    func testADeletionScheduledElsewhereKeepsTheAudioUntilItsDate() async throws {
+        var clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s55")
+        let refusal = deletedAnswer(deleteOn: "2026-12-23T10:00:00Z")
+        StubURLProtocol.install { _ in .json(401, refusal) }
+        let _: EmptyResponse? = try? await app.api.get("/api/drafts")
+        let deadline = Date().addingTimeInterval(3)
+        while app.phase != .signedOut && Date() < deadline { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertTrue(uploader.isHeld)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        clock = try XCTUnwrap(LooreDate.parse("2026-12-23T09:59:59Z"))
+        await launchAgain()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+        // The app comes back to the foreground after the date.
+        clock = try XCTUnwrap(LooreDate.parse("2026-12-23T10:00:00Z"))
+        app.audio.appDidBecomeActive()
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
+    }
+
+    // (2) The same, learned by "who am I" at launch; the person restores the
+    // account and signs in on the phone: the audio uploads.
+    func testARestoreAfterADeletionElsewhereSendsTheAudio() async throws {
+        let clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s56")
+        let refusal = deletedAnswer(deleteOn: "2026-12-23T10:00:00Z")
+        StubURLProtocol.install { _ in .json(401, refusal) }
+        await app.loadUser()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        answerTheRestore(offer: #"{"username":"seowriter","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#)
+        let sent = sendEverything()
+        await app.signInCompleted(landing: "/account-restore")
+        let question = AccountRestoreModel(app: app)
+        await question.load()
+        await question.restore()
+        let outcome = await uploader.settle(sessionId: "s56")
+        XCTAssertEqual(sent(), 1)
+        XCTAssertEqual(outcome.stored, 1)
+    }
+
+    // (2) A deletion that has started, or an account that is gone: removed at once.
+    func testASignInRefusedForAnAccountThatCannotComeBackRemovesItsAudio() async throws {
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s58")
+        let refusal = deletedAnswer(deleteOn: nil, restorable: false)
+        StubURLProtocol.install { _ in .json(401, refusal) }
+        await app.loadUser()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
+    }
+
+    // Audio held before the phone knew of the deletion (a plain 401, or an
+    // earlier build): the restore question sets its end. "Keep it deleted"
+    // keeps it until the date, and the first launch after it removes it.
+    func testTheRestoreQuestionSetsTheEndOfAudioHeldBeforeThePhoneKnew() async throws {
+        var clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s57")
+        await app.signOutLocally()
+
+        answerTheRestore(offer: #"{"username":"seowriter","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#)
+        await app.signInCompleted(landing: "/account-restore")
+        let question = AccountRestoreModel(app: app)
+        await question.load()
+        await question.keepDeleted()
+        await app.leaveAccountDeletionScreen()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "still restorable")
+
+        clock = try XCTUnwrap(LooreDate.parse("2026-12-23T10:00:00Z"))
+        await launchAgain()
         XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
     }
 }

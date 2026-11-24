@@ -116,7 +116,7 @@ export default function AlphaThankYouPage() {
           lineHeight: 1.8, color: "var(--text-secondary)", maxWidth: 480,
           marginBottom: "3rem",
         }}>
-          Thank you for signing up for the Loore Alpha. We're letting people in
+          Thank you for signing up for the Loore Beta. We're letting people in
           gradually — to keep things intimate and to give each person the attention
           they deserve as they begin.
         </p>

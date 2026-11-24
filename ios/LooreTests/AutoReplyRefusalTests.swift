@@ -45,6 +45,7 @@ final class LLMRequestErrorTests: XCTestCase {
 
     func testWhatShowsElsewhereIsNotToasted() {
         XCTAssertNil(LLMRequestError.toastMessage(apiError(402, spendCapJSON)), "the banner says it")
+        XCTAssertNil(LLMRequestError.toastMessage(apiError(402, subscriptionJSON)), "the replies-paused banner says it (#776)")
         XCTAssertNil(LLMRequestError.toastMessage(apiError(409, #"{"error":"x","code":"auto_generate_off"}"#)),
                      "not an error: LLM Response stays")
         XCTAssertNil(LLMRequestError.toastMessage(apiError(409, tooLongJSON)), "the reply form shows the limit")

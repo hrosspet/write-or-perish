@@ -172,7 +172,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // or none at all; the server never says which (#704).
   const [notShared, setNotShared] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
+  // The model the LLM Response picker shows: the account's until the
+  // picker fills in the thread's (ModelSelector).
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
+  // The model the person picked in that picker on this page, else null.
+  const [pickedModel, setPickedModel] = useState(null);
+  const handleModelChange = useCallback((model, { picked = false } = {}) => {
+    setSelectedModel(model);
+    if (picked) setPickedModel(model);
+  }, []);
+  // The model a reply asked for on this page names (#791): the one picked
+  // here, while the picker still shows it. Otherwise none, and the server
+  // continues on the thread's model (resolve_chat_model), the account's in
+  // a thread with no AI reply yet. The account's model sent unpicked moved
+  // the thread to it, and that turn read the whole thread uncached.
+  const chatModel = pickedModel && pickedModel === selectedModel ? pickedModel : null;
   // The Read button's own model: reads run only on the read models
   // (#355), so it never shares the LLM Response picker's choice. Null
   // until its picker loads; the backend then picks (resolve_read_model).
@@ -915,7 +929,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // auto_generate_off); LLM Response is the user's own request.
   const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode', auto = false } = {}) => {
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
-      model: selectedModel,
+      ...(chatModel && { model: chatModel }),
       source_mode: sourceMode,
       ...(auto && { auto_generate: true }),
     });
@@ -1052,7 +1066,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           ? { content, privacy_level, ai_usage }
           : {
             content, privacy_level, ai_usage, agentic: true,
-            auto_generate: autoGenerateActive, model: selectedModel,
+            auto_generate: autoGenerateActive, ...(chatModel && { model: chatModel }),
           },
       );
       return res.data;
@@ -1066,7 +1080,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       return res.data;
     }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, privacy_level, ai_usage, model: selectedModel,
+      content, privacy_level, ai_usage, ...(chatModel && { model: chatModel }),
       auto_generate: autoGenerateActive,
     });
     return res.data;
@@ -1149,7 +1163,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setVoiceLoading(true);
     setError("");
     api
-      .post(`/${sessionType}/from-node/${id}`, { model: selectedModel })
+      // No model: Voice continues on the thread's model (#784); the LLM
+      // Response picker's choice is for LLM Response.
+      .post(`/${sessionType}/from-node/${id}`, {})
       .then((response) => {
         const { mode, llm_node_id, parent_id, fresh } = response.data;
         // A thread started from the Glean card keeps its Glean button
@@ -1443,8 +1459,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // Without craft mode there is no LLM Response, so an entry whose
   // automatic reply failed left the user no way to ask again. Everyone
   // gets a plain Try again there (Peter, 2026-11-10): the same request
-  // LLM Response sends, without a model picker, so it asks with the model
-  // the automatic reply used (selectedModel, the user's own). Only where
+  // LLM Response sends, without a model picker, so like the automatic
+  // reply it names no model and runs on the thread's (#791). Only where
   // a reply was attempted and did not succeed: a failed or cancelled
   // reply stands under the entry (or its last part) and no other reply
   // does (awaitsReply, which also keeps it away from an upload whose
@@ -1996,7 +2012,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 <ModelSelector
                   nodeId={node.id}
                   selectedModel={selectedModel}
-                  onModelChange={setSelectedModel}
+                  onModelChange={handleModelChange}
                   disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving}
                   style={joinedPickerStyle}
                 />
@@ -2051,6 +2067,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
             parentPrivacyLevel={node.privacy_level}
+            parentOwnedByViewer={!!isOwner}
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact

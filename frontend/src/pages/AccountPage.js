@@ -333,13 +333,15 @@ export default function AccountPage() {
   const handleModelChange = useCallback(
     async (model, how) => {
       setSelectedModel(model);
+      // The picker also calls this with the default it fills in when the
+      // page opens. Only the person's own pick is saved (#785), so an
+      // account that picked nothing keeps no model.
+      if (!how?.picked) return;
       try {
         const res = await api.put("/dashboard/user", { preferred_model: model });
         if (res.data.user) {
           setUser(res.data.user);
-          // Only after the user's own pick, not the default the picker
-          // fills in when the page opens.
-          if (how?.picked && res.data.user.ask_both_providers?.model) {
+          if (res.data.user.ask_both_providers?.model) {
             setAskProviders(true);
           }
         }
