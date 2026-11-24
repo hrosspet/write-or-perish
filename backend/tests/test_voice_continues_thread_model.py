@@ -63,14 +63,14 @@ def _speaker(saved=ACCOUNT):
     return user
 
 
-def _reply_on(parent, owner, model):
+def _reply_on(parent, owner, model, **kw):
     bot = User.query.filter_by(username=model).first()
     if bot is None:
         bot = User(username=model, twitter_id=f"llm-{model}")
         _db.session.add(bot)
         _db.session.flush()
     return _node(bot, parent, content="an answer", node_type="llm",
-                 human_owner=owner, llm_model=model)
+                 human_owner=owner, llm_model=model, **kw)
 
 
 def _voice_thread(user, model=THREAD):
@@ -272,3 +272,108 @@ class TestFromNode:
             f"/api/voice/from-node/{plain.id}", json={"model": ACCOUNT})
         assert resp.status_code == 202, resp.get_json()
         assert _new_reply().llm_model == THREAD
+
+
+# ── Only replies Loore made for this user count (#784 review) ───────────
+# Another member's AI reply in a shared thread, and a reply from an
+# imported ChatGPT conversation, are not a model this account chose in
+# Loore: following them would send its words to another provider. The
+# rule (resolve_chat_model) skips them, for Voice and for a Text reply
+# that names no model alike, and the account's model answers.
+
+def _members_thread(alice):
+    """Bob's public thread with his AI reply on GPT-6 Astra, and Alice's
+    public entry under it."""
+    bob = _user("bob")
+    bob.preferred_model = THREAD
+    root = _node(bob, content="Bob's post", privacy_level="public")
+    bobs_reply = _reply_on(root, bob, THREAD, privacy_level="public")
+    entry = _node(alice, bobs_reply, content="Alice answers",
+                  privacy_level="public")
+    _db.session.commit()
+    return entry
+
+
+def _imported_conversation(alice, slug="gpt-5"):
+    """Alice's imported ChatGPT conversation: her message and the
+    assistant's reply, labelled with the export's model slug (a key in
+    SUPPORTED_MODELS, or the legacy id), both with origin 'chatgpt'."""
+    msg = _node(alice, content="imported question")
+    msg.origin = "chatgpt"
+    reply = _reply_on(msg, alice, slug)
+    reply.origin = "chatgpt"
+    _db.session.commit()
+    return reply
+
+
+def _text_reply_model(flask_app, user, parent):
+    """The Text reply route with no model named (as LLM Response, Try
+    again and auto-generate send it for an account with no saved model)."""
+    resp = _client(flask_app, user).post(
+        f"/api/nodes/{parent.id}/llm", json={"source_mode": "textmode"})
+    assert resp.status_code in (200, 202), resp.get_json()
+    return Node.query.get(resp.get_json()["node_id"]).llm_model
+
+
+def _from_node_model(flask_app, user, node):
+    resp = _client(flask_app, user).post(
+        f"/api/voice/from-node/{node.id}", json={"model": ACCOUNT})
+    assert resp.status_code == 202, resp.get_json()
+    return Node.query.get(resp.get_json()["llm_node_id"]).llm_model
+
+
+class TestOnlyTheUsersOwnRepliesCount:
+    def test_voice_under_another_members_reply(self, models, task_mod):  # noqa: F811
+        alice = _speaker()
+        entry = _members_thread(alice)
+        assert _from_node_model(models, alice, entry) == ACCOUNT
+        assert TestVoiceTurnRoute()._turn(models, alice, entry).llm_model \
+            == ACCOUNT
+
+    def test_voice_finalize_under_another_members_reply(
+            self, models, finalize_task):
+        alice = _speaker()
+        entry = _members_thread(alice)
+        assert TestStreamingFinalize()._finalize(
+            models, alice, finalize_task, entry) == ACCOUNT
+
+    def test_text_under_another_members_reply(self, models, task_mod):  # noqa: F811
+        alice = _speaker()
+        entry = _members_thread(alice)
+        assert _text_reply_model(models, alice, entry) == ACCOUNT
+
+    @pytest.mark.parametrize("slug", ["gpt-5", "gpt-4.5-preview"])
+    def test_voice_in_an_imported_conversation(self, models, task_mod,  # noqa: F811
+                                               slug):
+        alice = _speaker()
+        reply = _imported_conversation(alice, slug)
+        assert TestVoiceTurnRoute()._turn(models, alice, reply).llm_model \
+            == ACCOUNT
+        entry = _node(alice, reply, content="typed under it")
+        _db.session.commit()
+        assert _from_node_model(models, alice, entry) == ACCOUNT
+
+    def test_voice_finalize_in_an_imported_conversation(
+            self, models, finalize_task):
+        alice = _speaker()
+        reply = _imported_conversation(alice)
+        assert TestStreamingFinalize()._finalize(
+            models, alice, finalize_task, reply) == ACCOUNT
+
+    def test_text_in_an_imported_conversation(self, models, task_mod):  # noqa: F811
+        alice = _speaker()
+        reply = _imported_conversation(alice)
+        entry = _node(alice, reply, content="typed under it")
+        _db.session.commit()
+        assert _text_reply_model(models, alice, entry) == ACCOUNT
+
+    def test_the_users_own_reply_below_them_counts(self, models,
+                                                   task_mod):  # noqa: F811
+        # Once Loore has replied to Alice in the thread, that reply's
+        # model is the thread's model for her.
+        alice = _speaker()
+        entry = _members_thread(alice)
+        own = _reply_on(entry, alice, "claude-fable-5.2")
+        _db.session.commit()
+        assert TestVoiceTurnRoute()._turn(models, alice, own).llm_model \
+            == "claude-fable-5.2"

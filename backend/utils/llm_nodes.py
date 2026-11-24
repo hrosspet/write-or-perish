@@ -251,13 +251,14 @@ class _Chain:
         from backend.models import NodeContextArtifact, UserPrompt
         from backend.utils.thread_tree import ancestor_chain
         # token_count and continuation_node_id: the size of the reply's
-        # prompt (utils/thread_size, #648).
+        # prompt (utils/thread_size, #648). origin: an imported reply is
+        # no model Loore ran for the user (resolve_chat_model, #784).
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
             Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
             Node.privacy_level, Node.token_count, Node.continuation_node_id,
-            max_depth=_MAX_ANCESTRY_HOPS)
+            Node.origin, max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -308,32 +309,48 @@ class _Chain:
                 if n.deleted_at is None and n.node_type == "llm" and n.llm_model]
 
 
+def _loore_reply_for(node, user_id):
+    """Whether the AI reply *node* is one Loore made for *user_id*: the
+    user is its human owner (as glean_provider counts them), and it was
+    written in Loore, not imported (Node.origin NULL). Another member's
+    reply in a shared thread, and a reply from an imported ChatGPT or
+    Claude conversation, are not models this user chose in Loore."""
+    return (user_id is not None
+            and (node.human_owner_id or node.user_id) == user_id
+            and getattr(node, "origin", None) is None)
+
+
 def resolve_chat_model(parent_node, user, chain=None):
     """The model for a (non-read) reply under *parent_node* when the
     caller supplied none, and where it came from:
 
-      1. ("predecessor") the closest ancestor LLM reply's ``llm_model``,
-         skipping reads: a read runs on a read model (Luna), and that
-         must not become the default for the conversation around it.
+      1. ("predecessor") the closest ancestor LLM reply that Loore made
+         for *user* (_loore_reply_for): its ``llm_model``. Reads are
+         skipped: a read runs on a read model (Luna), and that must not
+         become the default for the conversation around it. Another
+         member's reply and an imported reply are skipped too (#784):
+         following them would send the user's words to a provider they
+         never chose in Loore.
       2. ("user_preference") ``user.preferred_model``
          (effective_preferred_model: its provider's default once it is
          no longer offered).
       3. ("default") ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
-    If the closest non-read LLM ancestor is recognized but not usable for
+    If the closest such reply is on a model recognized but not usable for
     chat (deprecated, read only, or the historical ``gpt-4.5-preview``
     legacy id), the walk stops there and the thread stays with that
     model's provider (#487): the user's account model when it is that
     provider's, else the provider's default (same_provider_chat_model),
     still "predecessor". Walking past it to find an even older active
     model would pick a model nobody chose for this point of the thread.
-    Truly-unknown ancestors keep walking — they're typically placeholder
-    rows from data migrations and imports ("chatgpt", "claude-web").
+    Truly-unknown ids keep walking: placeholder rows from data
+    migrations ("chatgpt", "claude-web").
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(parent_node)
+    user_id = getattr(user, "id", None)
     for node in chain.llm_replies():
-        if node.id in chain.reads:
+        if node.id in chain.reads or not _loore_reply_for(node, user_id):
             continue
         if is_chat_model(node.llm_model):
             return node.llm_model, "predecessor"
@@ -444,11 +461,12 @@ def voice_turn_model(parent_node, user, sent_model=None):
     """The model of a Voice turn's reply (#784). A turn that continues a
     thread (*parent_node*: where the turn's entry or reply goes) runs on
     the thread's model, by the rule a Text reply follows when it names no
-    model (resolve_chat_model): the closest earlier chat reply's model,
-    kept to that reply's provider when the model is no longer offered
-    (#487), else the account's model, else the server default. So the
-    turn reads the thread's prompt cache, as a Text reply on that model
-    would.
+    model (resolve_chat_model): the model of the closest earlier chat
+    reply Loore made for this user (never another member's reply or an
+    imported one), kept to that reply's provider when the model is no
+    longer offered (#487), else the account's model, else the server
+    default. So the turn reads the thread's prompt cache, as a Text
+    reply on that model would.
 
     *sent_model*, the model the client sent, is not used for such a
     turn: Voice has no model picker, and both apps send the account's
