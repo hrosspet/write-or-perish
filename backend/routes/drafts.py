@@ -1887,11 +1887,19 @@ def save_streaming_as_node(session_id):
         parent_node = Node.query.get(draft.parent_id)
         if parent_node is None:
             return jsonify({"error": "Parent node not found"}), 404
-        # The prompt node is Public only for a Public message of an
-        # account whose default is Public
-        # (session_helpers.prompt_entry_privacy).
+        # The prompt node is Public only for a Public message under a
+        # Public parent of an account whose default is Public
+        # (session_helpers.prompt_entry_privacy), as POST
+        # /textmode/from-node sets it for a typed reply: under a parent
+        # of another level it is given "private" (Peter, 2026-11-24: a
+        # public reply recorded under one's own private Glean does not
+        # publish its prompt entry).
+        prompt_level = (
+            privacy_level
+            if (parent_node.privacy_level or "private") == privacy_level
+            else "private")
         system_node = attach_agentic_prompt_under(
-            parent_node, current_user.id, "textmode", privacy_level,
+            parent_node, current_user.id, "textmode", prompt_level,
             ai_usage)
         if system_node is not None:
             user_parent_id = system_node.id

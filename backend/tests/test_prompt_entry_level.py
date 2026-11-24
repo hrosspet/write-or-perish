@@ -450,6 +450,36 @@ def test_a_typed_reply_under_ones_own_gleaning_follows_the_rule(
     assert (message.privacy_level, prompt.privacy_level) == (level, expected)
 
 
+@pytest.mark.parametrize("node_level", ["private", "circles"])
+@pytest.mark.parametrize("path", ["typed", "recorded"])
+def test_a_public_reply_under_ones_own_unshared_gleaning_keeps_its_prompt_private(
+        app, node_level, path):
+    """Under a Public default, a Public message under one's own Private
+    or Circles Glean: the prompt entry between them is Private on both
+    paths (Peter, 2026-11-24: a public reply recorded under one's own
+    private Glean does not publish its prompt entry)."""
+    _set_default("anna", "public")
+    gleaning = _gleaning("anna", node_level)
+
+    if path == "typed":
+        resp = _client(app, "anna").post(
+            f"/api/textmode/from-node/{gleaning.id}",
+            json={"content": "a typed reply", "privacy_level": "public",
+                  "ai_usage": "chat", "auto_generate": False})
+        assert resp.status_code == 202, resp.get_json()
+        prompt = _get(resp.get_json()["prompt_node_id"])
+    else:
+        resp = _record(app, "anna", gleaning, agentic=True,
+                       privacy_level="public", ai_usage="chat")
+        assert resp.status_code == 201, resp.get_json()
+        prompt = _get(resp.get_json()["conversation_id"])
+    message = _get(resp.get_json()["user_node_id"])
+
+    assert prompt.parent_id == gleaning.id
+    assert (message.privacy_level, prompt.privacy_level) == (
+        "public", "private")
+
+
 def test_under_ones_own_ai_reply_in_another_persons_public_thread(app):
     """Anna's public reply and the AI reply she asked for sit in Ben's
     public thread. A Text-mode session recorded under her AI reply gets
