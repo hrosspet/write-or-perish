@@ -138,7 +138,8 @@ private struct NodeFormBody: View {
             .foregroundStyle(LooreColor.textPrimary)
             .lineSpacing(5)
             .focused($focused)
-            .disabled(!config.isEdit && model.uploadedFile != nil)
+            // An edit form waits until it has read the entry (#799 review).
+            .disabled((!config.isEdit && model.uploadedFile != nil) || !model.ready)
             .padding(.vertical, 14)
             .padding(.horizontal, 16)
             .frame(minHeight: config.compact ? 90 : min(400, max(120, UIScreen.main.bounds.height * 0.4)),

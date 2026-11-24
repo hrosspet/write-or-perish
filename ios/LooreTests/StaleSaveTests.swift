@@ -13,11 +13,23 @@ private func json(_ body: [String: Any]) -> String {
 final class EditFormBaseTests: StubbedAppTestCase {
     private let openedOn = "Call the bank on Monday.\r\n- [ ] deploy\n"
 
-    private func editForm(put: @escaping (URLRequest) -> StubResponse) -> (NodeFormModel, () -> NodeFormResult?) {
+    private func nodeJSON(_ content: String) -> String {
+        json(["id": 9, "content": content, "node_type": "user", "user": ["id": 5, "username": "seowriter"],
+              "privacy_level": "private", "ai_usage": "chat", "child_count": 0, "children": [], "ancestors": []])
+    }
+
+    /// An edit form opened on `openedOn`; the server's entry is `current`
+    /// (the same unless a test says otherwise) and its draft `draftJSON`.
+    private func editForm(current: String? = nil, draftJSON: String? = nil,
+                          put: @escaping (URLRequest) -> StubResponse) -> (NodeFormModel, () -> NodeFormResult?) {
+        let node = nodeJSON(current ?? openedOn)
         StubURLProtocol.install { request in
             let path = request.url?.path(percentEncoded: true)
             if request.httpMethod == "PUT" { return put(request) }
-            if request.httpMethod == "GET" && path == "/api/drafts/" { return .json(404, #"{"error":"No draft found"}"#) }
+            if request.httpMethod == "GET" && path == "/api/nodes/9" { return .json(200, node) }
+            if request.httpMethod == "GET" && path == "/api/drafts/" {
+                return draftJSON.map { .json(200, $0) } ?? .json(404, #"{"error":"No draft found"}"#)
+            }
             return .json(200, #"{"id":5,"content":"typed","updated_at":"2026-11-24T10:00:00Z"}"#)
         }
         let model = NodeFormModel(config: NodeFormConfig(edit: .init(nodeId: 9, initialContent: openedOn,
@@ -80,6 +92,60 @@ final class EditFormBaseTests: StubbedAppTestCase {
         drafts.save("typed")
         await drafts.flush()
         XCTAssertNil(body(of: "POST /api/drafts/")?["base_content"])
+    }
+
+    // #799 review 1: another device's Save deleted every draft of the entry,
+    // this form's included. On the refusal the form saves its text again at
+    // once, with its base, so going back does not lose it.
+    func testARefusedSaveSavesTheTextAsADraftAtOnce() async {
+        let (model, _) = editForm { _ in
+            .json(409, #"{"error":"There's a newer version of this text","code":"content_changed"}"#)
+        }
+        await model.start()
+        model.content = "my long edit"
+        await model.submit()
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "my long edit")
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["base_content"] as? String, openedOn)
+        XCTAssertTrue(model.hasDraft)
+    }
+
+    // #799 review 2: a Save deletes only the drafts the form showed, its own
+    // row and the older edit on offer; another device's unsaved edit stays.
+    func testASaveDeletesOnlyTheDraftsTheFormShowed() async {
+        let older = #"{"id":3,"content":"older","node_id":9,"updated_at":"2026-11-20T14:03:00Z","older_than_entry":true}"#
+        let (model, result) = editForm(draftJSON: older) { _ in
+            .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+        }
+        await model.start()
+        XCTAssertNotNil(model.olderDraft)
+        model.content = "typed on the current text"
+        model.contentChanged(from: openedOn, to: model.content)
+        await model.drafts.flush()  // the autosave lands: row 5
+        await model.submit()
+        XCTAssertNotNil(result())
+        let deletes = StubURLProtocol.requests.filter { $0.httpMethod == "DELETE" }
+        XCTAssertEqual(deletes.map { $0.url?.query ?? "" }, ["node_id=9&draft_id=3&draft_id=5"])
+    }
+
+    // #799 review 3: the page that opened the form still shows an older text
+    // (after a refused Save). The form reads the entry and works on its
+    // current text: editor, Save's base and draft's base.
+    func testAFormOpenedFromAPageWithAnOlderTextWorksOnTheCurrentOne() async {
+        let current = "Call the bank on Monday.\n- [x] deploy\n"
+        let (model, _) = editForm(current: current) { _ in
+            .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+        }
+        XCTAssertFalse(model.ready, "the editor waits")
+        await model.start()
+        XCTAssertTrue(model.ready)
+        XCTAssertEqual(model.content, current)
+        XCTAssertEqual(model.base, current)
+        model.content = current + "more"
+        model.contentChanged(from: current, to: model.content)
+        await model.drafts.flush()
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["base_content"] as? String, current)
+        await model.submit()
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["base_content"] as? String, current)
     }
 
     func testTheArtifactSaveCarriesItsBase() {

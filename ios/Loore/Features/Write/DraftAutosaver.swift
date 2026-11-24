@@ -18,11 +18,14 @@ final class DraftAutosaver {
 
     @ObservationIgnored private let nodeId: Int?
     @ObservationIgnored private let parentId: Int?
-    /// An edit: the entry's text the form was opened on, sent with each save
-    /// (#799). The server marks a draft whose base is no longer the entry's
-    /// text as older than the entry, so a form opened again offers it
-    /// instead of loading it.
-    @ObservationIgnored private let base: String?
+    /// An edit: the entry's text the form works on, sent with each save
+    /// (#799). The server keeps one draft row per such text and marks one
+    /// whose text is no longer the entry's as older than the entry, so a form
+    /// opened again offers it instead of loading it. The form sets it to the
+    /// entry's current text once it has read it (#799 review).
+    @ObservationIgnored var base: String? {
+        didSet { if nodeId == nil { base = nil } }
+    }
     /// The row this form's text is saved in (the loaded draft's, then each
     /// save's answer): "Discard draft" next to a kept older edit deletes only
     /// it (#766).
@@ -153,6 +156,24 @@ final class DraftAutosaver {
         // the server) could land after the DELETE and bring the draft back.
         while let running = inFlight { await running.value }
         _ = try? await api.delete(APIPath.drafts, query: query, as: EmptyResponse.self)
+        draft = nil
+        lastSaved = nil
+        savedId = nil
+    }
+
+    /// After an edit's Save (#799 review): this form's own row and the older
+    /// edit it showed (`shownId`). A row the form never showed (another
+    /// device's unsaved edit of the entry) stays, to be offered next time.
+    func deleteShown(also shownId: Int?) async {
+        pending = nil
+        debounceTask?.cancel()
+        while let running = inFlight { await running.value }
+        let ids = Array(Set([savedId, shownId].compactMap { $0 })).sorted()
+        if !ids.isEmpty {
+            _ = try? await api.delete(APIPath.drafts,
+                                      query: query + ids.map { URLQueryItem(name: "draft_id", value: String($0)) },
+                                      as: EmptyResponse.self)
+        }
         draft = nil
         lastSaved = nil
         savedId = nil
