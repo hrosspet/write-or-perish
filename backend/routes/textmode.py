@@ -480,8 +480,10 @@ def continue_from_node(node_id):
     Privacy is the one the reply form sent, as for a typed reply
     (POST /nodes/) and a recorded one (save-as-node); a client that
     sends none (an installed iPhone build, a page loaded earlier) gets
-    the node's, as before. The prompt node attached under the node keeps
-    the node's. AI usage is the one the reply form sent,
+    the node's, as before. The prompt node attached under the node is
+    Public only when the message is Public and the account's default
+    level is Public, else Private (session_helpers.prompt_entry_privacy).
+    AI usage is the one the reply form sent,
     else the thread's with the read looked through (reply_ai_usage,
     #362): a read reply is 'chat' for the tweets it quotes, which says
     nothing about what the user writes under it.
