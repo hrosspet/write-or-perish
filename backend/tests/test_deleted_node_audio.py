@@ -621,6 +621,8 @@ def _layout(root, users, tmp_path):
         _file(root / f"user/{alice.id}/node/{live.id}/original.webm.enc"),
         _file(root / f"nodes/{alice.id}/{live.id}/batch_0000.webm.enc")]
     kept += (_node_files(root, in_grace) + _node_files(root, hidden))
+    # The pieces of an upload that stopped arriving (no entry names it).
+    doomed.append(_file(root / f"chunks/{alice.id}/up-1/chunk_0000"))
     reply_speech = _file(root / f"user/{model.id}/node/{reply.id}/tts.mp3")
     reply.audio_tts_url = _media(reply_speech, root)
     _db.session.commit()
@@ -629,7 +631,6 @@ def _layout(root, users, tmp_path):
     kept += [
         _file(root / f"drafts/{alice.id}/sess-9/chunk_0000.webm.enc"),
         _file(root / f"streaming/{alice.id}/sess-8/chunk_0000.webm"),
-        _file(root / f"chunks/{alice.id}/up-1/chunk_0000"),
         _file(root / f"user/{alice.id}/node/notanid/x.webm"),
         _file(root / f"user/{alice.id}/other/1/tts.mp3"),
         _file(root / "stray.webm"),
@@ -648,8 +649,8 @@ def test_script_dry_run_deletes_nothing(app, root, users, tmp_path):
     assert all(f.exists() for f in doomed + kept)
     # past: 2 folders; the 2 gone nodes' user/ folders (one whole, one
     # speech only); gone item, gone profile; superseded speech of the
-    # live item and the live profile.
-    assert result["planned"][0] == 8
+    # live item and the live profile; the upload's pieces.
+    assert result["planned"][0] == 9
     assert result["planned"][1] == len(doomed)
     text = "\n".join(lines)
     assert "would delete" in text and "row gone" in text

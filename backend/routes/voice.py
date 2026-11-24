@@ -6,7 +6,7 @@ from backend.models import Node
 from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
-    ai_usage_refused_response, create_llm_placeholder,
+    TooManyReplies, ai_usage_refused_response, create_llm_placeholder,
     read_only_model_refusal, read_only_model_response, reply_ai_usage,
     voice_turn_model, voice_turn_refusal,
 )
@@ -376,6 +376,12 @@ def create_voice_session():
         body = response.get_json()
         body["user_node_id"] = user_node.id
         return jsonify(body), status
+    except TooManyReplies as e:
+        # The account's replies in progress are at their bound: what was
+        # said is kept, as for the length, only the reply is skipped.
+        db.session.commit()
+        return jsonify({"error": e.recording_message, "code": e.code,
+                        "user_node_id": user_node.id}), 429
     except SubscriptionRequired as e:
         # The account's access ended while this turn was recorded (#438):
         # what was said is kept, as for the length, and the 402 says why

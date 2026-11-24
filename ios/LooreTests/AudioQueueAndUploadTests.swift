@@ -1291,6 +1291,24 @@ final class PlaybackFailureTests: XCTestCase {
                        "Audio playback failed.")
     }
 
+    /// The server's MP3 of a WebM recording: a refusal with its own words and
+    /// code (429 `download_busy`) says those words; any other failure keeps the
+    /// WebM message.
+    func testConvertedRecordingFailureSaysTheServersWordsForARefusal() {
+        let busy = "Another download of a recording is being prepared. Please try again in a few minutes."
+        let body = Data("{\"error\": \"\(busy)\", \"code\": \"download_busy\"}".utf8)
+        let refusal = APIError.from(status: 429, contentType: "application/json", data: body)
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: refusal), busy)
+
+        let noCode = APIError.from(status: 500, contentType: "application/json",
+                                   data: Data("{\"error\": \"Failed to convert to MP3\"}".utf8))
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: noCode), ListenFormats.webMMessage)
+        let page = APIError.from(status: 504, contentType: "text/html", data: Data("<html></html>".utf8))
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: page), ListenFormats.webMMessage)
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: URLError(.timedOut)),
+                       ListenFormats.webMMessage)
+    }
+
     func testAnUnplayableItemIsReportedOnceAndTheQueueFinishes() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("playback-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

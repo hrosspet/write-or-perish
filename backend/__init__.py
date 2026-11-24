@@ -92,6 +92,58 @@ def validate_profile_models(config):
             f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
 
 
+_encryption_off_noted = False
+
+
+def note_encryption_off(environ=None):
+    """Write the line about encryption being off to the log, once per
+    process (a process builds the app more than once: the web app's
+    imports build the Celery app's). Nothing when this instance
+    encrypts."""
+    global _encryption_off_noted
+    from backend.utils.encryption import encryption_off_notice
+    notice = encryption_off_notice(environ)
+    if notice and not _encryption_off_noted:
+        _encryption_off_noted = True
+        logging.getLogger(__name__).warning(notice)
+
+
+def validate_keys(config, environ=None):
+    """Refuse to boot without the two keys the data depends on.
+
+    Encryption, in every environment: ENCRYPTION_DISABLED=true is the
+    only switch that turns it off (the local and staging Compose files
+    and the tests set it), with or without a key name beside it (a key
+    name then only serves reads of what was stored encrypted earlier). Where
+    it is not turned off, GCP_KMS_KEY_NAME names the key users' writing
+    is encrypted with, and the app does not start without it. The
+    rule is encryption_choice() in backend/utils/encryption.py, the same
+    one every write and read follows afterwards. An instance that starts
+    with encryption off writes one fixed line to its log saying so
+    (note_encryption_off).
+
+    SECRET_KEY, in production and on staging (DEPLOY_ENV: every
+    FLASK_ENV but "development" and "testing"): it signs the sign-in
+    cookies and links. It must be set in the env file and differ from
+    the placeholder in config.py.
+
+    A missing or placeholder value stops the start, as for LLM_NAME
+    below. The messages name the setting, never a value."""
+    from backend.config import PLACEHOLDER_SECRET_KEY
+    from backend.utils.encryption import encryption_choice
+    environ = os.environ if environ is None else environ
+    encryption_choice(environ)
+    env = (config.get("DEPLOY_ENV") or "production").lower()
+    if env in ("development", "testing"):
+        return
+    key = config.get("SECRET_KEY")
+    if not key or key == PLACEHOLDER_SECRET_KEY:
+        raise RuntimeError(
+            f"SECRET_KEY is not set (FLASK_ENV counts as {env!r}). Set it "
+            "in the env file this instance reads; an instance that had "
+            "one must get the same value back.")
+
+
 def validate_model_successors(supported):
     """Refuse to boot on a ``replaced_by`` (the model that takes a retired
     model's place) that does not lead to an active model of the retired
@@ -411,6 +463,15 @@ def create_app():
 
     app = Flask(__name__)
     app.config.from_object(Config)
+    # Request bodies: DEFAULT_MAX_BODY_BYTES unless the route allows more
+    # (utils/request_size); a larger body gets a JSON 413 before it is
+    # read.
+    from backend.utils import request_size
+    app.request_class = request_size.SizedRequest
+    app.config["MAX_CONTENT_LENGTH"] = request_size.DEFAULT_MAX_BODY_BYTES
+    app.register_error_handler(413, request_size.too_large_response)
+    validate_keys(app.config)
+    note_encryption_off()
     validate_default_model(app.config, warn=_warn_once(app.logger))
     # Payments (#438): never on in production with a sandbox key.
     from backend.utils.subscriptions import check_payments_config
@@ -487,8 +548,10 @@ def create_app():
         # An account never approved is approved on its first request and
         # goes on to the trial step (block_accounts_without_subscription
         # below); one the admin blocked or marked as spam is refused here,
-        # with its own text. No-op while payments are off.
-        if approval.let_in(current_user):
+        # with its own text. From a day's number of new accounts not
+        # prepared in advance, the next one waits for approval as before
+        # payments (approval.let_in_at_gate). No-op while payments are off.
+        if approval.let_in_at_gate(current_user):
             db.session.commit()
             return
 
@@ -758,6 +821,21 @@ def create_app():
         from backend.utils.thread_size import thread_too_long_response
         db.session.rollback()
         return thread_too_long_response(exc)
+
+    # A reply while the account already has MAX_REPLIES_IN_PROGRESS replies
+    # waiting or being written: create_llm_placeholder raises TooManyReplies
+    # before the reply is written. Routes that keep the user's entry answer
+    # it themselves; any that lets it escape gets 429 {"error", "code":
+    # "too_many_replies"}, and whatever it flushed before the call is not
+    # kept (a Glean's prompt node).
+    from backend.utils.llm_nodes import TooManyReplies
+
+    @app.errorhandler(TooManyReplies)
+    def _handle_too_many_replies(exc):
+        from backend.extensions import db
+        from backend.utils.llm_nodes import too_many_replies_response
+        db.session.rollback()
+        return too_many_replies_response(exc)
 
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).

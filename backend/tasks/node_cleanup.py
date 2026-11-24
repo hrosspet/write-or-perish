@@ -11,8 +11,11 @@ Runs once per day. Two distinct actions per soft-deleted candidate:
 
 2. **Content wipe** when the row still has children but content hasn't yet
    been cleared. Deletes the node's audio files, sets `content = None`,
-   removes versions and audio rows. Row stays as a tombstone shell until
-   its descendants eventually purge.
+   clears what else the row holds of the entry (_KEPT_TEXT_COLUMNS: the
+   record of the model's tool calls with their search words and artifact
+   titles, text of an unfinished reply, error and warning texts), removes
+   versions and audio rows. Row stays as a tombstone shell until its
+   descendants eventually purge.
 
 Audio files go first, in both actions (backend/utils/audio_storage.py,
 `delete_node_audio`: the node's ``user/<author>/node/<id>/``,
@@ -31,8 +34,10 @@ matches Postgres' default FK behavior — `Node.parent_id` has no
 soft-deleted-but-not-yet-purged child row still references it. The
 cascade is therefore eventual, one tree-level per daily run.
 
-The needs-action SQL filter (`content IS NOT NULL OR no children`)
-excludes long-stable tombstones from per-day re-scan; one bad row's
+The needs-action SQL filter (`content or another of the wiped columns
+IS NOT NULL, OR no children`) excludes long-stable tombstones from
+per-day re-scan, and takes in once a tombstone wiped before those
+columns were cleared; one bad row's
 exception is caught and logged without poisoning the batch (per-node
 commits). The candidates' ids are read into a list before the first
 node is touched: a streamed query (``yield_per``) reads through a
@@ -144,9 +149,27 @@ def _full_purge(node):
     return audio
 
 
+# What a row holds of its entry besides `content`, cleared with it: the
+# record of the model's tool calls (search words, artifact titles and
+# descriptions), text of a reply that was still being written, and the
+# error and warning texts shown under the entry. The same columns the
+# account purge clears on the rows it keeps (utils/user_purge._tombstone).
+_KEPT_TEXT_COLUMNS = (
+    "tool_calls_meta", "streaming_content", "llm_task_error",
+    "llm_task_warnings", "transcription_error",
+)
+
+
+def _holds_text():
+    """SQL: the row's content or another wiped column is still set."""
+    return or_(Node.content.isnot(None),
+               *(getattr(Node, name).isnot(None)
+                 for name in _KEPT_TEXT_COLUMNS))
+
+
 def _wipe_content_and_versions(node):
     """Clear a tombstone's content + edit history + audio, its audio
-    files first.
+    files first, and the other columns that hold text of the entry.
 
     Keeps the row so descendants still have a parent_id anchor; the row
     will become eligible for full purge in a later cleanup run once all
@@ -154,6 +177,8 @@ def _wipe_content_and_versions(node):
     """
     audio = _delete_audio(node)
     node.content = None
+    for name in _KEPT_TEXT_COLUMNS:
+        setattr(node, name, None)
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
@@ -183,9 +208,9 @@ def finalize_deleted_nodes(now=None):
     Child = aliased(Node)
     has_any_child = exists().where(Child.parent_id == Node.id)
 
-    # Needs-action filter: content not yet wiped, OR no children
-    # (purge-eligible). Excludes long-stable tombstones from per-day
-    # re-scan.
+    # Needs-action filter: content (or another wiped column) not yet
+    # cleared, OR no children (purge-eligible). Excludes long-stable
+    # tombstones from per-day re-scan.
     # A node a "Delete all my content" hid (#268) is the purge's: it
     # comes back whole on a restore, or the purge deletes it with
     # everything else the request hid.
@@ -198,7 +223,7 @@ def finalize_deleted_nodes(now=None):
         .filter(Node.deleted_at <= cutoff)
         .filter(~Node.id.in_(hidden_ids("node")))
         .filter(or_(
-            Node.content.isnot(None),
+            _holds_text(),
             ~has_any_child,
         ))
         .order_by(Node.deleted_at.asc(), Node.id.asc())
@@ -226,12 +251,14 @@ def finalize_deleted_nodes(now=None):
             if child_count == 0:
                 audio = _full_purge(node)
                 purged += 1
-            elif node.content is not None:
+            elif node.content is not None or any(
+                    getattr(node, name) is not None
+                    for name in _KEPT_TEXT_COLUMNS):
                 audio = _wipe_content_and_versions(node)
                 wiped += 1
             else:
-                # Stable tombstone, content already None, children
-                # still exist — skip until next descendant cleanup pass.
+                # Stable tombstone, already cleared, children still
+                # exist — skip until next descendant cleanup pass.
                 db.session.rollback()  # releases the row lock
                 continue
             db.session.commit()

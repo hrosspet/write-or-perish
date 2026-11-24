@@ -30,6 +30,9 @@ class FakeRedis:
         entry = self._live(key)
         return entry[0] if entry is not None else None
 
+    def mget(self, keys):
+        return [self.get(key) for key in keys]
+
     def ttl(self, key):
         entry = self._live(key)
         return None if entry is None else entry[1] - self.now

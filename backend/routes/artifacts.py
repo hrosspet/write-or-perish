@@ -17,6 +17,7 @@ from backend.extensions import db
 from backend.models import NodeContextArtifact, UserArtifact
 from backend.utils.privacy import chat_at_most, shown_ai_usage, x_api_account
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 
 # The answer for a deleted kind: the client says "This artifact was
 # deleted." instead of offering an empty artifact under its name (#603).
@@ -181,6 +182,7 @@ def artifact_viewed(kind):
 
 
 @artifacts_bp.route("/<kind>", methods=["PUT"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_artifact(kind):
     """Create a new version of an artifact (creates the kind if new)."""
@@ -239,6 +241,7 @@ def update_artifact(kind):
 
 
 @artifacts_bp.route("/<kind>", methods=["PATCH"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def patch_artifact(kind):
     """Save a checklist toggle or a "+" insert from the artifacts page.
@@ -299,6 +302,13 @@ def get_artifact_versions(kind):
     rows = UserArtifact.live().filter_by(
         user_id=current_user.id, kind=kind
     ).order_by(UserArtifact.created_at.desc(), UserArtifact.id.desc()).all()
+
+    # Each version's title and description are read, not its text: the
+    # keys in one concurrent batch (versions written one after another
+    # share a key, so this is usually one call).
+    from backend.utils.encryption import prefetch_deks
+    prefetch_deks([r.title_enc for r in rows]
+                  + [r.description_enc for r in rows])
 
     total = len(rows)
     versions = [
@@ -387,8 +397,6 @@ def revert_artifact(kind, version_id):
     new = UserArtifact(
         user_id=current_user.id,
         kind=kind,
-        title=old.title,
-        description=old.description,
         generated_by="revert",
         tokens_used=0,
         privacy_level=old.privacy_level,
@@ -399,6 +407,9 @@ def revert_artifact(kind, version_id):
     )
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new.content = old.content
+    # After the text, so they are stored under the text's key.
+    new.title = old.title
+    new.description = old.description
     db.session.add(new)
     db.session.commit()
 

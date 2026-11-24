@@ -30,6 +30,8 @@ import secrets
 import time
 import zipfile
 
+from backend.utils import archive_limits, run_locks
+
 STASH_ROOT = pathlib.Path(
     os.environ.get("AUDIO_STORAGE_PATH", "data/audio")
 ).resolve().parent / "imports"
@@ -48,23 +50,71 @@ class TwitterArchiveError(ValueError):
 
 CHUNK_CHARS = 1 << 20  # 1M characters per read while streaming tweets.js
 
+# ── Limits on one archive (heuristics, listed in the PR) ──────────────────
+# Unpacked size of tweets.js. A real one is about 1.7 KB a tweet (the
+# owner's: 7.4 MB for 4,400 tweets), so 1 GB is about 600,000 tweets,
+# more than all but a handful of accounts ever wrote.
+MAX_TWEETS_JS_BYTES = 1024 * 1024 * 1024
+# Tweets (rows) one archive stashes for its import: above the 600,000 the
+# byte limit allows for real tweets.
+MAX_TWEET_ROWS = 1_000_000
+# Characters of one element of tweets.js. A real tweet with its entities
+# is a few KB.
+MAX_TWEET_ELEMENT_CHARS = 1024 * 1024
+# Bytes of one stash (the compact rows written for the confirm): a real
+# row is about 350 bytes, so this holds well over MAX_TWEET_ROWS of them.
+MAX_STASH_BYTES = 512 * 1024 * 1024
+# Characters of a tweet's date kept (rows and sort keys). The export's
+# dates are 30 ("Wed Aug 26 08:17:00 +0000 2026").
+MAX_CREATED_AT_CHARS = 64
+
+MSG_ARCHIVE_TOO_LARGE = (
+    "This archive holds more than Loore imports at once. Please contact "
+    "us if it is your own X export.")
+MSG_ARCHIVE_UNSUPPORTED = (
+    "tweets.js in this zip is compressed in a way Loore can't read. Please "
+    "upload the original Twitter/X data export.")
+
 
 def open_tweets_js(zip_source):
     """Return (ZipFile, text stream) for ``data/tweets.js`` inside an export
     zip; the caller closes the ZipFile. Raises TwitterArchiveError when
-    the archive is invalid or has no tweets.js."""
+    the archive is invalid, has no tweets.js, or is past the limits
+    above (the stream raises it while it is read)."""
     try:
-        zf = zipfile.ZipFile(zip_source, "r")
+        zf = archive_limits.open_zip(zip_source)
     except zipfile.BadZipFile:
         raise TwitterArchiveError("Invalid zip file")
-    for name in zf.namelist():
+    except archive_limits.ArchiveTooLarge:
+        raise TwitterArchiveError(MSG_ARCHIVE_TOO_LARGE)
+    for info in zf.infolist():
+        name = info.filename
         if name == "data/tweets.js" or name.endswith("/data/tweets.js"):
-            return zf, io.TextIOWrapper(zf.open(name), encoding="utf-8")
+            try:
+                archive_limits.check_member(info)
+            except archive_limits.UnsupportedMember:
+                zf.close()
+                raise TwitterArchiveError(MSG_ARCHIVE_UNSUPPORTED)
+            raw = _TweetsJsReader(zf.open(info), MAX_TWEETS_JS_BYTES)
+            return zf, io.TextIOWrapper(
+                io.BufferedReader(raw, buffer_size=CHUNK_CHARS),
+                encoding="utf-8")
     zf.close()
     raise TwitterArchiveError(
         "Could not find data/tweets.js in the zip archive. "
         "Please upload the original Twitter/X data export."
     )
+
+
+class _TweetsJsReader(archive_limits.BoundedReader):
+    """tweets.js read within MAX_TWEETS_JS_BYTES; past it, the message
+    the analyze step shows."""
+
+    def readinto(self, buf):
+        try:
+            return super().readinto(buf)
+        except archive_limits.ArchiveTooLarge:
+            raise TwitterArchiveError(MSG_ARCHIVE_TOO_LARGE)
 
 
 def read_tweets_js(zip_source):
@@ -112,6 +162,11 @@ def iter_tweets_stream(stream):
             except json.JSONDecodeError as e:
                 if eof:
                     raise TwitterArchiveError(f"Failed to parse tweets JSON: {e}")
+                if len(buf) - pos > MAX_TWEET_ELEMENT_CHARS:
+                    # Longer than any tweet, or not JSON from here on:
+                    # nothing past it is read.
+                    raise TwitterArchiveError(
+                        "Could not parse tweets.js — unexpected format.")
                 # Element (or the whitespace after it) may be cut off by the
                 # chunk boundary: drop what's consumed, read more, retry.
                 more = stream.read(CHUNK_CHARS)
@@ -125,6 +180,15 @@ def iter_tweets_stream(stream):
         return
 
 
+def _date_text(created_at):
+    """A row's date as text of at most MAX_CREATED_AT_CHARS characters
+    ("" when it is not text): the analyze step keeps one sort key per row
+    in memory, so its size must not depend on the archive."""
+    if not isinstance(created_at, str):
+        return ""
+    return created_at[:MAX_CREATED_AT_CHARS]
+
+
 def compact_row(tweet):
     """The subset of a raw tweet the import needs, or None for retweets."""
     full_text = tweet.get("full_text", "") or ""
@@ -133,7 +197,7 @@ def compact_row(tweet):
     return {
         "id_str": tweet.get("id_str", "") or "",
         "full_text": full_text,
-        "created_at": tweet.get("created_at", "") or "",
+        "created_at": _date_text(tweet.get("created_at")),
         "is_reply": bool(tweet.get("in_reply_to_status_id_str")),
         "in_reply_to_screen_name": tweet.get("in_reply_to_screen_name"),
         "favorite_count": int(tweet.get("favorite_count", 0) or 0),
@@ -168,6 +232,11 @@ def analyze_archive_to_stash(zip_source, path):
     copied into ``path`` in order via seek. Peak memory is therefore
     independent of the number of tweets except for the index tuples.
 
+    Held to MAX_TWEET_ROWS rows and MAX_STASH_BYTES written (and, while
+    reading, to the limits of open_tweets_js); past them
+    TwitterArchiveError. ``<path>.unsorted`` is removed however this
+    ends, and ``path`` too when it fails.
+
     Returns the summary dict for the confirm dialog.
     """
     zf, stream = open_tweets_js(zip_source)
@@ -175,27 +244,38 @@ def analyze_archive_to_stash(zip_source, path):
     index = []  # (sort_key, offset, length)
     counts = {"total": 0, "originals": 0, "skipped": 0,
               "tokens": 0, "original_tokens": 0, "size": 0}
-    with zf, open(tmp, "wb") as f:
-        for tweet in iter_tweets_stream(stream):
-            row = compact_row(tweet)
-            if row is None:
-                counts["skipped"] += 1
-                continue
-            line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
-            index.append((_sort_key(row["created_at"]), f.tell(), len(line)))
-            f.write(line)
-            counts["total"] += 1
-            counts["tokens"] += row["token_count"]
-            counts["size"] += len(row["full_text"].encode("utf-8"))
-            if not row["is_reply"]:
-                counts["originals"] += 1
-                counts["original_tokens"] += row["token_count"]
-    index.sort(key=lambda t: t[0])
-    with open(tmp, "rb") as src, open(path, "wb") as dst:
-        for _, offset, length in index:
-            src.seek(offset)
-            dst.write(src.read(length))
-    os.remove(tmp)
+    written = 0
+    done = False
+    try:
+        with zf, open(tmp, "wb") as f:
+            for tweet in iter_tweets_stream(stream):
+                row = compact_row(tweet)
+                if row is None:
+                    counts["skipped"] += 1
+                    continue
+                line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+                written += len(line)
+                if (counts["total"] >= MAX_TWEET_ROWS
+                        or written > MAX_STASH_BYTES):
+                    raise TwitterArchiveError(MSG_ARCHIVE_TOO_LARGE)
+                index.append((_sort_key(row["created_at"]), f.tell(), len(line)))
+                f.write(line)
+                counts["total"] += 1
+                counts["tokens"] += row["token_count"]
+                counts["size"] += len(row["full_text"].encode("utf-8"))
+                if not row["is_reply"]:
+                    counts["originals"] += 1
+                    counts["original_tokens"] += row["token_count"]
+        index.sort(key=lambda t: t[0])
+        with open(tmp, "rb") as src, open(path, "wb") as dst:
+            for _, offset, length in index:
+                src.seek(offset)
+                dst.write(src.read(length))
+        done = True
+    finally:
+        stash_delete(tmp)
+        if not done:
+            stash_delete(path)
     return {
         "total_tweets": counts["total"],
         "original_count": counts["originals"],
@@ -222,12 +302,13 @@ def _summarize(rows, skipped_retweets):
 
 def _sort_key(created_at):
     """Chronological key for the export's 'Wed Aug 26 08:17:00 +0000 2026'
-    strings; falls back to the raw string when unparseable."""
+    strings; falls back to the text (at most MAX_CREATED_AT_CHARS of it)
+    when unparseable."""
     from datetime import datetime
     try:
         return (0, datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y").timestamp())
     except (ValueError, TypeError):
-        return (1, created_at)
+        return (1, _date_text(created_at))
 
 
 # ---- stash ----------------------------------------------------------------
@@ -284,17 +365,97 @@ def stash_delete(path):
         pass
 
 
+# ---- one import per account ------------------------------------------------
+#
+# A confirm queues the import job and takes the account's key (a run lock in
+# Redis, utils/run_locks) for it; the job refreshes the key after every batch
+# and frees it when it ends. While the key is held, another confirm of the
+# same archive answers with the job's id and one of another archive is
+# refused. The key's value is "<task id>:<import token>".
+
+IMPORT_LOCK_KEY = "loore:twitter_import:{user_id}"
+# ── Heuristics (named here, listed in the PR) ─────────────────────────────
+# A confirmed import waits for the one heavy-job slot (utils/heavy_slot),
+# behind other accounts' heavy jobs; its key holds the account this long
+# before the job starts. A job still waiting after it lets another confirm
+# through, which then waits for the same slot (and a second import of the
+# same archive skips what the first created); a job whose message was lost
+# holds the account no longer than this.
+IMPORT_QUEUED_TTL = 30 * 60
+# Once running, the job refreshes its key every IMPORT_BEAT_SECONDS from a
+# thread, whatever step it is in; a job that was stopped frees the account
+# IMPORT_RUNNING_TTL after its last beat, and a confirm frees it at once
+# when Celery says the job ended, or when it started and has not beaten
+# for three beats (run_locks.job_over).
+IMPORT_RUNNING_TTL = 2 * 60
+IMPORT_BEAT_SECONDS = 20
+
+_UNKNOWN = object()
+
+
+def import_lock_key(user_id):
+    return IMPORT_LOCK_KEY.format(user_id=int(user_id))
+
+
+def import_lock_token(task_id, token):
+    return f"{task_id}:{token}"
+
+
+def running_import(user_id):
+    """{"task_id", "token"} of the account's queued or running import, or
+    None (also when Redis cannot be reached)."""
+    held = run_locks.holder(import_lock_key(user_id))
+    if not held:
+        return None
+    task_id, _, token = held.partition(":")
+    return {"task_id": task_id, "token": token}
+
+
+def import_job_over(user_id, running):
+    """Whether the import *running* (running_import) names is over though
+    its key is still there: it ended, or it was stopped while it ran."""
+    return run_locks.job_over(import_lock_key(user_id), running["task_id"],
+                              IMPORT_RUNNING_TTL, 3 * IMPORT_BEAT_SECONDS)
+
+
+def free_import_key(user_id, running):
+    """Free the account's key when it still names *running*."""
+    run_locks.free_if_held_by(
+        import_lock_key(user_id),
+        import_lock_token(running["task_id"], running["token"]))
+
+
+def drop_other_stashes(user_id, keep):
+    """One analyzed archive waiting per account: after a new analyze the
+    account's other stashes go (a cancelled dialog, a reload, an archive
+    analyzed again), except the one a queued or running import reads.
+    When that cannot be told (Redis unreachable) none go; the sweep
+    removes them after STASH_TTL_SECONDS."""
+    held = run_locks.holder(import_lock_key(user_id), unreachable=_UNKNOWN)
+    if held is _UNKNOWN:
+        return
+    keep_tokens = {keep}
+    if held:
+        keep_tokens.add(held.partition(":")[2])
+    for f in _user_dir(user_id).glob("*.jsonl"):
+        if f.name[:-len(".jsonl")] not in keep_tokens:
+            stash_delete(f)
+
+
 def sweep_expired(now=None):
-    """Remove stash files older than STASH_TTL (abandoned imports)."""
+    """Remove stash files older than STASH_TTL (abandoned imports), and
+    the ``.unsorted`` files of an analyze that never finished (its worker
+    stopped part-way)."""
     if not STASH_ROOT.exists():
         return
     now = now or time.time()
     for user_dir in STASH_ROOT.iterdir():
         if not user_dir.is_dir():
             continue
-        for f in user_dir.glob("*.jsonl"):
-            try:
-                if now - f.stat().st_mtime > STASH_TTL_SECONDS:
-                    f.unlink()
-            except OSError:
-                pass
+        for pattern in ("*.jsonl", "*.jsonl.unsorted"):
+            for f in user_dir.glob(pattern):
+                try:
+                    if now - f.stat().st_mtime > STASH_TTL_SECONDS:
+                        f.unlink()
+                except OSError:
+                    pass

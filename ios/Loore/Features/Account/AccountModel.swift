@@ -18,6 +18,8 @@ final class AccountModel {
         "linked": Message(kind: .success, text: "X connected. Sign in with X now opens this account."),
         "cancelled": Message(kind: .info, text: "X was not connected."),
         "failed": Message(kind: .error, text: "Could not read your X account. Please try again."),
+        // Started many times from this network (backend/oauth.py).
+        "wait": Message(kind: .error, text: "Connect X was started many times from this network. Please wait a few minutes, then try again."),
         "other_x": Message(kind: .error, text: "This account is already connected to a different X account."),
         "taken": Message(kind: .error, text: "That X account already signs in to another Loore account, so it can't be connected here. If that account was made by accident, write to info@loore.org and we'll remove it so you can connect X here."),
         "taken_placeholder": Message(kind: .error, text: "An account was set up for that X account, but it can't be opened now. Write to info@loore.org."),

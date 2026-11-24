@@ -32,7 +32,7 @@ from backend.utils.account_deletion import account_deletion_info
 from backend.utils.glean import glean_user_fields
 from backend.utils.profile_providers import (
     both_providers_answer, both_providers_ask, profile_provider,
-    set_both_providers)
+    search_kept_to_provider, set_both_providers)
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -162,6 +162,10 @@ def _serialize_current_user():
             current_user.profile_both_providers_answered_at),
         "profile_provider": profile_provider(current_user),
         "ask_both_providers": both_providers_ask(current_user),
+        # Search by meaning is off for an account that keeps to a
+        # provider other than the embedding model's: that provider's
+        # id, else null.
+        "search_kept_to_provider": search_kept_to_provider(current_user),
         # "Delete all my content" (#268): a scheduled deletion shows
         # its date and a way to cancel on every page.
         "data_deletion": deletion_status(current_user.id),

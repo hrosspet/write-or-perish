@@ -6,7 +6,10 @@ Design:
   helper the magic-link flow uses).
 - Scoped. A route declares the scope it needs; a token with another
   scope is refused. The clipper's scope, ``external:write``, can add
-  saved references and nothing else — a leaked token cannot read lore.
+  saved references and replace one saved before with a fuller copy of
+  the same page. It cannot read entries or the text of references; what
+  it gets back is what the extension shows: whether the page was new,
+  the username and the number of clipped pages.
 - ``token_or_login_required`` accepts a valid bearer token OR a normal
   session, so the same route serves the extension and the web app.
 """

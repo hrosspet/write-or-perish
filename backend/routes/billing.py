@@ -54,8 +54,10 @@ def _too_many(kind):
     try:
         billing_limits.check_and_count(current_user, kind)
     except billing_limits.TooManyBillingRequests:
-        message = (billing_limits.TOO_MANY_CHECKOUTS_MESSAGE
-                   if kind == "checkout" else "Please try again later.")
+        message = {
+            "checkout": billing_limits.TOO_MANY_CHECKOUTS_MESSAGE,
+            "portal": billing_limits.TOO_MANY_PORTALS_MESSAGE,
+        }.get(kind, "Please try again later.")
         return jsonify({"error": "too_many_requests",
                         "message": message}), 429
     return None
@@ -187,6 +189,9 @@ def open_portal():
     if not current_user.stripe_customer_id:
         return jsonify({"error": "no_subscription",
                         "message": "There is no subscription to manage."}), 409
+    too_many = _too_many("portal")
+    if too_many is not None:
+        return too_many
     try:
         session = stripe_billing.create_portal(
             stripe_billing.get_gateway(), current_user)

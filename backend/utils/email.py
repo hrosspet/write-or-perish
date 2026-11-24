@@ -384,6 +384,88 @@ def send_spend_alert_email(to_email, provider, spend_usd, limit_usd, threshold):
           "Failed to send spend alert email")
 
 
+def send_trials_started_email(to_email, trials, alert_above,
+                              trial_limit_usd=0, places=None, hold_from=0):
+    """Tell the admin that more accounts not prepared in advance started
+    a trial in the last 24 hours than OUTSIDE_TRIALS_EMAIL_PER_DAY
+    (utils/trial_alerts). *places*: those trials plus the new accounts let
+    in that have not started one yet; from *hold_from* places a new
+    account waits for approval. Counts only: no account is named."""
+    ceiling_line = (
+        f"Each trial can use up to ${trial_limit_usd:,.2f} of model cost "
+        f"before its first payment." if trial_limit_usd else "")
+    hold_line = (
+        f"New accounts let in or on a trial in the last 24 hours: "
+        f"{int(places)}. From {int(hold_from)}, a new account that was not "
+        f"prepared in advance waits for your approval (Users tab, "
+        f"Activate)." if hold_from and places is not None else "")
+    closing = ("Nothing was stopped or cancelled by this email. It is sent "
+               "at most once a day.")
+    lines = [
+        "Trials started",
+        "",
+        f"Trials started in the last 24 hours by accounts that were not "
+        f"prepared in advance: {trials}",
+        f"This email is sent above: {alert_above}",
+    ]
+    lines += [line for line in (ceiling_line, hold_line) if line]
+    lines += ["", closing,
+              "Review the new accounts in the admin dashboard: "
+              "https://loore.org/admin", ""]
+    text_body = "\n".join(lines)
+    paragraphs = [
+        f'<strong style="color: #c4956a;">{int(trials)}</strong> accounts '
+        f'that were not prepared in advance started a trial in the last '
+        f'24 hours\n'
+        f'      (this email is sent above '
+        f'<strong style="color: #ede8dd;">{int(alert_above)}</strong>).']
+    paragraphs += [line for line in (ceiling_line, hold_line) if line]
+    paragraphs.append(closing)
+    html_body = _card("Trials started", paragraphs,
+                      "Open admin dashboard", "https://loore.org/admin")
+    _send(to_email,
+          f"Loore: {int(trials)} trials started in the last 24 hours",
+          text_body, html_body,
+          f"Trials-started email sent ({int(trials)})",
+          "Failed to send trials-started email")
+
+
+def send_trials_hold_email(to_email, places, hold_from, trials, waiting):
+    """Tell the admin that the waiting list is in effect: a new account
+    that was not prepared in advance was held for approval, the first
+    one of this UTC day (utils/trial_alerts). Counts only: no account is
+    named."""
+    count_lines = [
+        f"New accounts let in or on a trial in the last 24 hours: "
+        f"{int(places)} (new ones wait from {int(hold_from)})",
+        f"Of them, trials started: {int(trials)}",
+        f"Accounts waiting for your approval now: {int(waiting)}",
+    ]
+    intro = ("A new account that was not prepared in advance was put on "
+             "the waiting list instead of going on to the trial. Until the "
+             "number falls below the limit, every new such account waits. "
+             "Accounts prepared in advance are let in as always.")
+    action = ("To let a waiting account in: admin dashboard, Users tab, "
+              "status \"Waiting\", Activate. It stays waiting until you do.")
+    switch = ("To stop holding new accounts: set "
+              "OUTSIDE_TRIALS_HOLD_PER_DAY=0 in the server's environment "
+              "and restart (a higher number raises the limit).")
+    closing = "This email is sent at most once a day."
+    text_body = "\n".join([
+        "The waiting list is in effect", "", intro, "", *count_lines, "",
+        action, switch, "", closing,
+        "Admin dashboard: https://loore.org/admin", ""])
+    html_body = _card(
+        "The waiting list is in effect",
+        [intro, "<br>".join(count_lines), action, switch, closing],
+        "Open admin dashboard", "https://loore.org/admin")
+    _send(to_email,
+          "Loore: new accounts are waiting for approval",
+          text_body, html_body,
+          f"Waiting-list email sent ({int(places)} places)",
+          "Failed to send waiting-list email")
+
+
 def send_disk_alert_email(to_email, percent, used_gb, total_gb, free_gb,
                           critical=False):
     """Alert the admin that the server disk is nearly full

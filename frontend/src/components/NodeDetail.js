@@ -1044,7 +1044,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       return res.data;
     }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, ai_usage, ...(chatModel && { model: chatModel }),
+      content, privacy_level, ai_usage, ...(chatModel && { model: chatModel }),
       auto_generate: autoGenerateActive,
     });
     return res.data;

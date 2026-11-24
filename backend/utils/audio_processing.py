@@ -8,13 +8,22 @@ import pathlib
 import re
 import tempfile
 import ffmpeg
-from pydub import AudioSegment
 from flask import current_app
+
+from backend.utils.recording_limits import MAX_UPLOAD_TRANSCRIBED_SECONDS
+from backend.utils.webm_utils import AUDIO_INPUT_FORMATS, INPUT_FORMAT_ARGS
 
 # OpenAI API limits
 OPENAI_MAX_AUDIO_BYTES = 25 * 1024 * 1024  # 25 MB
 OPENAI_MAX_DURATION_SEC = 1400  # ~23 minutes (OpenAI's actual limit)
 CHUNK_DURATION_SEC = 20 * 60  # 20 minutes per chunk
+
+# Heuristic: the most audio compress_audio_if_needed converts from a WAV or
+# FLAC file: one second past the longest audio any caller turns into text
+# (MAX_UPLOAD_TRANSCRIBED_SECONDS, four hours; a recorded chunk is far
+# shorter), so the measurement after it still sees a longer file as longer
+# and cuts it with its note. Its MP3 is at most about 230 MB on disk.
+COMPRESS_MAX_SECONDS = MAX_UPLOAD_TRANSCRIBED_SECONDS + 1
 
 
 def compress_audio_if_needed(file_path: pathlib.Path, logger=None) -> pathlib.Path:
@@ -23,7 +32,15 @@ def compress_audio_if_needed(file_path: pathlib.Path, logger=None) -> pathlib.Pa
     Never re-compress already compressed formats (MP3, M4A, WebM, etc.) as this causes quality loss.
     For large compressed files, skip compression and let chunking handle them.
     Returns path to compressed file, or original if no compression needed.
+
+    ffmpeg converts file to file, so the decoded audio never sits in this
+    process's memory (a small FLAC can decode to gigabytes). At most
+    COMPRESS_MAX_SECONDS of audio are converted, within
+    decode_timeout_seconds; when the conversion fails or runs out of time
+    the original is returned, and the length measurement and the split
+    into pieces after it handle the file.
     """
+    import subprocess
     if logger is None:
         logger = current_app.logger
 
@@ -37,30 +54,33 @@ def compress_audio_if_needed(file_path: pathlib.Path, logger=None) -> pathlib.Pa
         logger.info(f"Skipping compression for {file_path.name} ({ext}, {file_size / 1024 / 1024:.1f} MB) - already compressed or will be chunked")
         return file_path
 
+    logger.info(f"Compressing uncompressed audio file {file_path.name} (size: {file_size / 1024 / 1024:.1f} MB)")
+    compressed_path = file_path.with_suffix('.mp3')
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", *INPUT_FORMAT_ARGS,
+           "-i", str(file_path),
+           "-map", "0:a:0", "-vn", "-af", "asetpts=N/SR/TB",
+           "-t", str(COMPRESS_MAX_SECONDS),
+           "-c:a", "libmp3lame", "-b:a", str(PIECE_BITRATE),
+           str(compressed_path)]
     try:
-        logger.info(f"Compressing uncompressed audio file {file_path.name} (size: {file_size / 1024 / 1024:.1f} MB)")
-
-        audio = AudioSegment.from_file(str(file_path))
-        compressed_path = file_path.with_suffix('.mp3')
-
-        audio.export(
-            str(compressed_path),
-            format="mp3",
-            bitrate="128k",
-            parameters=["-q:a", "2"]
-        )
-
-        compressed_size = compressed_path.stat().st_size
-        logger.info(
-            f"Compressed {file_path.name}: {file_size / 1024 / 1024:.1f} MB -> "
-            f"{compressed_size / 1024 / 1024:.1f} MB"
-        )
-
-        return compressed_path
-
-    except Exception as e:
-        logger.error(f"Audio compression failed: {e}")
+        subprocess.run(cmd, check=True,
+                       timeout=decode_timeout_seconds(file_path),
+                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.error(f"Audio compression failed: {type(e).__name__}")
+        try:
+            compressed_path.unlink()
+        except OSError:
+            pass
         return file_path
+
+    compressed_size = compressed_path.stat().st_size
+    logger.info(
+        f"Compressed {file_path.name}: {file_size / 1024 / 1024:.1f} MB -> "
+        f"{compressed_size / 1024 / 1024:.1f} MB"
+    )
+    return compressed_path
 
 
 def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
@@ -77,7 +97,8 @@ def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
 
     try:
         # Use ffprobe to get duration - much faster than pydub for large files
-        probe = ffmpeg.probe(str(file_path))
+        probe = ffmpeg.probe(str(file_path),
+                             format_whitelist=AUDIO_INPUT_FORMATS)
         return float(probe['format']['duration'])
     except (ffmpeg.Error, KeyError, TypeError) as e:
         logger.warning(f"ffprobe failed to get duration directly: {e}")
@@ -91,7 +112,8 @@ def get_audio_duration(file_path: pathlib.Path, logger=None) -> float:
         try:
             import subprocess
             result = subprocess.run(
-                ['ffmpeg', '-y', '-i', str(file_path), '-c', 'copy', temp_path],
+                ['ffmpeg', '-y', *INPUT_FORMAT_ARGS, '-i', str(file_path),
+                 '-c', 'copy', temp_path],
                 capture_output=True, text=True, timeout=120
             )
             if result.returncode == 0:
@@ -141,7 +163,8 @@ def chunk_audio(file_path: pathlib.Path, chunk_duration_sec: int = CHUNK_DURATIO
             try:
                 (
                     ffmpeg
-                    .input(str(file_path), ss=start_time, t=chunk_duration_sec)
+                    .input(str(file_path), ss=start_time, t=chunk_duration_sec,
+                           format_whitelist=AUDIO_INPUT_FORMATS)
                     .output(temp_file.name, acodec='libmp3lame', audio_bitrate='128k', format='mp3', q='2')
                     .overwrite_output()
                     .run(capture_stdout=True, capture_stderr=True, quiet=True)
@@ -527,7 +550,8 @@ def _count_decoded(file_path, timeout_seconds, stop_after=None):
     "failed" (ffmpeg missing, or a nonzero exit)."""
     import subprocess
     import threading
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(file_path),
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", *INPUT_FORMAT_ARGS,
+           "-i", str(file_path),
            "-map", "0:a:0", "-ac", "1", "-ar", str(DECODE_COUNT_RATE),
            "-f", "s16le", "-"]
     try:
@@ -604,7 +628,8 @@ def container_seconds(file_path, timeout_seconds=10):
     import subprocess
     try:
         out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            ["ffprobe", "-v", "error", *INPUT_FORMAT_ARGS,
+             "-show_entries", "format=duration",
              "-of", "csv=p=0", str(file_path)],
             capture_output=True, text=True, timeout=timeout_seconds)
         return float(out.stdout.strip())
@@ -688,7 +713,8 @@ def split_audio_for_transcription(file_path, piece_seconds, limit_seconds,
         edge += piece_seconds
     bounds.append(limit_seconds)
     out_dir = tempfile.mkdtemp(prefix="pieces_")
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-i", str(file_path),
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", *INPUT_FORMAT_ARGS,
+           "-i", str(file_path),
            "-map", "0:a:0", "-vn", "-af", "asetpts=N/SR/TB",
            "-t", str(limit_seconds + 1),
            "-c:a", "libmp3lame", "-b:a", str(PIECE_BITRATE),

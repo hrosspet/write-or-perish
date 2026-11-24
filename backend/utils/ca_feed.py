@@ -69,6 +69,8 @@ import logging
 import re
 from datetime import datetime, timedelta, timezone
 
+from backend.utils.tool_record import entry_names
+
 log = logging.getLogger(__name__)
 
 MAX_PICKS = 20
@@ -241,8 +243,8 @@ def is_read_reply(node):
     is the one shape this misses)."""
     if node is None or not (node.node_type == "llm" or node.llm_model):
         return False
-    if '"_batch"' in (node.tool_calls_meta or ""):
-        return True  # no query
+    if "_batch" in entry_names(node):
+        return True  # no query, nothing decrypted
     if getattr(node, "feed_render", None) is not None:
         return True
     return has_read_picks(node)
@@ -290,7 +292,7 @@ def read_reply_ids(node_chain):
     if not llm_ids:
         return frozenset()
     found = {n.id for n in node_chain
-             if n.id in llm_ids and '"_batch"' in (n.tool_calls_meta or "")}
+             if n.id in llm_ids and "_batch" in entry_names(n)}
     rest = [i for i in llm_ids if i not in found]
     if rest:
         found.update(r[0] for r in db.session.query(FeedRender.node_id)

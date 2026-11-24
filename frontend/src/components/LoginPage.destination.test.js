@@ -104,6 +104,7 @@ test('control: signed in already, the page it was asked for opens', async () => 
 test.each([
   ['x_cancelled', 'Sign in with X was cancelled.'],
   ['x_failed', 'Sign in with X did not finish. Please try again.'],
+  ['x_wait', 'Sign in with X was started many times from this network. Please wait a few minutes, then try again.'],
 ])('back from X without a sign-in (%s): said, and the way on is kept', (code, text) => {
   renderAt(`/login?error=${code}&returnUrl=${encodeURIComponent('/node/5')}`);
   expect(screen.getByText(text)).toBeInTheDocument();

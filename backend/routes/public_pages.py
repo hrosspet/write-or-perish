@@ -23,17 +23,25 @@ from xml.sax.saxutils import escape as xml_escape
 
 from flask import Blueprint, Response, current_app, redirect, request
 from markupsafe import escape
+from sqlalchemy import func
 
 from backend.extensions import db
 from backend.models import Node, ShareDraft, User
 from backend.routes.commons import (
     MAX_THREAD_NODES,
+    PUBLIC_LISTING_PAGE_SIZE,
     _public_alive,
     _publicly_visible,
     _serialize_public_subtree,
+    listing_page,
+    public_root_order,
 )
 from backend.utils import public_cache
+from backend.utils.public_threads import (
+    card_entries, public_prompt_roots, public_root_of, thread_top_filter,
+)
 from backend.utils.public_html import (
+    RenderBudget,
     base_url,
     plain_excerpt,
     render_markdown,
@@ -43,6 +51,12 @@ from backend.utils.public_html import (
 from backend.utils.timefmt import iso_utc
 
 public_pages_bp = Blueprint("public_pages", __name__)
+
+# INTRODUCED CONSTANT: entries in a person's Atom feed, the newest
+# (pinned first, as on the profile). Feed readers poll for new entries;
+# 20 covers any reader's gap between polls, and an account with 20
+# pieces or fewer has its whole list in the feed, as before.
+FEED_ENTRIES = 20
 
 
 def _enabled():
@@ -91,15 +105,25 @@ def _not_found(e):
 
 def _cached(render_fn, cacheable_statuses=(200, 410)):
     """Serve request.path from the Redis page cache, else render and
-    cache. Bounds KMS decrypt cost under crawler traffic."""
+    cache. Bounds KMS decrypt cost under crawler traffic. A response
+    marked no-store is not cached."""
     hit = public_cache.get(request.path)
     if hit:
         status, content_type, body = hit
         return Response(body, status=status, mimetype=content_type)
     resp = render_fn()
-    if resp.status_code in cacheable_statuses:
+    if (resp.status_code in cacheable_statuses
+            and not resp.cache_control.no_store):
         public_cache.put(request.path, resp.status_code,
                          resp.mimetype, resp.get_data(as_text=True))
+    return resp
+
+
+def _uncached(resp):
+    """*resp*, kept out of the page cache (and browser caches): an answer
+    for one spelling of a URL whose other spellings answer the same, so
+    that each spelling does not get an entry of its own."""
+    resp.headers["Cache-Control"] = "no-store"
     return resp
 
 
@@ -110,15 +134,7 @@ def _cached(render_fn, cacheable_statuses=(200, 410)):
 def _public_root_of(node):
     """Walk up to the nearest public living root (same rule as the
     commons thread endpoint)."""
-    root = node
-    visited = set()
-    while root.parent_id and root.id not in visited:
-        visited.add(root.id)
-        parent = Node.query.get(root.parent_id)
-        if not _publicly_visible(parent):
-            break
-        root = parent
-    return root
+    return public_root_of(node, _publicly_visible)
 
 
 def _published_at(root):
@@ -138,12 +154,22 @@ def _display_author(item):
     return f"@{name}" if name else "anonymous"
 
 
-def _render_reply(item):
+def _render_reply(item, budget, piece_author):
+    """A reply and its replies, while the page's RenderBudget has room
+    for their text; the rest of the thread is left to the app. A reply
+    by someone other than *piece_author* (the username of the piece's
+    author; for an AI reply, of whoever asked for it) is rendered as a
+    guest's: its links are not followed by search engines."""
+    content = item.get("content") or ""
+    if not budget.take(content):
+        return ""
     author = escape(_display_author(item))
     when = item.get("created_at") or ""
     date = when[:10]
-    body = render_markdown(item.get("content") or "")
-    children = "".join(_render_reply(c) for c in item.get("children", []))
+    body = render_markdown(content, budget, node_id=item.get("id"),
+                           guest_reply=item.get("username") != piece_author)
+    children = "".join(_render_reply(c, budget, piece_author)
+                       for c in item.get("children", []))
     if children:
         children = f'<div class="ssr-children">{children}</div>'
     return (f"<article><header>{author}"
@@ -166,6 +192,8 @@ def _article_document(root, author_user):
     published = _published_at(root)
     modified = root.updated_at or published
 
+    budget = RenderBudget()
+    budget.take(body_md)
     parts = ["<article>"]
     parts.append(f"<h1>{escape(title)}</h1>")
     parts.append(
@@ -174,10 +202,10 @@ def _article_document(root, author_user):
             escape(profile_url), escape(username),
             escape(iso_utc(published) or ""),
             escape((iso_utc(published) or "")[:10])))
-    parts.append(render_markdown(body_md))
+    parts.append(render_markdown(body_md, budget, node_id=root.id))
     if replies:
         parts.append('<section aria-label="Replies"><h2>Replies</h2>')
-        parts.extend(_render_reply(r) for r in replies)
+        parts.extend(_render_reply(r, budget, username) for r in replies)
         parts.append("</section>")
     parts.append("</article>")
 
@@ -242,19 +270,36 @@ def _article_document(root, author_user):
     return "".join(parts), meta
 
 
-def _public_roots_for(user):
-    """The user's living public root nodes, pinned first then newest —
-    the same set the public JSON API serves."""
-    nodes = _public_alive(Node.query.filter(
-        Node.parent_id.is_(None),
+def _public_roots_query(user, prompt_roots, query=None):
+    """The user's living public thread tops (roots, and the public first
+    entry under a private prompt root: utils/public_threads) — the same
+    set the public JSON API serves. *prompt_roots* is the user's
+    public_prompt_roots(): a public prompt root without a card is left
+    out, and one with a card shows it (card_entries). *query* selects
+    what to read (default: whole rows)."""
+    query = query if query is not None else Node.query
+    return _public_alive(query.filter(
+        thread_top_filter(prompt_roots.bare),
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
-    )).all()
-    nodes.sort(key=lambda n: (
-        n.pinned_at is None,
-        -(n.pinned_at.timestamp() if n.pinned_at else 0),
-        -(n.created_at.timestamp() if n.created_at else 0),
     ))
-    return nodes
+
+
+def _public_roots_for(user, prompt_roots, limit, offset=0, slugged=False):
+    """At most *limit* of the user's public roots from *offset* on,
+    pinned first then newest; *slugged*: only those with a permalink to
+    link by (PromptRoots.link_slug: a prompt root's card's, else its
+    own)."""
+    query = _public_roots_query(user, prompt_roots)
+    if slugged:
+        query = query.filter(prompt_roots.linked_filter())
+    return (query.order_by(*public_root_order())
+            .offset(offset).limit(limit).all())
+
+
+def _has_public_roots(user):
+    return _public_roots_query(
+        user, public_prompt_roots(user.id),
+        db.session.query(Node.id).select_from(Node)).first() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -294,29 +339,48 @@ def author_feed(username):
 
 def _render_author_feed(username):
     user, moved = _author(username)
-    roots = _public_roots_for(user) if user else []
-    if not roots:
+    count, updated = 0, None
+    prompt_roots = public_prompt_roots(user.id) if user else None
+    if user:
+        # Over every public root (as before the feed held FEED_ENTRIES):
+        # whether there is a feed, and when anything in it last changed.
+        count, updated = _public_roots_query(
+            user, prompt_roots, db.session.query(
+                func.count(Node.id),
+                func.max(func.coalesce(Node.updated_at, Node.created_at)),
+            ).select_from(Node)).one()
+    if not count:
         return Response("Not found", status=404, mimetype="text/plain")
     if moved:
         return _canonical_redirect(f"/@{user.username}/feed.xml")
     origin = base_url()
     feed_url = f"{origin}/@{username}/feed.xml"
-    updated = max((r.updated_at or r.created_at) for r in roots)
     entries = []
+    budget = RenderBudget()
+    roots = _public_roots_for(user, prompt_roots, FEED_ENTRIES, slugged=True)
+    cards = card_entries(roots, prompt_roots)
     for root in roots:
-        if not root.public_slug:
-            continue
-        content = root.get_content() or ""
+        # A public prompt root's entry is its card's (utils/public_threads).
+        card = cards.get(root.id)
+        shown = card or root
+        content = shown.get_content() or ""
         title, body_md = split_title(content)
-        link = f"{origin}/@{username}/{root.public_slug}"
+        if not budget.take(body_md):
+            break
+        link = (f"{origin}/@{username}/"
+                f"{prompt_roots.link_slug(root.id, root.public_slug)}")
+        changed = max(n.updated_at or n.created_at for n in (root, shown))
+        # A card's edit counts as a change of the feed too.
+        if not isinstance(updated, datetime) or changed > updated:
+            updated = changed
         entries.append(
             "<entry>"
             f"<title>{xml_escape(title)}</title>"
             f'<link rel="alternate" type="text/html" href="{xml_escape(link)}"/>'
             f"<id>{xml_escape(link)}</id>"
             f"<published>{xml_escape(iso_utc(_published_at(root)) or '')}</published>"
-            f"<updated>{xml_escape(iso_utc(root.updated_at or root.created_at) or '')}</updated>"
-            f'<content type="html">{xml_escape(render_markdown(body_md))}</content>'
+            f"<updated>{xml_escape(iso_utc(changed) or '')}</updated>"
+            f'<content type="html">{xml_escape(render_markdown(body_md, budget, node_id=shown.id))}</content>'
             "</entry>")
     feed = (
         '<?xml version="1.0" encoding="utf-8"?>'
@@ -356,7 +420,7 @@ def profile_og_image(username):
     if not _enabled():
         return Response("Not found", status=404, mimetype="text/plain")
     user, moved = _author(username)
-    if user is None or not _public_roots_for(user):
+    if user is None or not _has_public_roots(user):
         return Response("Not found", status=404, mimetype="text/plain")
     if moved:
         return _canonical_redirect(f"/@{user.username}/og.png")
@@ -405,10 +469,18 @@ def _resolve_permalink(username, slug):
     return user, None, tombstoned, False
 
 
+def _gone(resp, user, username):
+    """The 410 of a tombstone, cached only under the handle's own
+    spelling (another letter case answers the same, uncached)."""
+    return resp if username == user.username else _uncached(resp)
+
+
 def _render_article(username, slug):
     user, node, tombstoned, moved = _resolve_permalink(username, slug)
     if node is None:
-        return _shell_410() if tombstoned else _shell_404()
+        if tombstoned:
+            return _gone(_shell_410(), user, username)
+        return _shell_404()
     if moved:
         return _canonical_redirect(f"/@{user.username}/{slug}")
     body, meta = _article_document(node, user)
@@ -418,8 +490,10 @@ def _render_article(username, slug):
 def _render_article_md(username, slug):
     user, node, tombstoned, moved = _resolve_permalink(username, slug)
     if node is None:
-        status = 410 if tombstoned else 404
-        return Response("Not found", status=status, mimetype="text/plain")
+        if tombstoned:
+            return _gone(Response("Not found", status=410,
+                                  mimetype="text/plain"), user, username)
+        return Response("Not found", status=404, mimetype="text/plain")
     if moved:
         return _canonical_redirect(f"/@{user.username}/{slug}.md")
     content = (node.get_content() or "").strip()
@@ -431,35 +505,54 @@ def _render_article_md(username, slug):
 
 @public_pages_bp.route("/@<username>")
 def profile(username):
+    """The newest PUBLIC_LISTING_PAGE_SIZE pieces; ?page=N for older
+    ones. The page cache holds the first page only (it is keyed by path),
+    so the later ones render on each request, a page's worth at most."""
     if not _enabled():
         return _shell_404()
-    return _cached(lambda: _render_profile(username))
+    page = listing_page()
+    if page > 1:
+        return _render_profile(username, page)
+    return _cached(lambda: _render_profile(username, 1))
 
 
-def _render_profile(username):
+def _render_profile(username, page):
     user, moved = _author(username)
-    roots = _public_roots_for(user) if user else []
+    size = PUBLIC_LISTING_PAGE_SIZE
+    prompt_roots = public_prompt_roots(user.id) if user else None
+    roots = (_public_roots_for(user, prompt_roots, size + 1,
+                               offset=(page - 1) * size)
+             if user else [])
+    has_older = len(roots) > size
+    roots = roots[:size]
     # A user with nothing public is indistinguishable from a user that
     # doesn't exist — same as the JSON API's 404 parity. That holds for a
     # former handle too (#253): it redirects only to a page that renders.
+    # A page past the last one is not found either.
     if not roots:
         return _shell_404()
     if moved:
         return _canonical_redirect(f"/@{user.username}")
     origin = base_url()
     canonical = f"{origin}/@{username}"
+    page_url = canonical if page == 1 else f"{canonical}?page={page}"
     parts = [f"<h1>@{escape(username)}</h1>",
              '<section aria-label="Published pieces">']
+    cards = card_entries(roots, prompt_roots)
     for root in roots:
-        content = root.get_content() or ""
+        # A public prompt root's card shows its owner's first public
+        # entry under it, not the prompt (utils/public_threads).
+        card = cards.get(root.id)
+        content = (card or root).get_content() or ""
         title, body_md = split_title(content)
         preview = plain_excerpt(body_md or content, limit=300)
         when = iso_utc(_published_at(root)) or ""
+        slug = prompt_roots.link_slug(root.id, root.public_slug)
         parts.append("<article>")
-        if root.public_slug:
+        if slug:
             parts.append(
                 f'<h2><a href="{escape(origin)}/@{escape(username)}/'
-                f'{escape(root.public_slug)}">{escape(title)}</a></h2>')
+                f'{escape(slug)}">{escape(title)}</a></h2>')
         else:
             parts.append(f"<h2>{escape(title)}</h2>")
         parts.append(
@@ -468,13 +561,17 @@ def _render_profile(username):
         parts.append(f"<p>{escape(preview)}</p>")
         parts.append("</article>")
     parts.append("</section>")
+    if has_older:
+        parts.append(
+            f'<nav><a href="{escape(canonical)}?page={page + 1}">'
+            "Older entries</a></nav>")
 
     description = f"Writing published by @{username} on Loore."
     meta = {
         "title": f"@{username} — Loore",
         "og_title": f"@{username}",
         "description": description,
-        "canonical": canonical,
+        "canonical": page_url,
         "og_type": "profile",
         "image": f"{canonical}/og.png",
         "image_alt": f"@{username} on Loore",
@@ -495,6 +592,12 @@ def _render_profile(username):
             },
         },
     }
+    if page > 1:
+        # The app shows a profile from its first page whatever ?page says,
+        # so a later page is for readers without JavaScript and crawlers
+        # walking "Older entries": followed, not indexed. Every piece has
+        # its own indexed page and sitemap entry.
+        meta["robots"] = "noindex, follow"
     return _html(render_page(meta, "".join(parts)))
 
 
@@ -503,9 +606,16 @@ def node_page(node_id):
     """/node/<id> is the id-addressed public thread URL. Public nodes get
     SSR with a canonical pointing at the pretty permalink; everything
     else gets the plain app shell (the SPA handles members' private
-    views) with a 404 status and noindex."""
+    views) with a 404 status and noindex.
+
+    One URL per node: another spelling of the id (leading zeros) is
+    redirected to it before the cache, so it never gets a cache entry of
+    its own, one that a takedown's cache drop would miss."""
     if not _enabled():
         return _shell_404()
+    canonical = f"/node/{node_id}"
+    if request.path != canonical:
+        return _canonical_redirect(canonical)
     return _cached(lambda: _render_node_page(node_id))
 
 
@@ -539,19 +649,24 @@ def _render_sitemap():
     urls = [(f"{origin}{p}" if p != "/" else origin, None)
             for p in _MARKETING_PATHS]
     if _enabled():
+        # Each thread top by the slug its card links to
+        # (PromptRoots.link_slug: a public prompt root's card's, else its
+        # own).
+        prompt_roots = public_prompt_roots()
         rows = (db.session.query(
-                    User.username, Node.public_slug, Node.updated_at,
-                    Node.created_at)
+                    User.username, Node.id, Node.public_slug,
+                    Node.updated_at, Node.created_at)
                 .join(User, User.id == Node.human_owner_id)
-                .filter(Node.parent_id.is_(None),
+                .filter(thread_top_filter(prompt_roots.bare),
                         Node.privacy_level == "public",
                         Node.deleted_at.is_(None),
-                        Node.public_slug.isnot(None),
+                        prompt_roots.linked_filter(),
                         User.public_sharing_enabled.is_(True),
                         User.deleted_at.is_(None))
                 .all())
         profiles = {}
-        for username, slug, updated_at, created_at in rows:
+        for username, top_id, own_slug, updated_at, created_at in rows:
+            slug = prompt_roots.link_slug(top_id, own_slug)
             lastmod = updated_at or created_at
             urls.append((f"{origin}/@{username}/{slug}", lastmod))
             prev = profiles.get(username)

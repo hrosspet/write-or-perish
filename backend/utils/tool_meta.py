@@ -57,8 +57,17 @@ def tool_calls_meta_for(node, viewer_id):
     else, admins included, gets each entry's SHARED_TOOL_FIELDS only.
     Nobody gets the app marker (utils/client_platform)."""
     from backend.utils.client_platform import without_client_marker
-    if not node.tool_calls_meta:
+    from backend.utils.tool_record import shown_exactly
+    if not node.tool_calls_meta_stored:
         return None
+    owner = viewer_id is not None \
+        and (node.human_owner_id or node.user_id) == viewer_id
+    if not owner:
+        # The stored value repeats these fields beside the encrypted
+        # record, so another viewer's answer decrypts nothing.
+        shown = shown_exactly(node.tool_calls_meta_stored)
+        if shown is not None:
+            return without_client_marker(shown)
     try:
         meta = json.loads(node.tool_calls_meta)
     except (json.JSONDecodeError, TypeError):
@@ -66,8 +75,7 @@ def tool_calls_meta_for(node, viewer_id):
     if not isinstance(meta, list):
         return None
     meta = without_client_marker(meta)
-    if viewer_id is not None \
-            and (node.human_owner_id or node.user_id) == viewer_id:
+    if owner:
         return meta
     return [{k: m[k] for k in SHARED_TOOL_FIELDS if k in m}
             for m in meta if isinstance(m, dict)]

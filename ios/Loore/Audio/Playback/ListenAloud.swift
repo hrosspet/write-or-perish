@@ -225,7 +225,7 @@ extension AudioCenter {
         } catch {
             guard !Task.isCancelled else { return }
             log.error("no playable copy of a WebM recording")
-            appState?.toasts.show(ListenFormats.webMMessage, duration: 6)
+            appState?.toasts.show(ListenFormats.convertedRecordingMessage(for: error), duration: 6)
         }
     }
 
@@ -266,6 +266,18 @@ enum ListenFailure {
 /// decode (map C §10.7).
 enum ListenFormats {
     static let webMMessage = "This recording is in WebM/Opus, which the app can't play."
+
+    /// The toast when the server's MP3 of a WebM recording could not be
+    /// fetched: the server's words for a refusal that carries a code (429
+    /// `download_busy`: another download is being prepared), else
+    /// `webMMessage`.
+    static func convertedRecordingMessage(for error: Error) -> String {
+        if let apiError = error as? APIError, apiError.code != nil,
+           let words = apiError.serverMessage {
+            return words
+        }
+        return webMMessage
+    }
 
     static func isWebM(_ url: String) -> Bool {
         let path = (url.split(separator: "?").first.map(String.init) ?? url).lowercased()

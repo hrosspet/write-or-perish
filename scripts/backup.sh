@@ -115,9 +115,12 @@ MEDIA_DEST="${DEST}/media/${PERIOD}"
 #   one about to be replaced, being assembled, or an ffmpeg temp file. The
 #   .legacy_backup rollback copies of backend/scripts/backfill_legacy_chunks.py
 #   are skipped too (they are never served).
-# Encryption is on under the rule of is_encryption_enabled() in
-# backend/utils/encryption.py: GCP_KMS_KEY_NAME set, ENCRYPTION_DISABLED not
-# true/1/yes. With it off, every stored file is plain and is backed up.
+# Encryption is on when GCP_KMS_KEY_NAME is set and ENCRYPTION_DISABLED is
+# not true/1/yes. With it off, every stored file is plain and is backed up.
+# The app itself (encryption_choice() in backend/utils/encryption.py) does
+# not start when encryption is not turned off and no key name is set; this
+# script only chooses which files to copy, and in that case it keeps every
+# file.
 MEDIA_EXCLUDE_TRANSIENT='^(drafts|chunks|streaming)/.*'
 MEDIA_EXCLUDE_PLAINTEXT='.*(?<!\.enc)$'
 ENC_ONLY=false

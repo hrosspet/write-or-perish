@@ -30,10 +30,33 @@ struct AuthenticatedWebView: UIViewRepresentable {
     /// Decide on each navigation (e.g. detect the final `?x_login=` URL). Return
     /// `.cancel` to stop it. Default: allow everything.
     var decide: ((URL) -> WKNavigationActionPolicy)?
+    /// When set, the page stays on these hosts: a web link to any other host is
+    /// not loaded here but handed to `onLeave` (`leaves`). Frames inside a page
+    /// are not affected.
+    var stayOnHosts: Set<String>?
+    /// Other sites a flow the page itself starts goes through and comes back
+    /// from (`SessionWebFlowHosts`): the page stays in the view there too, over
+    /// https only.
+    var flowHosts: Set<String> = []
+    var onLeave: (URL) -> Void = { _ in }
     @Binding var isLoading: Bool
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(decide: decide, isLoading: $isLoading)
+        Coordinator(decide: decide, stayOnHosts: stayOnHosts, flowHosts: flowHosts, onLeave: onLeave,
+                    isLoading: $isLoading)
+    }
+
+    /// Whether a navigation takes the page (not a frame inside it) to a web
+    /// address outside `hosts` and `flowHosts`. `inFrame`: the navigation is for
+    /// a frame inside the page. Other schemes (about:, blob:, data:) are not web
+    /// addresses. `flowHosts` count over https only; hosts match exactly.
+    static func leaves(_ url: URL, inFrame: Bool, hosts: Set<String>, flowHosts: Set<String> = []) -> Bool {
+        guard !inFrame, let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+            return false
+        }
+        guard let host = url.host?.lowercased() else { return true }
+        if hosts.contains(host) { return false }
+        return !(scheme == "https" && flowHosts.contains(host))
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -61,15 +84,30 @@ struct AuthenticatedWebView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         let decide: ((URL) -> WKNavigationActionPolicy)?
+        let stayOnHosts: Set<String>?
+        let flowHosts: Set<String>
+        let onLeave: (URL) -> Void
         @Binding var isLoading: Bool
 
-        init(decide: ((URL) -> WKNavigationActionPolicy)?, isLoading: Binding<Bool>) {
+        init(decide: ((URL) -> WKNavigationActionPolicy)?, stayOnHosts: Set<String>?, flowHosts: Set<String>,
+             onLeave: @escaping (URL) -> Void, isLoading: Binding<Bool>) {
             self.decide = decide
+            self.stayOnHosts = stayOnHosts
+            self.flowHosts = flowHosts
+            self.onLeave = onLeave
             _isLoading = isLoading
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            // No target frame: a link that asks for a new window.
+            if let url = navigationAction.request.url, let stayOnHosts,
+               AuthenticatedWebView.leaves(url, inFrame: navigationAction.targetFrame?.isMainFrame == false,
+                                           hosts: stayOnHosts, flowHosts: flowHosts) {
+                decisionHandler(.cancel)
+                onLeave(url)
+                return
+            }
             guard let url = navigationAction.request.url, let decide else {
                 decisionHandler(.allow)
                 return
@@ -95,10 +133,33 @@ struct AuthenticatedWebView: UIViewRepresentable {
     }
 }
 
+/// Sites outside Loore that a signed-in web page sends the person through and
+/// that send them back to Loore: the round trip completes inside the web view,
+/// where the session is. Exact hosts, https only; any other site opens in the
+/// system browser.
+enum SessionWebFlowHosts {
+    /// Subscribing on the web Account page: the page Stripe gives for a checkout
+    /// session (`create_checkout_session`, backend/utils/stripe_billing.py).
+    static let stripeCheckout = "checkout.stripe.com"
+    /// "Manage subscription" on the web Account page: the page Stripe gives for
+    /// a billing portal session (`create_portal_session`, same file).
+    static let stripeBillingPortal = "billing.stripe.com"
+    /// Connect X on the web Import page: where the backend sends the browser
+    /// (`X_AUTHORIZE_URL`, backend/routes/external.py).
+    static let xAuthorize = "twitter.com"
+    /// Connect X: the host X itself continues the authorisation on (twitter.com
+    /// redirects there).
+    static let xAuthorizeContinued = "x.com"
+
+    static let all: Set<String> = [stripeCheckout, stripeBillingPortal, xAuthorize, xAuthorizeContinued]
+}
+
 /// The sheet that hosts a `WebPresentation`.
 struct WebPresentationView: View {
     let presentation: WebPresentation
     let cookies: [HTTPCookie]
+    /// The signed-in page stays on Loore's own hosts; other sites open in the browser.
+    let sessionHosts: Set<String>
     @Environment(\.dismiss) private var dismiss
     @State private var isLoading = true
 
@@ -109,7 +170,11 @@ struct WebPresentationView: View {
                 .ignoresSafeArea()
         case .authenticated:
             NavigationStack {
-                AuthenticatedWebView(url: presentation.url, cookies: cookies, isLoading: $isLoading)
+                AuthenticatedWebView(url: presentation.url, cookies: cookies,
+                                     stayOnHosts: sessionHosts,
+                                     flowHosts: SessionWebFlowHosts.all,
+                                     onLeave: { UIApplication.shared.open($0) },
+                                     isLoading: $isLoading)
                     .ignoresSafeArea(edges: .bottom)
                     .navigationTitle(presentation.title ?? "")
                     .navigationBarTitleDisplayMode(.inline)

@@ -37,7 +37,7 @@ from backend.utils.audio_processing import (
 )
 from backend.utils import recording_limits
 from backend.utils.audio_storage import (
-    move_session_audio_to_node, storage_path,
+    claim_and_queue_chunks, move_session_audio_to_node, storage_path,
 )
 from backend.utils.webm_utils import (
     audio_work_deadline, concat_fragmented_media,
@@ -311,22 +311,14 @@ def _queue_follow_up(session_id, chunk_indices, follow_up):
 
 
 def queue_batches(session_id, stored_chunks):
-    """Queue *stored_chunks* (rows, in index order) for transcription in
-    batches of at most recording_limits.BATCH_CHUNKS, marking each chunk
-    'processing' with its batch's task id. The caller commits. Returns the
-    task ids."""
-    task_ids = []
-    size = recording_limits.BATCH_CHUNKS
-    for start in range(0, len(stored_chunks), size):
-        batch = stored_chunks[start:start + size]
-        task = transcribe_chunk_batch.delay(
-            session_id=session_id,
-            chunk_indices=[c.chunk_index for c in batch])
-        for c in batch:
-            c.status = 'processing'
-            c.task_id = task.id
-        task_ids.append(task.id)
-    return task_ids
+    """Queue *stored_chunks* (rows read as 'stored', in index order) for
+    transcription in batches of at most recording_limits.BATCH_CHUNKS,
+    each chunk claimed ('stored' to 'processing') before it is queued, as
+    the chunk route and /transcribe-remaining do
+    (utils/audio_storage.claim_and_queue_chunks): a chunk one of them
+    queued meanwhile is not queued again. Commits. Returns the task ids."""
+    return claim_and_queue_chunks(session_id, stored_chunks,
+                                  transcribe_chunk_batch)
 
 
 def _note_measured(chunk_records, seconds):
@@ -961,9 +953,12 @@ class BatchTranscriptionTask(Task):
 
         if session_id and chunk_indices:
             with flask_app.app_context():
+                # A chunk another run already turned into text keeps it,
+                # as in the task's own except block.
                 NodeTranscriptChunk.query.filter(
                     NodeTranscriptChunk.session_id == session_id,
-                    NodeTranscriptChunk.chunk_index.in_(chunk_indices)
+                    NodeTranscriptChunk.chunk_index.in_(chunk_indices),
+                    NodeTranscriptChunk.status != 'completed',
                 ).update({
                     'status': 'failed',
                     'error': TRANSCRIPTION_FAILED_TEXT,
@@ -1972,8 +1967,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     from backend.models import Node, User
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.llm_nodes import (
-        AIUsageRefused, ReadOnlyModelRefused, create_llm_placeholder,
-        enqueue_reply_job, reply_ai_usage,
+        AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
+        create_llm_placeholder, enqueue_reply_job, reply_ai_usage,
     )
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.tasks.llm_completion import generate_llm_response
@@ -2096,6 +2091,8 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
     # ThreadTooLong the same way (#648): the thread grew past the limit
     # with this recording; it is kept, and the Voice screen says aloud why
     # no reply follows (the warning's code, thread_size.skipped_reply_code).
+    # TooManyReplies the same way: the account's replies in progress are
+    # at their bound; the recording is kept and its text says why.
     from backend.utils.placeholders import UserExportValidationError
     from backend.utils.node_deletion import ParentDeletedError
     from backend.utils.spend import SpendCapExceeded
@@ -2110,7 +2107,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
         )
     except (UserExportValidationError, ParentDeletedError,
             SpendCapExceeded, AIUsageRefused, ReadOnlyModelRefused,
-            SubscriptionRequired, ThreadTooLong) as e:
+            SubscriptionRequired, ThreadTooLong, TooManyReplies) as e:
         if isinstance(e, SpendCapExceeded):
             message = voice_reply_skipped_spend_cap(user_id)
         elif isinstance(e, SubscriptionRequired):
@@ -2119,7 +2116,7 @@ def _start_server_side_llm_chain(draft, session_id, transcript,
             message = VOICE_REPLY_SKIPPED_AI_USAGE
         elif isinstance(e, ReadOnlyModelRefused):
             message = VOICE_REPLY_SKIPPED_READ_ONLY.format(model=e.model_name)
-        elif isinstance(e, ThreadTooLong):
+        elif isinstance(e, (ThreadTooLong, TooManyReplies)):
             message = e.recording_message
         else:
             message = str(e)

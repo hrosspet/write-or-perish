@@ -221,6 +221,19 @@ def _intentions_status_map():
     return out
 
 
+def _period_spend_fields(user, config):
+    from backend.utils.spend import (
+        ceiling_period_start, counted_spend_microdollars)
+    start = ceiling_period_start(user)
+    if start is None:
+        return {"spend_period_start": None, "spend_period_usd": None}
+    return {
+        "spend_period_start": iso_utc(start),
+        "spend_period_usd": counted_spend_microdollars(
+            user, config) / 1_000_000,
+    }
+
+
 @admin_bp.route("/users", methods=["GET"])
 @login_required
 @admin_required
@@ -231,6 +244,7 @@ def list_users():
     )
     from backend.utils.approval import (
         approval_waived, counts_as_approved, held_as_spam, is_blocked)
+    from backend.utils.trial_alerts import waits_for_approval
 
     config = current_app.config
     waived = approval_waived(config)
@@ -298,8 +312,12 @@ def list_users():
             # Payments on (#697): the admin blocked it (Inactive otherwise
             # only means it has not come back since payments went on), or
             # the spam mark holds it (#713: not let in at its next visit).
+            # Or the gate holds it for approval because the day's number
+            # of new accounts was reached (utils/trial_alerts).
             **({"blocked": is_blocked(user),
-                "held_as_spam": held_as_spam(user, config)}
+                "held_as_spam": held_as_spam(user, config),
+                "waits_for_approval": (waits_for_approval(user)
+                                       and not is_blocked(user))}
                if waived else {}),
             "email": user.email,
             "plan": user.plan,
@@ -326,6 +344,10 @@ def list_users():
             # spend. Rolled from the stored carry without writing it (a
             # query per user only before the month's first roll).
             "spend_carried_usd": rolled_spend_carry(user, config, now) / 1_000_000,
+            # An account whose ceiling is counted per paid period
+            # (spend.ceiling_period_start): the period's start and what
+            # counts against the ceiling in it; null for the others.
+            **_period_spend_fields(user, config),
             "profile_batch_pending": bool(user.profile_batch_pending),
             "profile_force_batch": bool(user.profile_force_batch),
             "prefilled_handle": user.prefilled_handle,
@@ -952,14 +974,31 @@ def toggle_user_spam(user_id):
     return jsonify({"message": "Spam flag updated", "spam": user.spam}), 200
 
 
+# The admin sets a sign-in address only on an account nobody has signed
+# into (activity.sign_in_status "never": a whitelisted or pre-filled
+# account before its owner's first sign-in, or a waitlist signup whose
+# link never arrived). Whoever holds the address signs in to the account,
+# and admins never read users' content (Peter, 2026-10-01), so an account
+# someone has used, or one older than the sign-in record ("unknown"),
+# changes its address only through its owner's own confirmed change in
+# Account settings.
+EMAIL_SET_REFUSED_MESSAGE = (
+    "Someone has signed in to this account, or it is older than Loore's "
+    "sign-in record, so only its owner can change its email address, in "
+    "Account settings.")
+
+
 @admin_bp.route("/users/<int:user_id>/update_email", methods=["PUT"])
 @login_required
 @admin_required
 def update_user_email(user_id):
-    """Set (or, with an empty string, clear) a user's email directly. The
-    one path that binds an address without the owner confirming it (#260):
-    the admin vouches for it, e.g. to fix a mistyped waitlist address so
-    Activate & Welcome can reach the person."""
+    """Set (or, with an empty string, clear) the email of an account
+    nobody has signed into. The one path that binds an address without
+    the owner confirming it (#260): the admin vouches for it, e.g. to fix
+    a mistyped waitlist address or to add the address of a pre-filled
+    account so Activate & Welcome can reach the person. 409 with
+    EMAIL_SET_REFUSED_MESSAGE for any other account."""
+    from backend.utils.activity import sign_in_status
     data = request.get_json()
     email = data.get("email")
     if not isinstance(email, str):
@@ -971,6 +1010,9 @@ def update_user_email(user_id):
     if email and not is_valid_email(email):
         return jsonify({"error": "That is not a valid email address."}), 400
     user = User.query.get_or_404(user_id)
+    if sign_in_status(user) != "never":
+        return jsonify({"error": EMAIL_SET_REFUSED_MESSAGE,
+                        "code": "account_signed_in"}), 409
     user.email = email or None
     # A change the user left pending must not replace the admin's address
     # when its link is confirmed later.
@@ -982,6 +1024,9 @@ def update_user_email(user_id):
     except IntegrityError:
         db.session.rollback()
         return jsonify({"error": "That email already belongs to another account."}), 409
+    # Ids only: no address in the logs.
+    logger.warning("Admin %s set the email of user %s", current_user.id,
+                   user_id)
     return jsonify({"message": "Email updated", "email": user.email}), 200
 
 @admin_bp.route("/users/<int:user_id>/update_plan", methods=["PUT"])
@@ -993,7 +1038,10 @@ def update_user_plan(user_id):
     if plan not in User.ALLOWED_PLANS:
         return jsonify({"error": f"Invalid plan. Allowed: {sorted(User.ALLOWED_PLANS)}"}), 400
     user = User.query.get_or_404(user_id)
-    user.plan = plan
+    # The usage block follows the ceiling the new plan gives, as after a
+    # limit edit.
+    from backend.utils.spend import set_user_plan
+    set_user_plan(user, plan, current_app.config)
     db.session.commit()
     return jsonify({"message": "Plan updated", "plan": user.plan}), 200
 

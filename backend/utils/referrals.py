@@ -381,6 +381,16 @@ def create_invite(user, raw_to, now=None, config=None):
     _refuse_if_taken(user.id, now)
     x_id = None
     if target[0] == "x":
+        # The lookup may read from the paid X API: at most
+        # X_INVITE_LOOKUPS_PER_DAY (utils/billing_limits), counted before
+        # it, also when the handle turns out unknown. Asked the same way
+        # for every handle, so the answer says nothing about it.
+        from backend.utils import billing_limits
+        try:
+            billing_limits.check_and_count(user, "x_invite_lookup", cfg)
+        except billing_limits.TooManyBillingRequests:
+            raise InviteRefused(billing_limits.TOO_MANY_X_LOOKUPS_MESSAGE,
+                                429)
         x_id = lookup_x_id(target[1], user, cfg)
         if x_id and user.twitter_id and x_id == str(user.twitter_id):
             raise own

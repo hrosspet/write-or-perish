@@ -25,6 +25,10 @@ licensed ('train') verdict also stores the ids of the rows it rests on:
 any of them can be switched off 'train' later without touching the key,
 so a hit re-checks them (metadata only) and reads as a miss when one
 has lost its licence — the render is rebuilt, and the switch honored.
+Every entry also stores the ids of the entries (nodes) the render holds,
+and a hit reads as a miss when one of them has since been deleted, set
+to AI usage None, or made unreadable to the user: the render is rebuilt
+the way an uncached turn renders it.
 """
 import json
 import logging
@@ -80,9 +84,43 @@ def _key(node, variant=""):
             f"{stamp.isoformat() if stamp else '0'}:{variant}")
 
 
-def get_cached_render(config, node, variant=""):
+def _reader(node, user_id):
+    """Whom the render is for: *user_id*, else the node's owner."""
+    return user_id if user_id is not None else (
+        node.human_owner_id or node.user_id)
+
+
+def _readable_entries(node_ids, user_id):
+    """The ids among *node_ids* (entries a render holds) that a render
+    for *user_id* may still hold: not deleted, AI usage Chat or Train,
+    and the user's own or readable by them — what the uncached render's
+    window and quotes apply. Metadata only: one query, nothing
+    decrypted."""
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.privacy import AI_ALLOWED, accessible_nodes_filter
+
+    ids = list({int(i) for i in node_ids or ()})
+    if not ids:
+        return set()
+    return {i for (i,) in db.session.query(Node.id).filter(
+        Node.id.in_(ids),
+        Node.ai_usage.in_(AI_ALLOWED),
+        accessible_nodes_filter(Node, user_id),
+    ).all()}
+
+
+def get_cached_render(config, node, variant="", user_id=None):
     """Return the cached render of *node* under *variant* as a
     ``CachedRender``, or None.
+
+    A render holds the entries of the user's (*user_id*, default: the
+    node's owner) recent window and its quotes, and none of them changes
+    the key. A hit re-checks them: when one has since been deleted, set
+    to AI usage None or (someone else's) made unreadable to the user,
+    it reads as a miss, and the render is rebuilt without it. An
+    unchanged conversation keeps its bytes. Entries stored before this
+    check carry no entry ids and are served until they expire.
 
     Any Redis/decrypt failure degrades to a cache miss — the caller
     re-renders as before #192.
@@ -100,6 +138,14 @@ def get_cached_render(config, node, variant=""):
                 logger.info("Cached render of node %s: %s; re-rendering",
                             node.id, lost)
                 return None
+        held = set(entry.get("nodes") or ())
+        if held:
+            withdrawn = held - _readable_entries(held, _reader(node, user_id))
+            if withdrawn:
+                logger.info("Cached render of node %s: %d of its entries "
+                            "were withdrawn; re-rendering",
+                            node.id, len(withdrawn))
+                return None
         return CachedRender(entry["text"], unlicensed,
                             tuple(entry.get("references") or ()),
                             tuple(entry.get("inputs") or ()))
@@ -110,19 +156,26 @@ def get_cached_render(config, node, variant=""):
 
 
 def store_render(config, node, rendered_text, variant="",
-                 unlicensed=None, rows=None, references=(), inputs=()):
+                 unlicensed=None, rows=None, references=(), inputs=(),
+                 user_id=None):
     """Store the rendered text (encrypted) with its training-key verdict
     (see ``CachedRender``), for a licensed one the rows it rests on
     (``ContextUsage.rows``), the saved references its window names
     (*references*) and whether its rows held X API input (*inputs*).
-    Failures are non-fatal."""
-    entry = json.dumps({
-        "text": rendered_text, "unlicensed": unlicensed,
-        "rows": None if unlicensed else rows,
-        "references": sorted(references or ()),
-        "inputs": sorted(inputs or ()),
-    })
+    With every verdict, the ids of the entries among *rows* that the
+    render for *user_id* (default: the node's owner) may hold now, which
+    a hit re-checks (get_cached_render). Failures are non-fatal: the
+    render is then not stored."""
     try:
+        nodes = _readable_entries((rows or {}).get("node"),
+                                  _reader(node, user_id))
+        entry = json.dumps({
+            "text": rendered_text, "unlicensed": unlicensed,
+            "rows": None if unlicensed else rows,
+            "nodes": sorted(nodes),
+            "references": sorted(references or ()),
+            "inputs": sorted(inputs or ()),
+        })
         _client(config).setex(
             _key(node, variant), CACHE_TTL_SECONDS,
             encrypt_content(entry).encode("utf-8"),

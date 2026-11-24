@@ -1112,6 +1112,63 @@ def test_archive_search_sends_nothing_for_an_account_set_to_none(
     assert _llm_task_mod.SEARCH_TOOL_ACCOUNT_NONE_ERROR in round2
 
 
+def test_archive_search_sends_nothing_for_an_account_that_keeps_to_one_provider(
+        app, monkeypatch):
+    """An account that answered "one provider" and whose provider is not
+    the embedding model's: the tool searches nothing and tells the model
+    why. The tool stays in the list, which depends on config only (the
+    cache prefix)."""
+    from datetime import datetime
+    import backend.utils.embeddings as emb_mod
+    sent = []
+
+    def fake_embed(texts, key, **kw):
+        sent.append(list(texts))
+        return [[1.0, 0.0] for _ in texts]
+    monkeypatch.setattr(emb_mod, "embed_texts", fake_embed)
+    monkeypatch.setitem(app.config, "SUPPORTED_MODELS", dict(
+        app.config["SUPPORTED_MODELS"],
+        **{"claude-test": {"provider": "anthropic",
+                           "api_model": "claude-test"}}))
+
+    alice, system, user_node, llm_node = _build_chain("textmode")
+    alice.preferred_model = "claude-test"
+    alice.profile_both_providers = False
+    alice.profile_both_providers_answered_at = datetime.utcnow()
+    archive = Node(user_id=alice.id, human_owner_id=alice.id,
+                   node_type="text", privacy_level="private", ai_usage="chat")
+    archive.set_content("AN OUT-OF-CHAIN ENTRY about zen.")
+    _db.session.add(archive)
+    _db.session.flush()
+    _db.session.add(NodeEmbedding(
+        node_id=archive.id, user_id=alice.id, model="test",
+        content_hash="h", vector=pack_vector([1.0, 0.0])))
+    _db.session.commit()
+
+    _ScriptedProvider.reset([
+        _resp("Checking your archive.",
+              tool_calls=[{"id": "t1", "name": "semantic_search",
+                           "input": {"query": "zen"}}]),
+        _resp("I can't search your archive."),
+    ])
+    generate_llm_response(
+        _FakeSelf(), user_node.id, llm_node.id, "gpt-5", alice.id,
+        source_mode="textmode",
+    )
+
+    assert sent == []
+    tool_names = [t["name"] for t in (_ScriptedProvider.calls[0]["tools"] or [])]
+    assert "semantic_search" in tool_names
+    meta = json.loads(_fresh(llm_node.id).tool_calls_meta)
+    search = [e for e in meta if e.get("name") == "semantic_search"]
+    assert [(e["status"], e["error"]) for e in search] == [
+        ("error", _llm_task_mod.SEARCH_TOOL_ONE_PROVIDER_ERROR)]
+    round2 = "\n".join(
+        m["text"] for m in _ScriptedProvider.calls[1]["messages"])
+    assert "AN OUT-OF-CHAIN ENTRY" not in round2
+    assert _llm_task_mod.SEARCH_TOOL_ONE_PROVIDER_ERROR in round2
+
+
 def test_read_full_external_refused_without_references_opt_in(app):
     """Defense in depth (#329): a search never hands an external label to a
     user without the toggle, so read_full on one (stale or forged) is

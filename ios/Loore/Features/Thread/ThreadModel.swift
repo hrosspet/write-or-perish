@@ -719,8 +719,8 @@ final class ThreadModel {
             return NodeFormResult(id: created.id)
         }
         var body: [String: JSONValue] = [
-            "content": .string(submission.content), "ai_usage": .string(submission.aiUsage.rawString),
-            "auto_generate": .bool(auto),
+            "content": .string(submission.content), "privacy_level": .string(submission.privacy.rawString),
+            "ai_usage": .string(submission.aiUsage.rawString), "auto_generate": .bool(auto),
         ]
         if let requestModel { body["model"] = .string(requestModel) }
         let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeFromNode(nodeId), json: .object(body))

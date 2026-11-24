@@ -73,3 +73,56 @@ def generate_unique_public_slug(owner_id, content):
         candidate = f"{base}-{suffix}"
         suffix += 1
     return candidate
+
+
+def slug_transcribed_thread(node, transcript):
+    """The permalink of an uploaded recording that started a Text-mode
+    thread, given once, when its transcript is stored (the transcription
+    task calls this before it commits). Until then the entry has no slug:
+    it is read at /node/<id>; under a private prompt root it is in no
+    listing, and a public prompt root's card shows it without a link of
+    its own (utils/public_threads).
+
+    Given only when *transcript* has text and the entry, as stored now,
+    is public, alive, without a slug, and the first entry directly under
+    a living Text-mode prompt root of the same person (at any level, as
+    a typed or recorded one gets its slug at creation). The
+    slug is made from the transcript's first line, as a typed entry's
+    is, under the account's recordings lock, so two uploads that finish
+    together do not take the same one. Returns the slug or None."""
+    from sqlalchemy import func
+    from backend.extensions import db
+    from backend.models import Node
+    from backend.utils.recording_limits import RecordingsBusy, lock_account
+
+    if not (transcript or "").strip() or not node.parent_id:
+        return None
+    owner_id = node.human_owner_id or node.user_id
+    try:
+        lock_account(owner_id)
+    except RecordingsBusy:
+        # The entry stays without an address of its own.
+        return None
+    # As stored now: the owner may have changed the entry while the
+    # recording was being transcribed.
+    row = db.session.query(
+        Node.privacy_level, Node.deleted_at, Node.public_slug,
+        Node.parent_id).filter(Node.id == node.id).first()
+    if (row is None or row.privacy_level != PrivacyLevel.PUBLIC.value
+            or row.deleted_at is not None or row.public_slug
+            or row.parent_id is None):
+        return None
+    root = db.session.query(
+        Node.id, Node.parent_id, Node.prompt_key, Node.deleted_at,
+        Node.human_owner_id, Node.user_id,
+    ).filter(Node.id == row.parent_id).first()
+    if (root is None or root.parent_id is not None
+            or root.prompt_key != "textmode" or root.deleted_at is not None
+            or (root.human_owner_id or root.user_id) != owner_id):
+        return None
+    first_id = db.session.query(func.min(Node.id)).filter(
+        Node.parent_id == root.id).scalar()
+    if first_id != node.id:
+        return None
+    node.public_slug = generate_unique_public_slug(owner_id, transcript)
+    return node.public_slug

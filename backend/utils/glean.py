@@ -257,7 +257,6 @@ def is_gleaning(node):
     (ca_feed.is_read_reply: a render, picks or a batch), one marked live
     or glean-again, or one directly under a read prompt — so a pending or
     failed glean counts too."""
-    import json
     from backend.utils.ca_feed import (
         READ_FURTHER_MARKER, READ_PROMPT_KEYS, is_read_reply,
     )
@@ -265,12 +264,8 @@ def is_gleaning(node):
         return False
     if is_read_reply(node):
         return True
-    try:
-        meta = json.loads(node.tool_calls_meta or "[]") or []
-    except (TypeError, ValueError):
-        meta = []
-    if any(isinstance(m, dict) and m.get("name") in (
-            READ_LIVE_MARKER, READ_FURTHER_MARKER) for m in meta):
+    from backend.utils.tool_record import entry_names
+    if entry_names(node) & {READ_LIVE_MARKER, READ_FURTHER_MARKER}:
         return True
     parent = node.parent
     return parent is not None and parent.get_prompt_key() in READ_PROMPT_KEYS
