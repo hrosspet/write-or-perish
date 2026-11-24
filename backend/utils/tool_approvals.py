@@ -69,6 +69,12 @@ DIRECT_WRITE_TOOLS = (
 )
 
 PENDING_STATUS = "pending_approval"
+
+# What the approval dialog says when a write was not saved because its
+# artifact changed after the AI proposed it (a new version, or a tick in
+# place).
+ARTIFACT_CHANGED_MESSAGE = ("The artifact changed after this was proposed, "
+                            "so it was not saved.")
 REJECTED_STATUS = "rejected"
 
 # What each call does, as the dialog names it.
@@ -541,6 +547,11 @@ def decide(draft, user_id, approve):
             user_id, client=client,
             copies=ArtifactCopies.from_hold(payload))[0]
         if result.get("status") != "success":
+            if (name == "update_artifact"
+                    and _artifact_preview(payload, user_id).get("stale")):
+                # The error is written for the model ("since you read
+                # it"); the person gets their own sentence (#799 review).
+                result["error"] = ARTIFACT_CHANGED_MESSAGE
             return "failed", result
         outcome = "approved"
         result["approval"] = outcome

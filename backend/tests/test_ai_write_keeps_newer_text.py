@@ -320,7 +320,10 @@ def test_approving_a_write_after_a_tick_meanwhile_saves_nothing(
     outcome, result = decide(held, ben.id, approve=True)
     _db.session.commit()
     assert outcome == "failed"
-    assert "was edited by the user since you read it" in result["error"]
+    # The dialog shows the person's sentence, not the one written for the
+    # model ("since you read it").
+    from backend.utils.tool_approvals import ARTIFACT_CHANGED_MESSAGE
+    assert result["error"] == ARTIFACT_CHANGED_MESSAGE
     assert _latest_memory(ben.id).get_content() == TICKED
     assert UserArtifact.version_count(ben.id, "memory") == 1
 

@@ -269,7 +269,9 @@ def test_a_run_that_fails_leaves_the_call_waiting(app, thread):
 
     data = resp.get_json()
     assert data["outcome"] == "failed"
-    assert "changed since" in data["error"]
+    # The person's own sentence (#799 review), not the model's.
+    assert data["error"] == ("The artifact changed after this was "
+                             "proposed, so it was not saved.")
     assert [p["id"] for p in data["pending"]] == [pending_id]
     assert _memory(ben) == "- likes coffee"
     assert client.post(

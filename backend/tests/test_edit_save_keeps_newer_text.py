@@ -187,21 +187,24 @@ def test_a_save_after_the_text_was_edited_elsewhere_saves_nothing(
 
 
 def test_a_settings_only_save_keeps_the_newer_text(client, alice):
-    """Only the privacy changed in the form: it has no text of its own to
-    save, so the entry keeps the text it has now, and the setting is saved."""
+    """Only the privacy changed in the form (made narrower): it has no text
+    of its own to save, so the entry keeps the text it has now, and the
+    setting is saved. (Widening is refused: tests below.)"""
     entry = _entry(alice)
+    entry.privacy_level = "circles"
+    _db.session.commit()
     opened_on = _shown(client, entry.id)
     newer = TEXT + "\n- [ ] book the room"
     client.put(f"/nodes/{entry.id}", json={"content": newer})
 
     r = client.put(f"/nodes/{entry.id}", json={
         "content": opened_on, "base_content": opened_on,
-        "privacy_level": "circles", "ai_usage": "none"})
+        "privacy_level": "private", "ai_usage": "none"})
     assert r.status_code == 200
     assert _stored(entry.id) == newer
     assert r.get_json()["node"]["content"] == newer
     _db.session.expire_all()
-    assert Node.query.get(entry.id).privacy_level == "circles"
+    assert Node.query.get(entry.id).privacy_level == "private"
 
 
 @pytest.mark.parametrize("text", [
@@ -417,3 +420,163 @@ def test_a_drafts_base_is_kept_out_of_plain_sight(client, alice):
     row = Draft.query.filter_by(node_id=entry.id).one()
     assert row.get_base_content() == opened_on
     assert "base_content" not in _draft(client, entry)
+
+
+# ── #799 review ──────────────────────────────────────────────────────────
+
+def _drafts_of(entry):
+    _db.session.expire_all()
+    return {d.id: d.get_content() for d in
+            Draft.query.filter_by(node_id=entry.id).all()}
+
+
+def test_two_devices_on_two_versions_keep_both_drafts(client, alice):
+    """The laptop's form typed on v1, the phone's on v2 (after a tick), and
+    the laptop typed last. Neither draft is deleted: the phone's loads (it
+    is on the current text), the laptop's is offered beside it, and the
+    reloaded laptop form's typing goes into the phone's row, not over it."""
+    entry = _entry(alice)
+    v1 = _shown(client, entry.id)
+    laptop = _autosave(client, entry, v1 + "\nlaptop", v1)
+    v2 = v1.replace("- [ ] deploy", "- [x] deploy")
+    assert client.put(f"/nodes/{entry.id}", json={
+        "content": v2, "base_content": v1}).status_code == 200
+    phone = _autosave(client, entry, v2 + "\nphone", v2)
+    assert _autosave(client, entry, v1 + "\nlaptop, more", v1) == laptop
+    assert set(_drafts_of(entry)) == {laptop, phone}
+
+    got = _draft(client, entry)
+    assert got["id"] == phone
+    assert "older_than_entry" not in got
+    assert got["older_draft"]["id"] == laptop
+    assert got["older_draft"]["content"] == v1 + "\nlaptop, more"
+
+    # The laptop reloaded (its form is on v2 now) and types.
+    assert _autosave(client, entry, v2 + "\nphone, then laptop", v2) == phone
+    assert _drafts_of(entry) == {
+        laptop: v1 + "\nlaptop, more", phone: v2 + "\nphone, then laptop"}
+
+
+def test_a_save_deletes_only_the_drafts_its_form_showed(client, alice):
+    entry = _entry(alice)
+    v1 = _shown(client, entry.id)
+    first = _autosave(client, entry, "typed on v1", v1)
+    v2 = v1.replace("- [ ] deploy", "- [x] deploy")
+    client.put(f"/nodes/{entry.id}", json={"content": v2, "base_content": v1})
+    second = _autosave(client, entry, "typed on v2", v2)
+    v3 = v2.replace("- [ ] write the note", "- [x] write the note")
+    client.put(f"/nodes/{entry.id}", json={"content": v3, "base_content": v2})
+    third = _autosave(client, entry, "typed on v3", v3)
+
+    # The form on v3 showed its own row and the newest older one.
+    got = _draft(client, entry)
+    assert (got["id"], got["older_draft"]["id"]) == (third, second)
+    r = client.delete(
+        f"/drafts/?node_id={entry.id}&draft_id={third}&draft_id={second}")
+    assert r.status_code == 200
+    assert set(_drafts_of(entry)) == {first}
+    # The one never shown is offered next time.
+    again = _draft(client, entry)
+    assert again["id"] == first and again["older_than_entry"] is True
+
+
+def test_a_refused_forms_text_saved_again_is_offered_after_a_reload(
+        client, alice):
+    """Another device's Save deleted every draft of the entry (an installed
+    build does). The refused form saves its text again with its base, so
+    the reload shows it beside the entry's current text."""
+    entry = _entry(alice)
+    v1 = _shown(client, entry.id)
+    _autosave(client, entry, v1 + "\nphone typing", v1)
+    assert client.put(f"/nodes/{entry.id}", json={
+        "content": v1 + "\nlaptop edit"}).status_code == 200
+    client.delete(f"/drafts/?node_id={entry.id}")
+    assert client.put(f"/nodes/{entry.id}", json={
+        "content": v1 + "\nphone typing", "base_content": v1,
+    }).status_code == 409
+
+    _autosave(client, entry, v1 + "\nphone typing", v1)
+    got = _draft(client, entry)
+    assert got["older_than_entry"] is True
+    assert got["content"] == v1 + "\nphone typing"
+
+
+def _stale_settings_save(client, entry, **settings):
+    opened_on = _shown(client, entry.id)
+    client.put(f"/nodes/{entry.id}", json={"content": TEXT + "\nnewer"})
+    return client.put(f"/nodes/{entry.id}", json={
+        "content": opened_on, "base_content": opened_on, **settings})
+
+
+def _settings(entry_id):
+    _db.session.expire_all()
+    node = Node.query.get(entry_id)
+    return node.privacy_level, node.ai_usage
+
+
+def test_a_form_opened_on_older_text_may_not_make_the_newer_text_public(
+        client, alice):
+    entry = _entry(alice)
+    r = _stale_settings_save(client, entry, privacy_level="public",
+                             ai_usage="none")
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "content_changed"
+    assert _settings(entry.id) == ("private", "none")
+
+
+def test_nor_let_more_ai_read_it(client, alice):
+    entry = _entry(alice)
+    r = _stale_settings_save(client, entry, privacy_level="private",
+                             ai_usage="chat")
+    assert r.status_code == 409
+    assert _settings(entry.id) == ("private", "none")
+
+
+def test_but_may_narrow_who_reads_it(client, alice):
+    entry = _entry(alice)
+    entry.privacy_level = "circles"
+    entry.ai_usage = "chat"
+    _db.session.commit()
+    r = _stale_settings_save(client, entry, privacy_level="private",
+                             ai_usage="none")
+    assert r.status_code == 200
+    assert _settings(entry.id) == ("private", "none")
+    assert _stored(entry.id) == TEXT + "\nnewer"
+
+
+def test_a_form_on_the_current_text_may_make_it_public(client, alice):
+    entry = _entry(alice)
+    opened_on = _shown(client, entry.id)
+    r = client.put(f"/nodes/{entry.id}", json={
+        "content": opened_on, "base_content": opened_on,
+        "privacy_level": "public", "ai_usage": "none"})
+    assert r.status_code == 200
+    assert _settings(entry.id) == ("public", "none")
+
+
+def test_purging_a_deleted_entry_clears_its_drafts_copy_of_it(client, alice):
+    from backend.tasks.node_cleanup import _full_purge
+    entry = _entry(alice)
+    opened_on = _shown(client, entry.id)
+    draft_id = _autosave(client, entry, "my unsaved edit", opened_on)
+    _full_purge(Node.query.get(entry.id))
+    _db.session.commit()
+    _db.session.expire_all()
+    row = Draft.query.get(draft_id)
+    assert row.node_id is None
+    assert row.base_content is None
+    assert row.get_content() == "my unsaved edit"
+
+
+def test_wiping_a_deleted_entrys_text_clears_its_drafts_copy_too(
+        client, alice):
+    from backend.tasks.node_cleanup import _wipe_content_and_versions
+    entry = _entry(alice)
+    opened_on = _shown(client, entry.id)
+    draft_id = _autosave(client, entry, "my unsaved edit", opened_on)
+    _wipe_content_and_versions(Node.query.get(entry.id))
+    _db.session.commit()
+    _db.session.expire_all()
+    row = Draft.query.get(draft_id)
+    assert row.base_content is None
+    assert row.get_content() == "my unsaved edit"

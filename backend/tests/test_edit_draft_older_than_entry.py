@@ -241,10 +241,12 @@ def test_saving_the_entry_deletes_both(client, alice):
     assert Draft.query.filter_by(node_id=entry.id).count() == 0
 
 
-def test_at_most_one_older_edit_is_kept(client, alice):
+def test_every_older_edit_is_kept_and_offered_newest_first(client, alice):
     # A second round: the typing that replaced an older edit itself becomes
-    # older than the entry, and the person types again. It becomes the kept
-    # older edit; the earlier kept one (on offer while it was typed) goes.
+    # older than the entry, and the person types again. #766 kept only the
+    # newest older edit and deleted the earlier one; since the #799 review
+    # an autosave deletes no row (it may hold typing the person has not
+    # seen): the newest older edit is offered, the earlier one after it.
     entry = _entry(alice)
     first_id = _left_edit_then_tick(client, entry)
     second = client.post("/drafts/", json={"content": "second", "node_id": entry.id})
@@ -257,11 +259,15 @@ def test_at_most_one_older_edit_is_kept(client, alice):
 
     third = client.post("/drafts/", json={"content": "third", "node_id": entry.id})
 
-    assert Draft.query.get(first_id) is None
+    assert Draft.query.get(first_id) is not None
     assert Draft.query.get(second_id).get_content() == "second"
     body = client.get(f"/drafts/?node_id={entry.id}").get_json()
     assert body["id"] == third.get_json()["id"]
     assert body["older_draft"]["id"] == second_id
+    # Discarded, the next older edit is offered.
+    client.delete(f"/drafts/?node_id={entry.id}&draft_id={second_id}")
+    body = client.get(f"/drafts/?node_id={entry.id}").get_json()
+    assert body["older_draft"]["id"] == first_id
 
 
 def test_an_older_edit_with_the_newest_drafts_own_text_is_not_offered(

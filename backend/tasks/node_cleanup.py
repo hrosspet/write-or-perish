@@ -97,7 +97,10 @@ def _full_purge(node):
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
 
-    Draft.query.filter_by(node_id=node.id).update({"node_id": None})
+    # The draft keeps the person's unsaved text; the entry's own text it was
+    # written on (base_content, #799) goes with the entry.
+    Draft.query.filter_by(node_id=node.id).update(
+        {"node_id": None, "base_content": None})
     # A write call of the reply still waiting for approval goes with it
     # (utils/tool_approvals): with no reply there is nothing to approve.
     Draft.query.filter(
@@ -179,6 +182,9 @@ def _wipe_content_and_versions(node):
     NodeVersion.query.filter_by(node_id=node.id).delete()
     NodeTranscriptChunk.query.filter_by(node_id=node.id).delete()
     TTSChunk.query.filter_by(node_id=node.id).delete()
+    # Edit drafts' copies of the entry's text (#799); their own text stays.
+    Draft.query.filter_by(node_id=node.id).update(
+        {"base_content": None}, synchronize_session=False)
     # The files are gone; clear the URL columns too so the frontend
     # doesn't try to fetch them.
     node.audio_original_url = None

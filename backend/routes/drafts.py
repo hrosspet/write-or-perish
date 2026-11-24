@@ -163,22 +163,45 @@ def _older_than_entry(draft, node):
                 and draft.updated_at < node.updated_at)
 
 
-def _other_writing(draft, node, base):
-    """Whether typing an edit form sends with *base* (the entry's text the
-    form was opened on; None from a client that doesn't send it) belongs
-    in a row of its own rather than in *draft*, the newest edit draft.
-    With both bases known: when they differ (one of the two was written on
-    an older version). Otherwise: when *draft* is older than the entry."""
-    stored = draft.get_base_content()
-    if base is not None and stored is not None:
-        return stored != base
-    return _older_than_entry(draft, node)
-
-
 def _edit_drafts(node_id):
     """The current user's typed edit drafts of *node_id*, newest first."""
     return _input_drafts(node_id, None).filter(
         _no_session_in_progress_clause(), Draft.session_id.is_(None))
+
+
+# Edit drafts (#799 review). A typed edit draft belongs to the entry's text
+# its form was opened on (Draft.base_content). An edit form's typing goes
+# into the row written on the same text, or into a new row; an autosave
+# never deletes another row. Opening the form loads the row written on the
+# entry's current text and offers the newest row written on an older one
+# beside it (_kept_older_edit); any other row is offered once that one is
+# used or discarded. Only the person deletes a row: Discard, or a Save,
+# which names the rows its form showed (delete_draft's draft_id). So no
+# typing is deleted unseen, whichever device typed last.
+
+def _row_for_base(node, base):
+    """The edit draft an edit form opened on the text *base* saves into:
+    the newest row written on that text; else the newest row, when a
+    client that sends no base saved it and it is not older than the entry
+    (the form loaded it as current); else None (a new row)."""
+    rows = _edit_drafts(node.id).all()
+    for row in rows:
+        if row.get_base_content() == base:
+            return row
+    if (rows and rows[0].get_base_content() is None
+            and not _older_than_entry(rows[0], node)):
+        return rows[0]
+    return None
+
+
+def _current_edit_draft(node):
+    """The newest typed edit draft written on the entry's current text (or,
+    from a client that sends no base, not saved before its last change),
+    or None."""
+    for row in _edit_drafts(node.id):
+        if not _older_than_entry(row, node):
+            return row
+    return None
 
 
 def _kept_older_edit(node, newest):
@@ -331,6 +354,12 @@ def get_draft():
 
     if not draft:
         return jsonify({"error": "No draft found"}), 404
+
+    if node_id and draft.session_id is None:
+        # The row written on the entry's current text loads, even when a
+        # row written on an older one was saved after it (two devices); the
+        # older one is offered beside it (below).
+        draft = _current_edit_draft(node) or draft
 
     response_data = {
         "id": draft.id,
@@ -533,18 +562,17 @@ def save_draft():
     draft = _input_drafts(node_id, parent_id).filter(
         _no_session_in_progress_clause()).first()
 
-    if draft and node_id and _other_writing(draft, node, base):
-        # The newest edit draft was written on another text of the entry
-        # than this form's: an older version (#761: the entry changed
-        # after it was saved; or its base is no longer the entry's text),
-        # or this form is the one on the older text. This typing gets a row
-        # of its own and the other is kept until the person uses or
-        # discards it (#766 review: neither text is thrown away without
-        # their say). At most one other is kept: this one, the most recent.
-        # Any earlier kept row was on offer while this one was typed.
-        for earlier in _edit_drafts(node_id).filter(Draft.id != draft.id):
-            db.session.delete(earlier)
-        draft = None
+    if draft and node_id and draft.session_id is None:
+        # A typed edit draft: the row written on this form's text (see
+        # _row_for_base), else a new one. Another row is never deleted
+        # here: it may hold typing the person has not seen yet (#799
+        # review). From a client that sends no base: the newest row, unless
+        # it is older than the entry (#761, #766: the typing on the newer
+        # text gets a row of its own and the older edit is kept).
+        if base is not None:
+            draft = _row_for_base(node, base)
+        elif _older_than_entry(draft, node):
+            draft = None
 
     if draft:
         # Update existing draft
@@ -587,15 +615,16 @@ def delete_draft():
     Query params:
       - node_id: If editing an existing node (optional)
       - parent_id: If creating a new node under a parent (optional)
-      - draft_id: Only this draft of the context (optional; an older edit
-        the person discards, #766)
+      - draft_id: Only these drafts of the context (optional, may repeat;
+        an older edit the person discards, #766; the rows an edit form
+        showed, after its Save, #799 review)
 
     Called when user saves their work or explicitly discards the draft.
     Drafts are private - only the owner can delete them.
     """
     node_id = request.args.get("node_id", type=int)
     parent_id = request.args.get("parent_id", type=int)
-    draft_id = request.args.get("draft_id", type=int)
+    draft_ids = request.args.getlist("draft_id", type=int)
 
     # Validate node_id if provided - user must own the node OR be LLM
     # requester (parent node owner); any other node answers 404.
@@ -611,8 +640,8 @@ def delete_draft():
     # included (see _dead_session_clause).
     query = _input_drafts(node_id, parent_id).filter(
         _no_session_in_progress_clause())
-    if draft_id:
-        query = query.filter(Draft.id == draft_id)
+    if draft_ids:
+        query = query.filter(Draft.id.in_(draft_ids))
     drafts = query.all()
 
     if not drafts:
