@@ -6,6 +6,12 @@ account still stores the period that ended. The hourly job reads the
 subscription from Stripe and settles it as the event would be: the next
 period starts with what the last one spent above the ceiling, a
 subscription that ended or whose payment is late is recorded as that.
+
+When the renewal payment fails, the account is stored as a late payment
+(no access). The job asks Stripe about it every hour, whatever its period
+end: paid later, with the events of the payment lost, the account gets
+its access back; canceled by Stripe after the last retry, it is not asked
+again.
 Stripe is a stub here; nothing reaches it.
 """
 import ast
@@ -90,6 +96,7 @@ class StubStripe:
         self.on_read = None
         self.payment_methods = {}
         self.changes = []
+        self.refused = set()
 
     def retrieve_payment_method(self, payment_method_id):
         return self.payment_methods[payment_method_id]
@@ -106,6 +113,10 @@ class StubStripe:
         self.reads.append(subscription_id)
         if self.down:
             raise ConnectionError("stub: Stripe cannot be reached")
+        if subscription_id in self.refused:
+            error = Exception("stub: invalid request")
+            error.http_status = 400
+            raise error
         if subscription_id not in self.subs:
             error = Exception("stub: no such subscription")
             error.http_status = 404
@@ -353,9 +364,11 @@ def test_a_late_payment_is_recorded_and_the_carry_waits(app, stripe):
     assert not u.subscription_grants_access
     assert u.spend_period_start == PAID
     assert u.spend_period_carry_microdollars == 0
-    # Its stored period end is ahead now: not asked the next hour.
-    reread_ended_periods(CONFIG, now=TWO_HOURS_AFTER)
-    assert stripe.reads == ["sub_1"]
+    # Its stored period end is ahead now, but a late payment is asked
+    # every hour: still late, nothing changes.
+    result = reread_ended_periods(CONFIG, now=TWO_HOURS_AFTER)
+    assert result["unchanged"] == 1
+    assert stripe.reads == ["sub_1", "sub_1"]
 
     # Paid later: the event takes the carry on, once.
     stripe.subs["sub_1"] = _stripe_sub(u, PERIOD_END, NEXT_END)
@@ -374,6 +387,165 @@ def test_a_late_payment_whose_period_ended_is_read_again(app, stripe):
     reread_ended_periods(CONFIG, now=AN_HOUR_AFTER)
 
     assert u.subscription_status == "ended"
+
+
+# ── A renewal payment failed: paid later, its events lost ────────────────
+
+def _renewal_failed(stripe, n=1):
+    """A subscriber who used $60 of the $50 in the period that ended and
+    whose renewal payment on 2027-02-20 failed. The event of the failure
+    was applied: the account stores the new period as a late payment."""
+    u = _at_the_ceiling(n)
+    stripe.subs[u.stripe_subscription_id] = _stripe_sub(
+        u, PERIOD_END, NEXT_END, status="past_due")
+    _event(stripe, u)
+    stripe.reads.clear()
+    assert u.subscription_status == "past_due"
+    assert u.subscription_period_end == NEXT_END
+    assert not u.subscription_grants_access
+    return u
+
+
+def test_a_late_payment_paid_later_gives_access_without_its_events(
+        app, stripe):
+    u = _renewal_failed(stripe)
+    # Paid on 2027-02-22; Stripe's events of the payment never arrive.
+    stripe.subs["sub_1"] = _stripe_sub(u, PERIOD_END, NEXT_END)
+
+    result = reread_ended_periods(CONFIG, now=FEB_LATE)
+
+    assert (result["due"], result["asked"], result["changed"]) == (1, 1, 1)
+    assert stripe.reads == ["sub_1"]
+    assert u.subscription_status == "active"
+    assert u.subscription_grants_access
+    assert u.subscription_period_end == NEXT_END
+    # The new period, with the $10 used above the last one's ceiling.
+    assert u.spend_period_start == PERIOD_END
+    assert u.spend_period_carry_microdollars == 10_000_000
+    assert not user_is_capped(u, now=FEB_LATE)
+    # Paid, its period ahead: not asked the next hour.
+    result = reread_ended_periods(CONFIG, now=FEB_LATE + timedelta(hours=1))
+    assert result["due"] == 0 and stripe.reads == ["sub_1"]
+
+
+def test_the_payments_event_after_the_job_carries_nothing_a_second_time(
+        app, stripe):
+    u = _renewal_failed(stripe)
+    stripe.subs["sub_1"] = _stripe_sub(u, PERIOD_END, NEXT_END)
+    reread_ended_periods(CONFIG, now=FEB_LATE)
+
+    outcome = stripe_billing.handle_event(
+        stripe, {"type": "invoice.paid", "data": {"object": {
+            "id": "in_1", "subscription": "sub_1",
+            "amount_paid": 5000, "total": 5000}}}, CONFIG)
+    _db.session.commit()
+
+    assert outcome == "applied"
+    assert u.subscription_status == "active"
+    assert u.spend_period_start == PERIOD_END
+    assert u.spend_period_carry_microdollars == 10_000_000
+    assert not user_is_capped(u, now=FEB_LATE)
+
+
+def test_a_payment_event_applied_during_the_read_is_kept(app, stripe):
+    """The job reads the subscription while it is still late; before it
+    takes the account's lock, the event of the payment is applied. The
+    payment stays."""
+    u = _renewal_failed(stripe)
+    paid = _stripe_sub(u, PERIOD_END, NEXT_END)
+
+    def paid_meanwhile(_sub_id):
+        stripe.on_read = None
+        stripe_billing.apply_subscription(paid, CONFIG)
+        _db.session.commit()
+    stripe.on_read = paid_meanwhile
+
+    result = reread_ended_periods(CONFIG, now=FEB_LATE)
+
+    assert result["event_first"] == 1 and result["changed"] == 0
+    assert u.subscription_status == "active"
+    assert u.spend_period_carry_microdollars == 10_000_000
+
+
+@pytest.mark.parametrize("ended_as", ["canceled", "unpaid"])
+def test_a_late_payment_is_asked_every_hour_until_stripe_ends_it(
+        app, stripe, ended_as):
+    """Peter sets Stripe to cancel a subscription when every retry
+    failed: from that answer on, the account is not asked again. Stripe's
+    "unpaid" is stored as ended too, and ends the question the same way."""
+    u = _renewal_failed(stripe)
+    hours = [FEB_LATE + timedelta(hours=h) for h in range(4)]
+
+    for when in hours[:2]:
+        result = reread_ended_periods(CONFIG, now=when)
+        assert (result["asked"], result["unchanged"]) == (1, 1)
+    assert stripe.reads == ["sub_1", "sub_1"]
+    assert u.subscription_status == "past_due"
+
+    gone = _stripe_sub(u, PERIOD_END, NEXT_END, status=ended_as)
+    if ended_as == "canceled":
+        gone["cancellation_details"] = {"reason": "payment_failed"}
+    stripe.subs["sub_1"] = gone
+    result = reread_ended_periods(CONFIG, now=hours[2])
+    assert result["changed"] == 1
+    assert u.subscription_status == "ended"
+    assert not u.subscription_grants_access
+
+    result = reread_ended_periods(CONFIG, now=hours[3])
+    assert result["due"] == 0
+    assert stripe.reads == ["sub_1"] * 3
+
+
+def test_late_payments_come_after_ended_periods_in_a_bounded_run(
+        app, stripe, monkeypatch):
+    monkeypatch.setattr(period_reread, "PERIOD_REREAD_MAX_PER_RUN", 2)
+    ended = _subscriber(1)
+    stripe.subs["sub_1"] = _stripe_sub(ended, PERIOD_END, NEXT_END)
+    late = _subscriber(2, subscription_status="past_due",
+                       subscription_period_start=PERIOD_END,
+                       subscription_period_end=NEXT_END)
+    stripe.subs["sub_2"] = _stripe_sub(late, PERIOD_END, NEXT_END,
+                                       status="past_due")
+    no_end = _subscriber(3, subscription_status="past_due",
+                         subscription_period_start=None,
+                         subscription_period_end=None)
+    stripe.subs["sub_3"] = _stripe_sub(no_end, PERIOD_END, NEXT_END,
+                                       status="past_due")
+
+    result = reread_ended_periods(CONFIG, now=FEB_LATE)
+
+    assert stripe.reads == ["sub_1", "sub_2"]
+    assert result["more_waiting"] is True
+
+    stripe.reads.clear()
+    result = reread_ended_periods(CONFIG, now=FEB_LATE + timedelta(hours=1))
+    assert stripe.reads == ["sub_2", "sub_3"]
+    assert result["more_waiting"] is False
+    assert no_end.subscription_period_end == NEXT_END
+
+
+def test_a_read_stripe_refuses_for_one_account_does_not_end_the_run(
+        app, stripe, caplog):
+    u1 = _renewal_failed(stripe, 1)
+    u2 = _renewal_failed(stripe, 2)
+    stripe.refused.add("sub_1")
+    stripe.subs["sub_2"] = _stripe_sub(u2, PERIOD_END, NEXT_END)
+
+    with caplog.at_level(logging.INFO, logger=period_reread.__name__):
+        result = reread_ended_periods(CONFIG, now=FEB_LATE)
+
+    assert result["status"] == "ok"
+    assert (result["asked"], result["failed"], result["changed"]) == (2, 1, 1)
+    assert stripe.reads == ["sub_1", "sub_2"]
+    assert u1.subscription_status == "past_due"
+    assert u2.subscription_status == "active"
+    assert (f"Period read again: Stripe refused the read of subscription "
+            f"sub_1 (user {u1.id}): Exception; nothing changed") in [
+        r.getMessage() for r in caplog.records
+        if r.name == period_reread.__name__]
+    # Asked again the next hour.
+    reread_ended_periods(CONFIG, now=FEB_LATE + timedelta(hours=1))
+    assert stripe.reads == ["sub_1", "sub_2", "sub_1"]
 
 
 def test_a_lower_level_that_arrives_with_the_renewal(app, stripe):
@@ -553,6 +725,8 @@ def test_accounts_without_a_running_subscription_are_not_read(app, stripe):
     _subscriber(2, subscription_status="none")
     _subscriber(3, stripe_subscription_id=None)
     _subscriber(4, subscription_period_end=None)
+    _subscriber(5, subscription_status="past_due",
+                stripe_subscription_id=None)
 
     result = reread_ended_periods(CONFIG, now=AN_HOUR_AFTER)
 
