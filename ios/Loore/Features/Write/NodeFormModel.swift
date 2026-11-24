@@ -161,13 +161,22 @@ final class NodeFormModel {
     private(set) var olderDraft: Draft.OlderEdit?
     /// When the entry last changed (the box's words).
     @ObservationIgnored private(set) var entryChangedAt: Date?
+    /// The edit's Save was refused: the entry changed since the form was opened
+    /// (#799). The form keeps its text; `error` says what to do and the view
+    /// offers "Copy my text".
+    private(set) var newerVersion = false
+
+    /// What the form says when its Save was refused for a newer version (#799).
+    static let newerEntryEditMessage =
+        "There's a newer version of this entry, so your edit wasn't saved. Your text is still here: copy it, go back and open the entry again, then apply your changes to the newer version."
 
     init(config: NodeFormConfig, app: AppState, defaults: UserDefaults = .standard) {
         self.config = config
         self.app = app
         self.defaults = defaults
         drafts = DraftAutosaver(api: app.api, nodeId: config.edit?.nodeId,
-                                parentId: config.isEdit ? nil : config.parentId)
+                                parentId: config.isEdit ? nil : config.parentId,
+                                base: config.edit?.initialContent)
         content = config.edit?.initialContent ?? ""
         let user = app.user
         let remembers = !config.isEdit && config.parentId == nil
@@ -514,6 +523,7 @@ final class NodeFormModel {
         dialog = nil
         loading = true
         error = nil
+        newerVersion = false
         do {
             if let result = try await send(regenerateTts: regenerateTts, applyToReplies: applyToReplies) {
                 loading = false
@@ -526,6 +536,11 @@ final class NodeFormModel {
             if let refusal = QuotesNotPublic(error) {
                 // Nothing was saved: the form keeps its text and settings.
                 dialog = .quotesNotPublic(refusal)
+            } else if config.isEdit, ContentEditQueue.isContentChanged(error) {
+                // Nothing was saved: the entry changed since the form was opened
+                // (#799). The text stays in the form and on the server (its draft).
+                newerVersion = true
+                self.error = Self.newerEntryEditMessage
             } else if uploadedFile != nil, SpendCap.isSpendCapError(error) {
                 app.toasts.show(SpendCap.toastMessage(.upload), duration: 8)
             } else if let apiError = error as? APIError {
@@ -607,6 +622,9 @@ final class NodeFormModel {
             var body: [String: JSONValue] = [
                 "content": .string(content), "privacy_level": .string(privacy.rawString),
                 "ai_usage": .string(aiUsage.rawString),
+                // The text the form was opened on (#799): saved only while it is
+                // still the entry's text; untouched text saves only the settings.
+                "base_content": .string(edit.initialContent),
             ]
             if edit.detachPrompt && content != edit.initialContent { body["detach_prompt"] = .bool(true) }
             if regenerateTts == true { body["regenerate_tts"] = .bool(true) }

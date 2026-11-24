@@ -18,6 +18,11 @@ final class DraftAutosaver {
 
     @ObservationIgnored private let nodeId: Int?
     @ObservationIgnored private let parentId: Int?
+    /// An edit: the entry's text the form was opened on, sent with each save
+    /// (#799). The server marks a draft whose base is no longer the entry's
+    /// text as older than the entry, so a form opened again offers it
+    /// instead of loading it.
+    @ObservationIgnored private let base: String?
     /// The row this form's text is saved in (the loaded draft's, then each
     /// save's answer): "Discard draft" next to a kept older edit deletes only
     /// it (#766).
@@ -31,10 +36,12 @@ final class DraftAutosaver {
     @ObservationIgnored let debounceDelay: TimeInterval
     @ObservationIgnored let autoSaveInterval: TimeInterval
 
-    init(api: APIClient, nodeId: Int?, parentId: Int?, debounceDelay: TimeInterval = 1, autoSaveInterval: TimeInterval = 3) {
+    init(api: APIClient, nodeId: Int?, parentId: Int?, base: String? = nil,
+         debounceDelay: TimeInterval = 1, autoSaveInterval: TimeInterval = 3) {
         self.api = api
         self.nodeId = nodeId
         self.parentId = parentId
+        self.base = nodeId == nil ? nil : base
         self.debounceDelay = debounceDelay
         self.autoSaveInterval = autoSaveInterval
     }
@@ -90,6 +97,7 @@ final class DraftAutosaver {
         var body: [String: JSONValue] = ["content": .string(content)]
         body["node_id"] = .optional(nodeId)
         body["parent_id"] = .optional(parentId)
+        if let base { body["base_content"] = .string(base) }
         do {
             let saved: Draft = try await api.post(APIPath.drafts, json: .object(body))
             lastSaved = saved.updatedAt ?? Date()

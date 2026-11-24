@@ -207,6 +207,15 @@ private struct NodeFormBody: View {
             if let error = model.error {
                 Text(error).font(LooreFont.sans(14.4, .regular)).foregroundStyle(LooreColor.accent)
                     .fixedSize(horizontal: false, vertical: true)
+                if model.newerVersion {
+                    // Refused for a newer version (#799): the text to apply again.
+                    Button("Copy my text") {
+                        UIPasteboard.general.string = model.content
+                        app.toasts.show("Copied your text")
+                    }
+                    .buttonStyle(.looreOutline)
+                    .accessibilityIdentifier("nodeForm.copyMine")
+                }
             }
             if !model.content.jsTrimmed.isEmpty {
                 if model.drafts.isSaving {
