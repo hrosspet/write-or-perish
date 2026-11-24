@@ -1,16 +1,23 @@
-"""A prompt entry is private unless its owner sets its level themselves.
+"""A Text-mode prompt entry is Public only when its owner's default
+level is Public and the message it starts with is Public (Peter,
+2026-11-24).
 
 A prompt entry is the node a Text-mode session starts with: it shows
 its owner's prompt text and carries pinned versions of their profile
 and other documents.
 
-- Every creation path stores it private, whatever the message's level.
-- "This node and all my replies" leaves prompt entries as they are when
-  it raises a level above private; a change to private applies to them.
+- Every Text-mode creation path stores it Public when the owner's
+  default level on the Account page is Public and the message is
+  created Public, else Private. Voice and Glean ones stay Private.
+- "This node and all my replies" applies to prompt entries like to any
+  reply.
 - The owner's own edit of the prompt entry's level works.
 - The public surfaces list a public first message under a private prompt
   root as the top of its thread: once, starting at the message, with a
   permalink of its own; the prompt text reaches nobody but its owner.
+- A public prompt root is listed only with a public entry of its owner
+  under it, and its card shows that entry, not the prompt. Without one,
+  its owner's Log lists it by her own private entry under it.
 - The page cache drops the thread's pages when the message changes.
 
 The real app (create_app) on sqlite; the generation task is mocked.
@@ -258,6 +265,12 @@ def _record(app, who, parent=None, **body):
         f"/api/drafts/streaming/{d.session_id}/save-as-node", json=body)
 
 
+def _set_default(who, level):
+    """*who*'s default level on the Account page."""
+    _user(who).default_privacy_level = level
+    _db.session.commit()
+
+
 def _put(app, who, node_id, **body):
     return _client(app, who).put(f"/api/nodes/{node_id}", json=body)
 
@@ -274,20 +287,44 @@ def _no_prompt_text(text):
 # ── Creation ──────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("level", ["public", "private"])
-def test_a_typed_new_thread_has_a_private_prompt_entry(app, level):
+# The account's default level on the Account page and the message's
+# level: a new Text-mode prompt entry is Public only when both are
+# Public. Any other default (Circles, a value of an older client) counts
+# as Private.
+by_default = pytest.mark.parametrize(
+    "default", ["private", "public", "circles", "anonymous"])
+by_level = pytest.mark.parametrize("level", ["public", "private"])
+
+
+def _expected(default, level):
+    return ("public" if (default, level) == ("public", "public")
+            else "private")
+
+
+@by_default
+@by_level
+def test_a_typed_new_thread_has_a_public_prompt_entry_only_under_a_public_default(
+        app, default, level):
+    expected = _expected(default, level)
+    _set_default("anna", default)
+
     prompt, message = _start(app, level=level)
 
     assert prompt.parent_id is None and prompt.prompt_key == "textmode"
-    assert prompt.privacy_level == "private"
+    assert prompt.privacy_level == expected
     assert message.parent_id == prompt.id
     assert message.privacy_level == level
     assert bool(message.public_slug) == (level == "public")
     assert prompt.public_slug is None
 
 
-@pytest.mark.parametrize("level", ["public", "private"])
-def test_a_recorded_new_thread_has_a_private_prompt_entry(app, level):
+@by_default
+@by_level
+def test_a_recorded_new_thread_has_a_public_prompt_entry_only_under_a_public_default(
+        app, default, level):
+    expected = _expected(default, level)
+    _set_default("anna", default)
+
     resp = _record(app, "anna", agentic=True, privacy_level=level,
                    ai_usage="chat")
 
@@ -296,15 +333,19 @@ def test_a_recorded_new_thread_has_a_private_prompt_entry(app, level):
     prompt = _get(data["conversation_id"])
     message = _get(data["user_node_id"])
     assert prompt.parent_id is None and prompt.prompt_key == "textmode"
-    assert prompt.privacy_level == "private"
+    assert prompt.privacy_level == expected
     assert message.parent_id == prompt.id
     assert message.privacy_level == level
     assert bool(message.public_slug) == (level == "public")
 
 
-@pytest.mark.parametrize("level", ["public", "private"])
-def test_an_uploaded_recording_that_starts_a_thread_has_a_private_prompt_entry(
-        app, level):
+@by_default
+@by_level
+def test_an_uploaded_thread_has_a_public_prompt_entry_only_under_a_public_default(
+        app, default, level):
+    expected = _expected(default, level)
+    _set_default("anna", default)
+
     resp = _client(app, "anna").post("/api/nodes/upload/init", json={
         "filename": "note.webm", "filesize": 1000, "total_chunks": 1,
         "upload_id": uuid.uuid4().hex, "privacy_level": level,
@@ -314,28 +355,63 @@ def test_an_uploaded_recording_that_starts_a_thread_has_a_private_prompt_entry(
     message = _get(resp.get_json()["node_id"])
     prompt = _get(message.parent_id)
     assert prompt.prompt_key == "textmode" and prompt.parent_id is None
-    assert (message.privacy_level, prompt.privacy_level) == (level, "private")
+    assert (message.privacy_level, prompt.privacy_level) == (level, expected)
     # No address of its own before its transcript exists.
     assert message.public_slug is None
 
 
-@pytest.mark.parametrize("level", ["public", "private"])
-def test_the_helpers_store_private(app, level):
+@by_default
+@pytest.mark.parametrize("level", ["public", "private", "circles"])
+def test_the_helpers_follow_the_rule_for_text_mode_only(
+        app, default, level):
+    expected = _expected(default, level)
     from backend.utils.session_helpers import (
         attach_agentic_prompt_under, create_agentic_root)
+    _set_default("anna", default)
     anna = _user("anna")
-    root = create_agentic_root(anna.id, "textmode", "chat")
+    root = create_agentic_root(anna.id, "textmode", level, "chat")
     own = _node("anna", "an entry of anna's", privacy=level)
-    under = attach_agentic_prompt_under(own, anna.id, "textmode", "chat")
+    under = attach_agentic_prompt_under(
+        own, anna.id, "textmode", level, "chat")
+    voice_root = create_agentic_root(anna.id, "voice", level, "chat")
+    other = _node("anna", "another entry of anna's", privacy=level)
+    voice_under = attach_agentic_prompt_under(
+        other, anna.id, "voice", level, "chat")
     _db.session.commit()
 
-    assert root.privacy_level == "private"
-    assert under.privacy_level == "private"
+    assert root.privacy_level == expected
+    assert under.privacy_level == expected
+    assert voice_root.privacy_level == "private"
+    assert voice_under.privacy_level == "private"
 
 
-@pytest.mark.parametrize("level", ["public", "private"])
-def test_a_recorded_reply_under_ones_own_gleaning_has_a_private_prompt_entry(
-        app, level):
+@pytest.mark.parametrize("default", ["private", "public"])
+def test_voice_and_glean_prompt_entries_stay_private(app, default):
+    """A Voice session and a Glean: their prompt entries are private
+    whatever the account's default, as before."""
+    _set_default("anna", default)
+
+    resp = _client(app, "anna").post("/api/voice/", json={
+        "content": "spoken in voice", "model": "gpt-5", "ai_usage": "chat"})
+
+    assert resp.status_code in (200, 201, 202), resp.get_json()
+    voice_root = Node.query.filter_by(prompt_key="voice").one()
+    assert voice_root.parent_id is None
+    assert voice_root.privacy_level == "private"
+    from backend.routes.read import READ_PRIVACY
+    from backend.utils.session_helpers import prompt_entry_privacy
+    assert READ_PRIVACY == "private"
+    for key in ("voice", "read", "read_thread"):
+        assert prompt_entry_privacy(
+            _user("anna").id, key, "public") == "private"
+
+
+@by_default
+@by_level
+def test_a_recorded_reply_under_ones_own_gleaning_follows_the_rule(
+        app, default, level):
+    expected = _expected(default, level)
+    _set_default("anna", default)
     gleaning = _gleaning("anna", level)
 
     resp = _record(app, "anna", gleaning, agentic=True, privacy_level=level,
@@ -346,12 +422,15 @@ def test_a_recorded_reply_under_ones_own_gleaning_has_a_private_prompt_entry(
     prompt = _get(data["conversation_id"])
     message = _get(data["user_node_id"])
     assert prompt.parent_id == gleaning.id
-    assert (message.privacy_level, prompt.privacy_level) == (level, "private")
+    assert (message.privacy_level, prompt.privacy_level) == (level, expected)
 
 
-@pytest.mark.parametrize("level", ["public", "private"])
-def test_a_typed_reply_under_ones_own_gleaning_has_a_private_prompt_entry(
-        app, level):
+@by_default
+@by_level
+def test_a_typed_reply_under_ones_own_gleaning_follows_the_rule(
+        app, default, level):
+    expected = _expected(default, level)
+    _set_default("anna", default)
     gleaning = _gleaning("anna", level)
 
     resp = _client(app, "anna").post(
@@ -364,7 +443,7 @@ def test_a_typed_reply_under_ones_own_gleaning_has_a_private_prompt_entry(
     prompt = _get(data["prompt_node_id"])
     message = _get(data["user_node_id"])
     assert prompt.parent_id == gleaning.id
-    assert (message.privacy_level, prompt.privacy_level) == (level, "private")
+    assert (message.privacy_level, prompt.privacy_level) == (level, expected)
 
 
 def test_under_ones_own_ai_reply_in_another_persons_public_thread(app):
@@ -394,7 +473,10 @@ def test_under_ones_own_ai_reply_in_another_persons_public_thread(app):
 # ── "This node and all my replies" ────────────────────────────────────
 
 
-def test_raising_a_threads_level_leaves_its_prompt_entries_private(app):
+def test_raising_a_threads_level_applies_to_its_prompt_entries(app):
+    """"This node and all my replies" covers every node below, prompt
+    entries included (Peter, 2026-11-24: the user's own click shares
+    them)."""
     entry = _node("anna", "anna entry")
     gleaning = _ai_reply("anna", entry, "private")
     prompt, message = _stored_prompt_entry("anna", gleaning, "private")
@@ -405,12 +487,9 @@ def test_raising_a_threads_level_leaves_its_prompt_entries_private(app):
                 privacy_level="public", apply_to_descendants=True)
 
     assert resp.status_code == 200, resp.get_json()
-    assert resp.get_json()["descendants_updated"] == 3
-    assert _get(gleaning.id).privacy_level == "public"
-    assert _get(message.id).privacy_level == "public"
-    assert _get(earlier_msg.id).privacy_level == "public"
-    assert _get(prompt.id).privacy_level == "private"
-    assert _get(earlier.id).privacy_level == "private"
+    assert resp.get_json()["descendants_updated"] == 5
+    for node in (gleaning, prompt, message, earlier, earlier_msg):
+        assert _get(node.id).privacy_level == "public", node.id
 
 
 def test_lowering_a_threads_level_applies_to_its_prompt_entries(app):
@@ -445,8 +524,7 @@ def test_lowering_a_threads_level_lowers_a_public_prompt_entry_inside_it(
         assert _get(node.id).privacy_level == level, node.id
 
 
-def test_raising_to_the_middle_level_keeps_private_prompt_entries_and_lowers_public_ones(
-        app):
+def test_the_middle_level_applies_to_every_prompt_entry_below(app):
     entry = _node("anna", "anna entry")
     private_prompt, m1 = _stored_prompt_entry("anna", entry, "private")
     public_prompt, m2 = _stored_prompt_entry("anna", entry, "public")
@@ -455,10 +533,8 @@ def test_raising_to_the_middle_level_keeps_private_prompt_entries_and_lowers_pub
                 privacy_level="circles", apply_to_descendants=True)
 
     assert resp.status_code == 200, resp.get_json()
-    assert _get(private_prompt.id).privacy_level == "private"
-    assert _get(public_prompt.id).privacy_level == "circles"
-    assert _get(m1.id).privacy_level == "circles"
-    assert _get(m2.id).privacy_level == "circles"
+    for node in (private_prompt, public_prompt, m1, m2):
+        assert _get(node.id).privacy_level == "circles", node.id
 
 
 def test_a_change_of_ai_usage_still_applies_to_prompt_entries(app):
@@ -471,7 +547,7 @@ def test_a_change_of_ai_usage_still_applies_to_prompt_entries(app):
 
     assert resp.status_code == 200, resp.get_json()
     prompt = _get(prompt.id)
-    assert (prompt.privacy_level, prompt.ai_usage) == ("private", "train")
+    assert (prompt.privacy_level, prompt.ai_usage) == ("public", "train")
 
 
 # ── The owner's own edit of the prompt entry ──────────────────────────
@@ -630,11 +706,12 @@ def test_a_private_thread_is_listed_nowhere(app):
 
 def test_what_counts_as_the_top_of_a_thread(app):
     """Listed: a public root; a public node WITH A SLUG under a living
-    private prompt root of the same person. Not listed: such a node
-    without a slug, or under a deleted prompt root, a private root that
-    is no prompt entry, another person's private prompt root, a public
-    prompt root (the root is listed), a private prompt entry further
-    down a thread, or a prompt root without the key."""
+    private prompt root of the same person; a public prompt root with a
+    public entry of its owner under it (its card is that entry). Not
+    listed: such a node without a slug, or under a deleted prompt root,
+    a private root that is no prompt entry, another person's private
+    prompt root, a private prompt entry further down a thread, or a
+    prompt root without the key."""
     root = _node("anna", "a public root", privacy="public")
 
     def under(parent_owner, level, text, slug, **kw):
@@ -656,20 +733,215 @@ def test_what_counts_as_the_top_of_a_thread(app):
     bens_prompt, _ = _stored_prompt_entry("ben", None, "private")
     _node("anna", "under ben's private prompt root", parent=bens_prompt,
           privacy="public", slug="bens")
-    shared_prompt, _ = under("anna", "public", "public prompt root", "shared-root")
+    shared_prompt, shared = under(
+        "anna", "public", "public prompt root", "shared-root")
     under("anna", "private", "inside a thread", "inside", parent=root)
     under("anna", "private", "root without the key", "unstamped",
           stamped=False)
     _db.session.commit()
 
-    tops = {root.id, first.id, shared_prompt.id}
+    tops = {root.id, first.id, shared.id}
     listed = _listed_ids(app)
     assert set(listed["feed"]) == tops and len(listed["feed"]) == 3
     assert set(listed["share"]) == tops and len(listed["share"]) == 3
     sitemap = _body(_client(app).get("/sitemap.xml"))
     assert "/@anna/first</loc>" in sitemap
+    assert "/@anna/shared-root</loc>" in sitemap
     for slug in ("gone", "plain", "bens", "inside", "unstamped"):
         assert f"/@anna/{slug}</loc>" not in sitemap, slug
+
+
+def _listed_nowhere(app):
+    """No listing, no profile page, feed or sitemap entry for Anna."""
+    from backend.utils.username_history import _published_under
+    assert _listed_ids(app) == {"feed": [], "share": []}
+    anon = _client(app)
+    assert anon.get("/@anna").status_code == 404
+    assert anon.get("/@anna/feed.xml").status_code == 404
+    assert anon.get("/@anna/og.png").status_code == 404
+    assert "/@anna" not in _body(anon.get("/sitemap.xml"))
+    assert not _published_under(_user("anna"))
+
+
+def _listing_bodies(app):
+    anon = _client(app)
+    return [_body(r) for r in (
+        anon.get("/@anna"), anon.get("/@anna/feed.xml"),
+        anon.get("/sitemap.xml"), anon.get("/api/share/public/anna"),
+        _client(app, "ben").get("/api/commons/feed"))]
+
+
+def test_a_thread_started_with_the_default_public_is_listed_by_its_message(
+        app):
+    """Default Public: the prompt root is public and is the thread's
+    top; every listing shows its message instead of the prompt, with the
+    message's permalink. The thread's page is as before."""
+    _set_default("anna", "public")
+    prompt, message = _start(app)
+    assert prompt.privacy_level == "public"
+    slug = message.public_slug
+    assert slug == "anna-on-rivers"
+    _node("ben", "BEN-REPLY to anna", parent=message, privacy="public")
+
+    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
+    share = _client(app).get("/api/share/public/anna").get_json()["shares"]
+    assert share[0]["public_node_id"] == message.id
+    assert share[0]["permalink"] == f"/@anna/{slug}"
+    assert "ANNA-PUBLIC-BODY" in share[0]["content"]
+    item = _client(app, "ben").get("/api/commons/feed").get_json()["items"][0]
+    assert item["permalink"] == f"/@anna/{slug}"
+    assert item["username"] == "anna"
+    assert item["reply_count"] == 1
+    assert "ANNA-PUBLIC-BODY" in item["content"]
+
+    anon = _client(app)
+    profile = _body(anon.get("/@anna"))
+    assert profile.count("<article>") == 1
+    assert (f'href="https://loore.org/@anna/{slug}">Anna on rivers</a>'
+            in profile)
+    assert "ANNA-PUBLIC-BODY" in profile
+    feed_xml = _body(anon.get("/@anna/feed.xml"))
+    assert feed_xml.count("<entry>") == 1
+    assert f"<id>https://loore.org/@anna/{slug}</id>" in feed_xml
+    assert "<title>Anna on rivers</title>" in feed_xml
+    assert "ANNA-PUBLIC-BODY" in feed_xml
+    sitemap = _body(anon.get("/sitemap.xml"))
+    assert sitemap.count("/@anna/") == 1
+    assert f"https://loore.org/@anna/{slug}</loc>" in sitemap
+    for body in _listing_bodies(app):
+        _no_prompt_text(body)
+
+    # The thread's own pages: the public root shows its prompt text (not
+    # the pinned documents), as before; the message's permalink shows the
+    # message.
+    page = _body(anon.get(f"/node/{prompt.id}"))
+    assert "ANNA-PROMPT-TEXT" in page and "ANNA-PUBLIC-BODY" in page
+    for mark in PERSONAL:
+        assert mark not in page
+    assert "<h1>Anna on rivers</h1>" in _body(anon.get(f"/@anna/{slug}"))
+    thread = anon.get(f"/api/commons/node/{message.id}").get_json()
+    assert thread["thread"]["id"] == prompt.id
+
+
+def test_a_public_prompt_root_is_listed_only_with_a_public_entry_of_its_owner(
+        app):
+    """A public thread started under the default Public, its message set
+    private later: the public prompt root is read by its link and listed
+    nowhere, also with another person's public reply under it. Once her
+    message is public again it is listed, its card the message, which
+    kept its permalink."""
+    _set_default("anna", "public")
+    prompt, message = _start(app)
+    slug = message.public_slug
+    resp = _put(app, "anna", message.id, content=message.get_content(),
+                privacy_level="private")
+    assert resp.status_code == 200, resp.get_json()
+    assert (_get(prompt.id).privacy_level,
+            _get(message.id).privacy_level) == ("public", "private")
+
+    _listed_nowhere(app)
+    assert _client(app).get(f"/node/{prompt.id}").status_code == 200
+    _node("ben", "BEN-UNDER-THE-PROMPT", parent=prompt, privacy="public")
+    _listed_nowhere(app)
+
+    resp = _put(app, "anna", message.id, content=message.get_content(),
+                privacy_level="public")
+
+    assert resp.status_code == 200, resp.get_json()
+    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
+    share = _client(app).get("/api/share/public/anna").get_json()["shares"]
+    assert share[0]["permalink"] == f"/@anna/{slug}"
+    assert "ANNA-PUBLIC-BODY" in share[0]["content"]
+    assert _client(app).get("/@anna").status_code == 200
+    for body in _listing_bodies(app):
+        _no_prompt_text(body)
+        assert "BEN-UNDER-THE-PROMPT" not in body
+
+
+def test_a_set_public_message_under_a_bare_public_root_lists_it_by_id(app):
+    """A stored public prompt root whose message was private: the message
+    set public through the edit route gets no permalink, so the root is
+    listed with the message as its card, linked by id."""
+    prompt, message = _stored_prompt_entry(
+        "anna", None, "public", message_privacy="private",
+        text="# Stored thread\n\nSTORED-BODY")
+    _listed_nowhere(app)
+
+    resp = _put(app, "anna", message.id, content=message.get_content(),
+                privacy_level="public")
+
+    assert resp.status_code == 200, resp.get_json()
+    assert _get(message.id).public_slug is None
+    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
+    share = _client(app).get("/api/share/public/anna").get_json()["shares"]
+    assert share[0]["permalink"] is None
+    assert "<h2>Stored thread</h2>" in _body(_client(app).get("/@anna"))
+
+
+def test_the_card_is_the_owners_first_living_public_entry_under_the_root(
+        app):
+    """Oldest first: Ben's public reply, her private and her deleted
+    entries are passed over; a stored prompt root without the key (only
+    its prompt link) is recognised too."""
+    from datetime import datetime, timedelta
+    for stamped in (True, False):
+        prompt, private_msg = _stored_prompt_entry(
+            "anna", None, "public", stamped=stamped, message_privacy="private",
+            text=f"PRIVATE-FIRST {stamped}")
+        bens = _node("ben", "BEN-OLDER", parent=prompt, privacy="public")
+        gone = _node("anna", "GONE-PUBLIC", parent=prompt, privacy="public")
+        gone.deleted_at = datetime.utcnow()
+        first = _node("anna", f"# First public {stamped}\n\nFIRST-BODY",
+                      parent=prompt, privacy="public")
+        later = _node("anna", "LATER-PUBLIC", parent=prompt,
+                      privacy="public")
+        base = datetime.utcnow() - timedelta(days=1)
+        for i, node in enumerate((private_msg, bens, gone, first, later)):
+            node.created_at = base + timedelta(minutes=i)
+        _db.session.commit()
+
+    firsts = [n.id for n in Node.query.filter(
+        Node.content.like("# First public%")).all()]
+    listed = _listed_ids(app)
+    assert sorted(listed["feed"]) == sorted(firsts)
+    assert sorted(listed["share"]) == sorted(firsts)
+    for body in _listing_bodies(app):
+        for mark in ("PRIVATE-FIRST", "BEN-OLDER", "GONE-PUBLIC",
+                     "LATER-PUBLIC"):
+            assert mark not in body, mark
+    assert _body(_client(app).get("/@anna")).count("FIRST-BODY") == 2
+
+
+def test_only_bare_prompt_roots_leave_the_listings(app):
+    """A public root that is no prompt entry is listed with or without
+    entries under it, its own or other people's; a public prompt root is
+    listed by its owner's public entry; only a public prompt root with no
+    public entry of its owner under it is left out."""
+    alone = _node("anna", "# Alone\n\nALONE", privacy="public",
+                  slug="alone")
+    with_private = _node("anna", "# With a private reply\n\nx",
+                         privacy="public", slug="with-private")
+    _node("anna", "a private note", parent=with_private)
+    with_bens = _node("anna", "# With Ben\n\ny", privacy="public",
+                      slug="with-bens")
+    _node("ben", "a reply of ben's", parent=with_bens, privacy="public")
+    shared, message = _stored_prompt_entry(
+        "anna", None, "public", text="# Shared thread\n\nz")
+    bare, _ = _stored_prompt_entry(
+        "anna", None, "public", message_privacy="private")
+    bare.public_slug = "shared"
+    _db.session.commit()
+
+    tops = {alone.id, with_private.id, with_bens.id, message.id}
+    listed = _listed_ids(app)
+    assert set(listed["feed"]) == tops and len(listed["feed"]) == 4
+    assert set(listed["share"]) == tops and len(listed["share"]) == 4
+    sitemap = _body(_client(app).get("/sitemap.xml"))
+    for slug in ("alone", "with-private", "with-bens"):
+        assert f"/@anna/{slug}</loc>" in sitemap, slug
+    assert "/@anna/shared</loc>" not in sitemap
+    # The bare root keeps its own page.
+    assert _client(app).get("/@anna/shared").status_code == 200
 
 
 def _stored_private_session(key, text):
@@ -826,6 +1098,31 @@ def test_an_uploaded_public_thread_gets_its_address_with_its_transcript(
     assert second.public_slug == "a-walk-by-the-river-2"
 
 
+def test_an_uploaded_thread_under_the_default_public_is_listed_by_its_message(
+        app, monkeypatch, tmp_path):
+    """Default Public: the public prompt root is listed, its card the
+    upload; the upload's permalink comes with its transcript, as under a
+    private root, and the card links to it from then on."""
+    _set_default("anna", "public")
+    message = _upload(app)
+    prompt = _get(message.parent_id)
+    assert prompt.privacy_level == "public"
+    assert _listed_ids(app) == {"feed": [message.id], "share": [message.id]}
+    assert _client(app).get(
+        "/api/share/public/anna").get_json()["shares"][0]["permalink"] is None
+
+    done = _transcribe(app, monkeypatch, tmp_path, message.id,
+                       text="A walk by the river\n\nand more")
+
+    assert done.public_slug == "a-walk-by-the-river"
+    share = _client(app).get("/api/share/public/anna").get_json()["shares"]
+    assert share[0]["permalink"] == "/@anna/a-walk-by-the-river"
+    assert "/@anna/a-walk-by-the-river</loc>" in _body(
+        _client(app).get("/sitemap.xml"))
+    assert "/@anna/a-walk-by-the-river" in _body(
+        _client(app).get("/@anna/feed.xml"))
+
+
 def test_a_failed_transcription_leaves_no_address_and_a_retry_gives_it(
         app, monkeypatch, tmp_path):
     message = _upload(app)
@@ -882,9 +1179,9 @@ def test_an_upload_set_private_or_deleted_meanwhile_gets_no_address(
     assert _listed_ids(app) == {"feed": [], "share": []}
 
 
-def test_only_the_first_entry_under_a_private_text_root_gets_the_address(
-        app):
-    """The rule of slugs.slug_transcribed_thread, case by case."""
+def test_only_the_first_entry_under_a_text_root_gets_the_address(app):
+    """The rule of slugs.slug_transcribed_thread, case by case: under a
+    private or a public Text-mode prompt root of the same person."""
     from backend.utils.slugs import slug_transcribed_thread
 
     def given(node):
@@ -907,10 +1204,11 @@ def test_only_the_first_entry_under_a_private_text_root_gets_the_address(
         "anna", None, "private")[0], privacy="public", slug="kept")
     _db.session.commit()
 
-    for node in (private_upload, plain_root, second, voice, under_public,
-                 under_inside, _get(has_one.id)):
+    for node in (private_upload, plain_root, second, voice, under_inside,
+                 _get(has_one.id)):
         assert given(_get(node.id)) is None, node.id
     assert given(_get(first.id)) == "spoken-words-here"
+    assert given(_get(under_public.id)) == "spoken-words-here"
     assert slug_transcribed_thread(_get(first.id), "  ") is None
 
 
@@ -1171,11 +1469,13 @@ def _statements(app, request):
     return len(seen)
 
 
-def test_a_listing_page_makes_as_many_queries_for_either_kind_of_top(app):
+def test_a_listing_page_makes_as_many_queries_for_every_kind_of_top(app):
     """Three plain public roots, three more, then three threads under
-    private prompt roots: each step adds the same number of queries to a
-    listing (what an entry cost before: its pins, its publish date), and
-    none to the sitemap. The rule is part of the listing's own query."""
+    private prompt roots, then three under public ones (their cards):
+    each step adds the same number of queries to a listing (what an
+    entry cost before: its pins, its publish date), and none to the
+    sitemap. The rules are part of the listing's own query; the cards
+    of a page are one query."""
     requests = {
         "share": lambda: _client(app).get("/api/share/public/anna"),
         "profile": lambda: _client(app).get("/@anna"),
@@ -1199,11 +1499,16 @@ def test_a_listing_page_makes_as_many_queries_for_either_kind_of_top(app):
     for i in range(3):
         _start(app, content=f"# Thread {i}\n\nbody")
     nine = measure()
+    _set_default("anna", "public")
+    for i in range(3, 6):
+        _start(app, content=f"# Thread {i}\n\nbody")
+    twelve = measure()
 
-    assert len(_listed_ids(app)["share"]) == 9
+    assert len(_listed_ids(app)["share"]) == 12
     for name in requests:
         assert nine[name] - six[name] == six[name] - three[name], name
-    assert nine["sitemap"] == three["sitemap"] == 1
+        assert twelve[name] - nine[name] == six[name] - three[name], name
+    assert twelve["sitemap"] == three["sitemap"] == 1
 
 
 # ── Page cache ────────────────────────────────────────────────────────
@@ -1261,6 +1566,35 @@ def test_a_reply_and_a_takedown_drop_the_threads_cached_pages(
         assert key not in fake_redis.store
     assert anon.get(f"/@anna/{slug}").status_code == 404
     assert anon.get(f"/node/{message.id}").status_code == 404
+
+
+def test_an_edit_of_a_card_drops_the_listings_of_its_public_root(
+        app, fake_redis):
+    _set_default("anna", "public")
+    prompt, message = _start(app)
+    anon = _client(app)
+    pages = ["/@anna", "/@anna/feed.xml", "/sitemap.xml",
+             f"/@anna/{message.public_slug}", f"/node/{prompt.id}"]
+    for url in pages:
+        assert anon.get(url).status_code == 200
+        assert f"public_html:{url}" in fake_redis.store, url
+
+    resp = _put(app, "anna", message.id,
+                content="# Anna on rivers\n\nANNA-NEW-BODY",
+                privacy_level="public")
+
+    assert resp.status_code == 200, resp.get_json()
+    for url in pages:
+        assert f"public_html:{url}" not in fake_redis.store, url
+    for url in ("/@anna", "/@anna/feed.xml"):
+        page = _body(anon.get(url))
+        assert "ANNA-NEW-BODY" in page and "ANNA-PUBLIC-BODY" not in page
+
+    resp = _put(app, "anna", message.id, content="# Private now\n\nx",
+                privacy_level="private")
+    assert resp.status_code == 200, resp.get_json()
+    assert anon.get("/@anna").status_code == 404
+    assert anon.get("/@anna/feed.xml").status_code == 404
 
 
 def test_the_many_node_and_account_drops_reach_the_messages_pages(
@@ -1416,3 +1750,67 @@ def test_no_route_gives_the_prompt_text_to_anyone_but_its_owner(app):
         seen, count = _sweep(app, viewer, ints, strings, extra)
         assert count > 500
         assert seen == {}, (viewer, seen)
+
+
+# ── The owner's Log ───────────────────────────────────────────────────
+
+
+def _log(app, who="anna"):
+    resp = _client(app, who).get("/api/log")
+    assert resp.status_code == 200
+    return resp.get_json()["nodes"], _body(resp)
+
+
+def test_a_public_prompt_root_no_listing_shows_is_in_its_owners_log(app):
+    """A public thread started under the default Public, its message set
+    private later: no public listing shows the thread, so its owner's
+    Log does, by her own private message (the Log shows private entries
+    only, 2026-10-15): not the prompt, not another person's public reply
+    under it. Once her message is public again the thread is listed
+    publicly and leaves the Log, as a public thread does."""
+    _set_default("anna", "public")
+    prompt, message = _start(app)
+    assert _log(app)[0] == []
+    resp = _put(app, "anna", message.id, content=message.get_content(),
+                privacy_level="private")
+    assert resp.status_code == 200, resp.get_json()
+    _node("ben", "BEN-UNDER-THE-PROMPT", parent=prompt, privacy="public")
+
+    cards, body = _log(app)
+
+    assert [c["id"] for c in cards] == [message.id]
+    assert cards[0]["thread_root_id"] == prompt.id
+    assert "ANNA-PUBLIC-BODY" in body
+    assert "BEN-UNDER-THE-PROMPT" not in body
+    _no_prompt_text(body)
+
+    resp = _put(app, "anna", message.id, content=message.get_content(),
+                privacy_level="public")
+    assert resp.status_code == 200, resp.get_json()
+    assert _log(app)[0] == []
+    assert _listed_ids(app)["share"] == [message.id]
+
+
+def test_a_private_message_under_a_public_default_keeps_the_thread_private(
+        app):
+    """Default Public, message Private: the prompt entry is private too,
+    and the thread is in the Log like any private one."""
+    _set_default("anna", "public")
+    prompt, message = _start(app, level="private")
+
+    assert prompt.privacy_level == "private"
+    assert [c["id"] for c in _log(app)[0]] == [message.id]
+    _listed_nowhere(app)
+
+
+def test_the_log_keeps_threads_with_a_private_prompt_root(app):
+    """Default Private: a Text thread is in the Log whatever its
+    message's level, as before."""
+    _, public_msg = _start(app, level="public")
+    _, private_msg = _start(app, level="private",
+                            content="# Second\n\nSECOND-BODY")
+
+    cards, _ = _log(app)
+
+    assert sorted(c["id"] for c in cards) == sorted(
+        [public_msg.id, private_msg.id])

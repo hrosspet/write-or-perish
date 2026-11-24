@@ -10,6 +10,7 @@ from backend.utils.encryption import prefetch_deks
 from backend.utils.thread_tree import (
     thread_root_of, subtree_walk, alive_child_counts,
 )
+from backend.utils.public_threads import unlisted_public_prompt_root
 from sqlalchemy import and_, or_, func, case
 from sqlalchemy.orm.attributes import set_committed_value
 
@@ -97,9 +98,15 @@ def get_log():
     # another user's public reply keeps the thread out (#516), while the
     # user's private replies under a root published "this only" stay
     # reachable.
+    #
+    # The same holds for a living public prompt root that no public
+    # listing shows (no public entry of the user's directly under it,
+    # utils/public_threads): a Text-mode thread started at the account's
+    # default Public with a private message. It is a seed too, and is
+    # listed when the user's own private writing is under it.
     deleted_roots = db.session.query(Node.id).filter(
         Node.parent_id.is_(None),
-        Node.deleted_at.isnot(None),
+        or_(Node.deleted_at.isnot(None), unlisted_public_prompt_root()),
         or_(
             Node.user_id == current_user.id,
             Node.human_owner_id == current_user.id,
@@ -144,9 +151,13 @@ def get_log():
             # of the user's own non-public descendants (#516, see
             # `alive_roots`). Pinned non-roots that are soft-deleted
             # stay hidden — this branch only relaxes the rule for roots.
+            # Also a living public prompt root no public listing shows,
+            # with the user's own non-public writing under it (see
+            # `alive_roots`).
             and_(
                 Node.parent_id.is_(None),
-                Node.deleted_at.isnot(None),
+                or_(Node.deleted_at.isnot(None),
+                    Node.privacy_level == PrivacyLevel.PUBLIC.value),
                 Node.id.in_(alive_roots),
             ),
         ),
@@ -238,13 +249,16 @@ def get_log():
     # NULL` filter here is what keeps deleted nodes out. Do not drop that
     # filter as redundant.
     #
-    # Under a deleted public root only the user's own non-public nodes
-    # are picked, the same rule that listed the root: the card shows the
-    # user's private reply, never another user's public one.
+    # Under a deleted public root, and under a public prompt root no
+    # public listing shows, only the user's own non-public nodes are
+    # picked, the same rule that listed the root: the card shows the
+    # user's private reply, never another user's public one nor the
+    # public prompt. (Every public row of the page is such a root: the
+    # query lists no other public node.)
     root_ids = [n.id for n in items]
-    deleted_public_root_ids = [
+    public_root_ids = [
         n.id for n in items
-        if n.parent_id is None and n.deleted_at is not None
+        if n.parent_id is None
         and n.privacy_level == PrivacyLevel.PUBLIC.value
     ]
     newest_map = {}
@@ -266,10 +280,10 @@ def get_log():
                 ),
             ).label("rn_first"),
         ).filter(walk.c.deleted_at.is_(None))
-        if deleted_public_root_ids:
+        if public_root_ids:
             shown_node = db.aliased(Node, flat=True)
             ranked = ranked.join(shown_node, shown_node.id == walk.c.id).filter(or_(
-                walk.c.root_id.notin_(deleted_public_root_ids),
+                walk.c.root_id.notin_(public_root_ids),
                 _own_private(walk, shown_node, current_user.id),
             ))
         ranked = ranked.subquery()

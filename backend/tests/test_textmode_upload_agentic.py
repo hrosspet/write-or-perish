@@ -180,6 +180,24 @@ class TestMultipartUpload:
         assert args[0] == entry.id
         assert kwargs == {"auto_reply_model": "gpt-5"}
 
+    @pytest.mark.parametrize("default", ["private", "public", "circles"])
+    @pytest.mark.parametrize("level", ["public", "private"])
+    def test_the_prompt_entry_is_public_only_for_a_public_upload_under_a_public_default(
+            self, client, alice, default, level):
+        """Public only when the account's default on the Account page is
+        Public and the recording is uploaded Public; else Private (Peter,
+        2026-11-24)."""
+        alice.default_privacy_level = default
+        _db.session.commit()
+
+        data = _upload(client, agentic="true", privacy_level=level).get_json()
+
+        root = _assert_textmode_root(data["conversation_id"])
+        expected = ("public" if (default, level) == ("public", "public")
+                    else "private")
+        assert root.privacy_level == expected
+        assert Node.query.get(data["id"]).privacy_level == level
+
     def test_agentic_without_reply(self, client, stub_tasks):
         transcription, _ = stub_tasks
         data = _upload(client, agentic="true").get_json()

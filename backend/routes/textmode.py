@@ -134,9 +134,11 @@ def start_conversation():
         if refused is not None:
             return read_only_model_response(refused)
 
-    # 1. System node with the textmode prompt: private, whatever the
-    # entry's level (session_helpers.PROMPT_ENTRY_PRIVACY).
-    system_node = create_agentic_root(current_user.id, PROMPT_KEY, ai_usage)
+    # 1. System node with the textmode prompt: Public only for a Public
+    # entry of an account whose default is Public
+    # (session_helpers.prompt_entry_privacy).
+    system_node = create_agentic_root(
+        current_user.id, PROMPT_KEY, privacy_level, ai_usage)
     # Started from the Glean card (#435): every turn offers Glean.
     from backend.utils.glean import stamp_glean_entry
     stamp_glean_entry(system_node, current_user, data.get("entry"))
@@ -161,9 +163,11 @@ def start_conversation():
     )
     user_node.set_content(segments[0])
     if privacy_level == "public":
-        # A public entry is the top of its thread on the public pages
-        # (utils/public_threads): it gets its permalink slug at birth, as
-        # a typed public root does (POST /nodes/, #228).
+        # A public entry is what the public listings show for its thread
+        # (utils/public_threads): the top of the thread under a private
+        # prompt root, the root's card under a public one. It gets its
+        # permalink slug at birth, as a typed public root does (POST
+        # /nodes/, #228).
         from backend.utils.slugs import generate_unique_public_slug
         user_node.public_slug = generate_unique_public_slug(
             current_user.id, segments[0])
@@ -577,7 +581,7 @@ def continue_from_node(node_id):
             return read_only_model_response(refused)
 
     prompt_node = attach_agentic_prompt_under(
-        node, current_user.id, PROMPT_KEY, ai_usage)
+        node, current_user.id, PROMPT_KEY, privacy_level, ai_usage)
     parent_id = prompt_node.id if prompt_node is not None else node.id
 
     from backend.utils.tokens import approximate_token_count

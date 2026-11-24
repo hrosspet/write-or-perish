@@ -1,5 +1,5 @@
-"""The rules of test_prompt_entries_private.py on PostgreSQL: the
-listings' own query for the top of a thread, the cascade and the page
+"""The rules of test_prompt_entry_level.py on PostgreSQL: the listings'
+own query for the top of a thread and its card, the cascade and the page
 cache's queries run there as on sqlite.
 
 Runs only against a throwaway Postgres database named by
@@ -14,31 +14,38 @@ PG_URL = os.environ.get("LOORE_TEST_POSTGRES_URL")
 pytestmark = pytest.mark.skipif(
     not PG_URL, reason="needs LOORE_TEST_POSTGRES_URL (a throwaway database)")
 
-from backend.tests import test_prompt_entries_private as _rules  # noqa: E402
-from backend.tests.test_prompt_entries_private import (  # noqa: E402,F401
+from backend.tests import test_prompt_entry_level as _rules  # noqa: E402
+from backend.tests.test_prompt_entry_level import (  # noqa: E402,F401
     fake_redis,
-    test_a_typed_new_thread_has_a_private_prompt_entry,
-    test_a_recorded_new_thread_has_a_private_prompt_entry,
-    test_raising_a_threads_level_leaves_its_prompt_entries_private,
+    test_a_typed_new_thread_has_a_public_prompt_entry_only_under_a_public_default,
+    test_a_recorded_new_thread_has_a_public_prompt_entry_only_under_a_public_default,
+    test_raising_a_threads_level_applies_to_its_prompt_entries,
     test_lowering_a_threads_level_applies_to_its_prompt_entries,
+    test_lowering_a_threads_level_lowers_a_public_prompt_entry_inside_it,
+    test_the_middle_level_applies_to_every_prompt_entry_below,
     test_the_owner_sets_the_prompt_entry_public_and_private_again,
     test_a_public_thread_with_a_private_prompt_root_is_listed_once_from_its_message,
     test_what_counts_as_the_top_of_a_thread,
+    test_a_thread_started_with_the_default_public_is_listed_by_its_message,
+    test_a_public_prompt_root_is_listed_only_with_a_public_entry_of_its_owner,
+    test_the_card_is_the_owners_first_living_public_entry_under_the_root,
+    test_only_bare_prompt_roots_leave_the_listings,
     test_a_private_thread_is_listed_nowhere,
     test_a_deleted_message_and_a_paused_account_leave_the_listings,
     test_a_rename_keeps_the_old_handle_for_such_a_thread,
     test_two_threads_with_the_same_title_get_their_own_permalinks,
-    test_a_listing_page_makes_as_many_queries_for_either_kind_of_top,
+    test_a_listing_page_makes_as_many_queries_for_every_kind_of_top,
     test_an_edit_of_the_message_drops_the_threads_cached_pages,
     test_a_reply_and_a_takedown_drop_the_threads_cached_pages,
+    test_an_edit_of_a_card_drops_the_listings_of_its_public_root,
     test_the_many_node_and_account_drops_reach_the_messages_pages,
     test_the_owner_sees_her_thread_as_before,
     test_an_uploaded_public_thread_gets_its_address_with_its_transcript,
+    test_an_uploaded_thread_under_the_default_public_is_listed_by_its_message,
     test_a_failed_transcription_leaves_no_address_and_a_retry_gives_it,
     test_an_empty_transcript_leaves_no_address,
     test_an_upload_set_private_or_deleted_meanwhile_gets_no_address,
-    test_only_the_first_entry_under_a_private_text_root_gets_the_address,
-    test_lowering_a_threads_level_lowers_a_public_prompt_entry_inside_it,
+    test_only_the_first_entry_under_a_text_root_gets_the_address,
     test_a_visitor_reads_the_message_inside_its_thread,
     test_another_member_reads_the_message_inside_its_thread,
     test_the_message_shows_inside_another_persons_public_thread,
@@ -46,6 +53,10 @@ from backend.tests.test_prompt_entries_private import (  # noqa: E402,F401
     test_the_thread_page_makes_as_many_queries_with_a_prompt_entry_in_it,
     test_setting_a_stored_entry_public_lists_nothing,
     test_an_older_client_that_records_a_public_thread_gets_the_permalink,
+    test_a_public_prompt_root_no_listing_shows_is_in_its_owners_log,
+    test_the_log_keeps_threads_with_a_private_prompt_root,
+    test_a_set_public_message_under_a_bare_public_root_lists_it_by_id,
+    test_a_private_message_under_a_public_default_keeps_the_thread_private,
 )
 
 

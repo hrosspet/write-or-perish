@@ -1887,17 +1887,20 @@ def save_streaming_as_node(session_id):
         parent_node = Node.query.get(draft.parent_id)
         if parent_node is None:
             return jsonify({"error": "Parent node not found"}), 404
-        # The prompt node is private, whatever the message's level.
+        # The prompt node is Public only for a Public message of an
+        # account whose default is Public
+        # (session_helpers.prompt_entry_privacy).
         system_node = attach_agentic_prompt_under(
-            parent_node, current_user.id, "textmode", ai_usage)
+            parent_node, current_user.id, "textmode", privacy_level,
+            ai_usage)
         if system_node is not None:
             user_parent_id = system_node.id
     elif agentic:
-        # Private, whatever the entry's level
-        # (session_helpers.PROMPT_ENTRY_PRIVACY).
+        # Public only for a Public entry of an account whose default is
+        # Public (session_helpers.prompt_entry_privacy).
         from backend.utils.session_helpers import create_agentic_root
         system_node = create_agentic_root(
-            current_user.id, "textmode", ai_usage)
+            current_user.id, "textmode", privacy_level, ai_usage)
         # Started from the Glean card (#435): every turn offers Glean.
         from backend.utils.glean import stamp_glean_entry
         stamp_glean_entry(system_node, current_user, data.get("entry"))
@@ -1922,8 +1925,9 @@ def save_streaming_as_node(session_id):
         # A public entry that starts a thread gets its permalink slug at
         # birth, as a typed one does (POST /nodes/, #228): a root (when
         # the form sent the settings), or the first entry under the
-        # thread's private prompt root, which the public pages list as
-        # the top of its thread because it has the slug
+        # thread's prompt root: under a private root the public pages
+        # list it as the top of its thread because it has the slug, and
+        # under a public one the root's card shows it and links to it
         # (utils/public_threads).
         from backend.utils.slugs import generate_unique_public_slug
         node.public_slug = generate_unique_public_slug(

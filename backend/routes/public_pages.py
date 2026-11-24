@@ -38,7 +38,7 @@ from backend.routes.commons import (
 )
 from backend.utils import public_cache
 from backend.utils.public_threads import (
-    public_root_of, thread_top_filter,
+    card_entries, link_slug, public_root_of, shown_slug, thread_top_filter,
 )
 from backend.utils.public_html import (
     RenderBudget,
@@ -274,7 +274,8 @@ def _public_roots_query(user, query=None):
     """The user's living public thread tops (roots, and the public first
     entry under a private prompt root: utils/public_threads) — the same
     set the public JSON API serves. *query* selects what to read
-    (default: whole rows)."""
+    (default: whole rows). A public prompt root's card shows its owner's
+    first public entry under it (card_entries)."""
     query = query if query is not None else Node.query
     return _public_alive(query.filter(
         thread_top_filter(),
@@ -284,10 +285,11 @@ def _public_roots_query(user, query=None):
 
 def _public_roots_for(user, limit, offset=0, slugged=False):
     """At most *limit* of the user's public roots from *offset* on,
-    pinned first then newest; *slugged*: only those with a permalink."""
+    pinned first then newest; *slugged*: only those with a permalink to
+    link by (link_slug: a prompt root's card's, else its own)."""
     query = _public_roots_query(user)
     if slugged:
-        query = query.filter(Node.public_slug.isnot(None))
+        query = query.filter(link_slug().isnot(None))
     return (query.order_by(*public_root_order())
             .offset(offset).limit(limit).all())
 
@@ -351,20 +353,29 @@ def _render_author_feed(username):
     feed_url = f"{origin}/@{username}/feed.xml"
     entries = []
     budget = RenderBudget()
-    for root in _public_roots_for(user, FEED_ENTRIES, slugged=True):
-        content = root.get_content() or ""
+    roots = _public_roots_for(user, FEED_ENTRIES, slugged=True)
+    cards = card_entries(roots)
+    for root in roots:
+        # A public prompt root's entry is its card's (utils/public_threads).
+        card = cards.get(root.id)
+        shown = card or root
+        content = shown.get_content() or ""
         title, body_md = split_title(content)
         if not budget.take(body_md):
             break
-        link = f"{origin}/@{username}/{root.public_slug}"
+        link = f"{origin}/@{username}/{shown_slug(root, card)}"
+        changed = max(n.updated_at or n.created_at for n in (root, shown))
+        # A card's edit counts as a change of the feed too.
+        if not isinstance(updated, datetime) or changed > updated:
+            updated = changed
         entries.append(
             "<entry>"
             f"<title>{xml_escape(title)}</title>"
             f'<link rel="alternate" type="text/html" href="{xml_escape(link)}"/>'
             f"<id>{xml_escape(link)}</id>"
             f"<published>{xml_escape(iso_utc(_published_at(root)) or '')}</published>"
-            f"<updated>{xml_escape(iso_utc(root.updated_at or root.created_at) or '')}</updated>"
-            f'<content type="html">{xml_escape(render_markdown(body_md, budget, node_id=root.id))}</content>'
+            f"<updated>{xml_escape(iso_utc(changed) or '')}</updated>"
+            f'<content type="html">{xml_escape(render_markdown(body_md, budget, node_id=shown.id))}</content>'
             "</entry>")
     feed = (
         '<?xml version="1.0" encoding="utf-8"?>'
@@ -520,16 +531,21 @@ def _render_profile(username, page):
     page_url = canonical if page == 1 else f"{canonical}?page={page}"
     parts = [f"<h1>@{escape(username)}</h1>",
              '<section aria-label="Published pieces">']
+    cards = card_entries(roots)
     for root in roots:
-        content = root.get_content() or ""
+        # A public prompt root's card shows its owner's first public
+        # entry under it, not the prompt (utils/public_threads).
+        card = cards.get(root.id)
+        content = (card or root).get_content() or ""
         title, body_md = split_title(content)
         preview = plain_excerpt(body_md or content, limit=300)
         when = iso_utc(_published_at(root)) or ""
+        slug = shown_slug(root, card)
         parts.append("<article>")
-        if root.public_slug:
+        if slug:
             parts.append(
                 f'<h2><a href="{escape(origin)}/@{escape(username)}/'
-                f'{escape(root.public_slug)}">{escape(title)}</a></h2>')
+                f'{escape(slug)}">{escape(title)}</a></h2>')
         else:
             parts.append(f"<h2>{escape(title)}</h2>")
         parts.append(
@@ -626,14 +642,17 @@ def _render_sitemap():
     urls = [(f"{origin}{p}" if p != "/" else origin, None)
             for p in _MARKETING_PATHS]
     if _enabled():
+        # Each thread top by the slug its card links to (link_slug: a
+        # public prompt root's card's, else its own).
+        linked_by = link_slug()
         rows = (db.session.query(
-                    User.username, Node.public_slug, Node.updated_at,
+                    User.username, linked_by, Node.updated_at,
                     Node.created_at)
                 .join(User, User.id == Node.human_owner_id)
                 .filter(thread_top_filter(),
                         Node.privacy_level == "public",
                         Node.deleted_at.is_(None),
-                        Node.public_slug.isnot(None),
+                        linked_by.isnot(None),
                         User.public_sharing_enabled.is_(True),
                         User.deleted_at.is_(None))
                 .all())

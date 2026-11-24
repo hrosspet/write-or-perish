@@ -23,7 +23,7 @@ from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import PrivacyLevel
 from backend.utils.public_threads import (
-    public_children_filter, public_root_of, thread_top_filter,
+    card_entries, public_children_filter, public_root_of, thread_top_filter,
 )
 from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
@@ -109,8 +109,10 @@ def _author_name(node):
 def feed():
     """Public thread tops, everyone, newest first: public roots, and the
     public first entry of a thread whose prompt root is private
-    (utils/public_threads). Members-only surface — needs the user's own
-    opt-in (#228 dark ship)."""
+    (utils/public_threads). A public prompt root's card is the first
+    public entry of its owner under it: its id, text, reply count and
+    permalink (else the root's). Members-only surface — needs the user's
+    own opt-in (#228 dark ship)."""
     if not _enabled() or not current_user.public_sharing_enabled:
         return jsonify({"error": "Not found"}), 404
     page = request.args.get("page", 1, type=int)
@@ -120,8 +122,10 @@ def feed():
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page,
                                 error_out=False)
+    cards = card_entries(pagination.items)
     items = []
-    for node in pagination.items:
+    for top in pagination.items:
+        node = cards.get(top.id, top)
         try:
             content = (node.get_content() or "").strip()
         except Exception as e:  # noqa: BLE001 — one unreadable entry
@@ -139,9 +143,9 @@ def feed():
         items.append({
             "id": node.id,
             "username": _author_name(node),
-            "permalink": permalink_for(node),
+            "permalink": permalink_for(node) or permalink_for(top),
             "content": content[:600] + ("…" if len(content) > 600 else ""),
-            "created_at": iso_utc(node.created_at),
+            "created_at": iso_utc(top.created_at),
             "reply_count": reply_count,
         })
     return jsonify({

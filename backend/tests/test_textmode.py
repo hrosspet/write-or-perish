@@ -275,7 +275,8 @@ class TestTextmodeStart:
         data = resp.get_json()
         system = Node.query.get(data["conversation_id"])
         user_node = Node.query.get(data["user_node_id"])
-        # The prompt entry is private whatever the entry's level.
+        # The prompt entry takes the account's default level (Private
+        # here), not the entry's.
         assert system.privacy_level == "private"
         assert user_node.privacy_level == "public"
         assert user_node.ai_usage == "chat"

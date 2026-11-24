@@ -74,8 +74,10 @@ def resolve_public_handle(username):
 
 def _published_under(user):
     """True when the account has public writing: a living public thread
-    top (a root, or the public first entry under a private prompt root),
-    which is what /@<handle> renders (while sharing is on). Deliberately
+    top (utils/public_threads: a root, but a public prompt root only with
+    a public entry of its owner under it; or the public first entry under
+    a private prompt root), which is what /@<handle> renders (while
+    sharing is on). Deliberately
     not conditioned on the sharing toggle: sharing can be paused around
     a rename, and the old URLs were out there all the same — dropping
     the reservation then would release the handle to a squatter and

@@ -13,27 +13,6 @@ from backend.utils.encryption import prefetch_deks
 from backend.utils.privacy import can_user_edit_node, train_refused
 
 
-# How open a level is; an unknown one counts as private.
-_OPENNESS = {"private": 0, "circles": 1, "public": 2}
-
-
-def _prompt_entry_ids(nodes):
-    """Ids of the prompt entries among *nodes*: those stamped with a
-    prompt key, and those from before that column that only link a
-    prompt version (one query for the lot, no row loads)."""
-    from backend.models import NodeContextArtifact
-    from backend.extensions import db
-    ids = {n.id for n in nodes if n.prompt_key}
-    unstamped = [n.id for n in nodes if not n.prompt_key]
-    for start in range(0, len(unstamped), 900):
-        ids.update(node_id for (node_id,) in db.session.query(
-            NodeContextArtifact.node_id).filter(
-                NodeContextArtifact.artifact_type == "prompt",
-                NodeContextArtifact.node_id.in_(
-                    unstamped[start:start + 900])))
-    return ids
-
-
 def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
                                   ai_usage=None, kept_from_train=None):
     """Set *privacy_level* and/or *ai_usage* (None = leave as is) on every
@@ -43,12 +22,6 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
     A change to 'train' leaves out the entries that may never be at Train
     (fetched through the X API, #689) and appends them to
     *kept_from_train* (a list), so the caller can say so.
-
-    A change of privacy never opens a prompt entry below *root* further
-    than it is: a prompt entry is shared only when its owner sets its
-    level on the entry itself (Peter, 2026-11-23). A change to a level
-    less open than the entry's own (private < circles < public) applies
-    to it like to any reply.
 
     Level-batched walk (one query per depth), no row locks: a reply that
     races in during the walk simply keeps the settings it was created
@@ -79,23 +52,12 @@ def apply_settings_to_descendants(root, user_id, *, privacy_level=None,
         # usage: unwrap first, then the checks below are cache hits.
         prefetch_deks(n.content for n in editable if n.ai_usage != ai_usage)
     from backend.utils.llm_nodes import reply_in_progress
-    # Prompt entries the new level would open further than they are.
-    kept_prompts = set()
-    if privacy_level not in (None, "private"):
-        prompt_ids = _prompt_entry_ids(editable)
-        kept_prompts = {
-            n.id for n in editable
-            if n.id in prompt_ids
-            and _OPENNESS.get(privacy_level, 0)
-            > _OPENNESS.get(n.privacy_level, 0)}
     changed = []
     for n in editable:
         touched = False
         # An AI reply still being written keeps its privacy: its owner
-        # shares it once it is written (Peter, 2026-11-12). So does a
-        # prompt entry: its owner shares it on the entry itself.
+        # shares it once it is written (Peter, 2026-11-12).
         if (privacy_level is not None and n.privacy_level != privacy_level
-                and n.id not in kept_prompts
                 and not (privacy_level != "private"
                          and reply_in_progress(n))):
             n.set_privacy_level(privacy_level)
