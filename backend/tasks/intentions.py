@@ -262,9 +262,11 @@ def _submit(user, template, budget, chronological, keys, label, built=None,
     # result is saved and priced as what ran.
     model_id = model_for_user(user)
     cfg = current_app.config["SUPPORTED_MODELS"][model_id]
+    # One-shot (one request per user): no prompt cache write (#803).
     req = {"custom_id": f"int-u{user.id}", "model_id": model_id,
            "api_model": cfg["api_model"], "messages": messages,
-           "max_tokens": token_limits(model_id)[1], "user_id": user.id}
+           "max_tokens": token_limits(model_id)[1], "user_id": user.id,
+           "one_shot": True}
     batch_ids = batch_submit({cfg["provider"]: [req]}, keys, "intentions")
     if not batch_ids:
         raise RuntimeError(f"user {user.id}: batch submit failed (see logs)")
@@ -393,9 +395,10 @@ def run_infer_intentions_sync_impl(user_id, progress=None,
         logger.info("intentions user %s: sync attempt %s, export ~%s est tokens, budget=%s",
                     user.id, attempt + 1, est, budget)
         try:
+            # One-shot: no prompt cache write (#803).
             response = LLMProvider.get_completion(
                 model_id, messages, prep["api_keys"], max_tokens=prep["max_output"],
-                user_id=user.id)
+                user_id=user.id, one_shot=True)
             break
         except PromptTooLongError as e:
             if attempt == SYNC_MAX_RETRIES:

@@ -463,6 +463,9 @@ def _build_batch_request(user, profile, data_cutoff):
             "api_model": cfg["api_model"],
             "messages": messages,
             "max_tokens": max_tokens,
+            # One request per user, never followed by one with the same
+            # prefix: no prompt cache write (#803).
+            "one_shot": True,
         },
         "meta": {
             "custom_id": custom_id,
@@ -912,8 +915,10 @@ def _generate_recent_context_impl(user_id, profile_id=None,
             messages = _messages_for(prep, recent_data)
 
         try:
+            # One-shot: no prompt cache write (#803).
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys, user_id=user_id
+                model_id, messages, api_keys, user_id=user_id,
+                one_shot=True
             )
             break
         except PromptTooLongError as e:

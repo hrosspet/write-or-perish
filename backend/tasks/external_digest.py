@@ -344,6 +344,9 @@ def _submit_digest_batch(users):
             "max_tokens": DIGEST_MAX_TOKENS,
             # The user the request is for: its OpenAI safety identifier.
             "user_id": user.id,
+            # One request per user, never followed by one with the same
+            # prefix: no prompt cache write (#803).
+            "one_shot": True,
         })
         meta_by_custom_id[custom_id] = {
             "custom_id": custom_id,
@@ -556,8 +559,10 @@ def rebuild_external_digest(self, user_id, force=False):
             "content": [{"type": "text", "text": prompt_text}],
         }]
         try:
+            # One-shot: no prompt cache write (#803).
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys, user_id=user_id)
+                model_id, messages, api_keys, user_id=user_id,
+                one_shot=True)
         except Exception as exc:
             logger.warning(
                 "External digest generation failed for user %s: %s",

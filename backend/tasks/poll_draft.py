@@ -148,6 +148,9 @@ def _build_request(resp):
         "provider": model_cfg["provider"],
         # The user the request is for: its OpenAI safety identifier.
         "user_id": resp.user_id,
+        # Ends with this poll's question: no later request starts with
+        # it, so no prompt cache write (#803).
+        "one_shot": True,
     }
 
 

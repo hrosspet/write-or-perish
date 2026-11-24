@@ -19,6 +19,8 @@ from flask import current_app
 
 from backend.utils import soft_limit
 from backend.utils.llm_batch import BatchItemPolicyBlocked, is_policy_block
+from backend.utils.one_shot_cache import (
+    ONE_SHOT_CACHE_OPTIONS, takes_prompt_cache_options)
 from backend.utils.refusal_backoff import report_policy_block
 from backend.utils.safety_identifier import openai_safety_identifier
 
@@ -731,7 +733,8 @@ class LLMProvider:
                        listener: StreamListener = None,
                        output_schema_name: str = None,
                        user_id: int = None,
-                       reasoning_effort: str = None) -> dict:
+                       reasoning_effort: str = None,
+                       one_shot: bool = False) -> dict:
         """
         Generate a completion using the specified model.
 
@@ -758,6 +761,12 @@ class LLMProvider:
             user_id: The Loore user the call is made for. OpenAI calls
                 carry its safety identifier (utils/safety_identifier.py);
                 None sends the system one.
+            one_shot: True for a request no later request starts with
+                the same prefix (a digest, a profile build, ...): it asks
+                OpenAI for no prompt cache, so it pays no cache write
+                (#803, utils/one_shot_cache.py). Sent only to models that
+                take the option; ignored for every other model and for
+                Anthropic. A conversation turn never sets it.
 
         Returns:
             Dict with:
@@ -794,7 +803,9 @@ class LLMProvider:
                 output_schema=output_schema,
                 cache_comparison_response_id=cache_comparison_response_id,
                 listener=listener, output_schema_name=output_schema_name,
-                user_id=user_id, reasoning_effort=reasoning_effort)
+                user_id=user_id, reasoning_effort=reasoning_effort,
+                no_prompt_cache=(one_shot
+                                 and takes_prompt_cache_options(config)))
         elif provider == "anthropic":
             return LLMProvider._call_anthropic(
                 api_model, messages, api_keys["anthropic"], max_tokens,
@@ -813,7 +824,8 @@ class LLMProvider:
                      listener: StreamListener = None,
                      output_schema_name: str = None,
                      user_id: int = None,
-                     reasoning_effort: str = None) -> dict:
+                     reasoning_effort: str = None,
+                     no_prompt_cache: bool = False) -> dict:
         """
         Call OpenAI via the Responses API (/v1/responses).
 
@@ -835,6 +847,8 @@ class LLMProvider:
             user_id: the Loore user the call is for: the request carries
                 its safety identifier, and a content-policy block is
                 reported under it
+            no_prompt_cache: a one-shot request asks for no prompt cache
+                (#803); the caller has checked the model takes the option
 
         Returns:
             Dict with content, total_tokens, and tool_calls
@@ -885,12 +899,19 @@ class LLMProvider:
                 "name": output_schema_name or "feed_reply",
                 "schema": output_schema, "strict": True}}
 
-        # #348: Prompt Cache Diagnostics. The SDK pin (<3) has no typed
-        # parameter, so it goes in the request body as is; the verdict
-        # comes back as an untyped field on the response.
+        # prompt_cache_options: the SDK pin (<3) has no typed parameter,
+        # so it goes in the request body as is. #803: a one-shot request
+        # asks for no cache (explicit mode, no breakpoints). #348: Prompt
+        # Cache Diagnostics; the verdict comes back as an untyped field on
+        # the response. A call without either sends no such field.
+        cache_options = {}
+        if no_prompt_cache:
+            cache_options.update(ONE_SHOT_CACHE_OPTIONS)
         if cache_comparison_response_id:
-            kwargs["extra_body"] = {"prompt_cache_options": {
-                "comparison_response_id": cache_comparison_response_id}}
+            cache_options["comparison_response_id"] = \
+                cache_comparison_response_id
+        if cache_options:
+            kwargs["extra_body"] = {"prompt_cache_options": cache_options}
 
         def _send():
             # The HTTP client is ours, so we close it: the SDK closes only
@@ -914,16 +935,19 @@ class LLMProvider:
             except (openai.APIError, OpenAIStreamError) as e:
                 if not _openai_request_error(e):
                     raise
-                # Analytics must never cost a turn: if OpenAI rejects the
-                # option itself, send the call again without it.
+                # Analytics must never cost a turn, nor the cache saving a
+                # job: if OpenAI rejects the option itself, send the call
+                # again without it.
                 about = f"{getattr(e, 'param', None) or ''} {e}"
                 if ("extra_body" not in kwargs
                         or not ("prompt_cache" in about
                                 or "comparison_response" in about)):
                     raise
-                logger.warning(
+                # A one-shot request then pays the cache write again: an
+                # error, so it shows (#803).
+                (logger.error if no_prompt_cache else logger.warning)(
                     "OpenAI rejected prompt_cache_options (model=%s); "
-                    "retrying without cache diagnostics: %s", model, e)
+                    "retrying without them: %s", model, e)
                 kwargs.pop("extra_body")
                 response = _send()
         except (openai.APIError, OpenAIStreamError) as e:
@@ -1000,8 +1024,10 @@ class LLMProvider:
         }
         # Whether the comparison actually went out (it is dropped on the
         # retry above), so a row never claims a baseline it did not send.
-        result["cache_comparison_sent"] = "extra_body" in kwargs
-        if "extra_body" in kwargs:
+        comparison_sent = bool(cache_comparison_response_id) \
+            and "extra_body" in kwargs
+        result["cache_comparison_sent"] = comparison_sent
+        if comparison_sent:
             diagnostics = _cache_diagnostics(response)
             if diagnostics:
                 result["cache_diagnostics"] = diagnostics
