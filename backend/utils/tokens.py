@@ -120,7 +120,8 @@ def _o200k_encoding():
                 _O200K["failed"] = True
                 logging.getLogger(__name__).warning(
                     "tiktoken's o200k_base is not available (%s); this "
-                    "process fits Glean lists by the estimate",
+                    "process fits Glean lists and the references digest "
+                    "by the estimate",
                     _O200K.get("error") or "unknown")
     return enc
 
@@ -134,6 +135,14 @@ def local_token_counter(model_id):
     fit a Glean's tweets to its prompt (#717)."""
     if tokenizer_family(model_id) != "o200k":
         return None
+    return o200k_counter()
+
+
+def o200k_counter():
+    """A function text -> o200k_base tokens, counted on this machine, or
+    None when the encoding is not available in this process
+    (_o200k_encoding). For a limit set by OpenAI's prices whatever the
+    model (the Saved References Digest's cap, external_digest)."""
     enc = _o200k_encoding()
     if enc is None:
         return None

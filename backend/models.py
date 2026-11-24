@@ -128,6 +128,13 @@ class User(db.Model, UserMixin):
     external_content_enabled = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # When the Saved References Digest first left part of this account's
+    # list out at its cap and said so to Sentry, once (Peter, 2026-11-24:
+    # "I'd like to know when users start crossing that threshold");
+    # cleared when a later digest's list fits whole again, so the next
+    # crossing is reported again (tasks/external_digest). NULL: not
+    # crossing, or never reported.
+    digest_cut_reported_at = db.Column(db.DateTime, nullable=True)
 
     # The user's own Glean switch (#435, Account settings), on top of the
     # rollout gate (GLEAN_FOR_ALL / GLEAN_USER_IDS). NULL = the user has

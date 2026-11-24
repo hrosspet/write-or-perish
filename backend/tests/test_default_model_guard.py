@@ -235,6 +235,9 @@ def _shipped(**settings):
             Config.PROFILE_VERSION_MODEL_CROSS_PROVIDER,
         "PROFILE_MERGE_MODEL_CROSS_PROVIDER":
             Config.PROFILE_MERGE_MODEL_CROSS_PROVIDER,
+        "DIGEST_MODEL_ANTHROPIC": Config.DIGEST_MODEL_ANTHROPIC,
+        "DIGEST_MODEL_OPENAI": Config.DIGEST_MODEL_OPENAI,
+        "DIGEST_MAX_PROMPT_TOKENS": Config.DIGEST_MAX_PROMPT_TOKENS,
     }
     config.update(settings)
     return config
@@ -257,6 +260,8 @@ def _shipped(**settings):
      "PROFILE_VERSION_MODEL_CROSS_PROVIDER", "gpt-6-sol", "gpt-6.2-sol"),
     ("PROFILE_MERGE_MODEL_CROSS_PROVIDER",
      "PROFILE_MERGE_MODEL_CROSS_PROVIDER", "gpt-6-astra", "gpt-6.2-astra"),
+    ("DIGEST_MODEL_OPENAI", "DIGEST_MODEL_OPENAI", "gpt-6-sol",
+     "gpt-6.2-sol"),
 ])
 def test_a_retired_setting_boots_on_its_replacement_with_a_warning(
         key, variable, retired, replacement):
@@ -275,6 +280,13 @@ def test_a_retired_setting_boots_on_its_replacement_with_a_warning(
     ("CHAT_MODEL_ANTHROPIC", "gpt-6-astra", "is not an active anthropic"),
     ("PROFILE_VERSION_MODEL_ANTHROPIC", "gpt-6-sol",
      "is not an active anthropic model"),
+    # The digest's models: each of its own provider (2026-11-24).
+    ("DIGEST_MODEL_ANTHROPIC", "gpt-6.2-sol",
+     "is not an active anthropic model"),
+    ("DIGEST_MODEL_OPENAI", "claude-sonnet-5.5",
+     "is not an active openai model"),
+    ("DIGEST_MODEL_OPENAI", "gpt-5.5", "is not an active openai model"),
+    ("DIGEST_MAX_PROMPT_TOKENS", 0, "must be at least 1"),
     # The replacement can't do what the setting needs: GPT-6 Astra was
     # never a Read model, so neither is GPT-6.2 Astra.
     ("GLEAN_MODEL_OPENAI", "gpt-6-astra", "is not an active model flagged"),
