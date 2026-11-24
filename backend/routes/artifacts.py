@@ -250,7 +250,16 @@ def patch_artifact(kind):
     means "this exact version was in that session's context"), the
     change becomes a new user version instead, and later clicks edit
     that one.
+
+    ``base_content`` (optional): the text the page showed before the
+    click (#795). When the latest version's text is no longer that (an
+    in-place edit from another tab, a new version from the AI or a Save),
+    nothing is written and the answer is 409 ``{"error", "code":
+    "content_changed"}``; the page undoes the click and asks for a reload.
+    Without it the content is saved as before (tabs opened before #795).
     """
+    from backend.utils.content_base import (
+        base_content_of, content_changed_response)
     refusal = _reserved_kind_refusal(kind)
     if refusal is not None:
         return refusal
@@ -258,12 +267,27 @@ def patch_artifact(kind):
     content = data.get("content")
     if content is None:
         return jsonify({"error": "Content is required"}), 400
+    base_content, bad_base = base_content_of(data)
+    if bad_base is not None:
+        return bad_base
 
     latest = UserArtifact.latest_for(current_user.id, kind)
     if latest is None:
         # A checklist click on a page left open after the delete in
         # another tab saves nothing (#603).
         return jsonify({"error": "Artifact not found"}), 404
+
+    if base_content is not None:
+        # Locked, then checked: two clicks from two tabs can't both pass.
+        # The latest is asked again under the lock, for a version added
+        # between the first read and the lock.
+        latest = UserArtifact.query.filter_by(id=latest.id) \
+            .populate_existing().with_for_update().one()
+        newest = UserArtifact.latest_for(current_user.id, kind)
+        if (newest is None or newest.id != latest.id
+                or (latest.get_content() or "") != base_content):
+            db.session.rollback()
+            return content_changed_response()
 
     pinned = NodeContextArtifact.query.filter_by(
         artifact_type="user_artifact", artifact_id=latest.id,

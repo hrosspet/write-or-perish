@@ -1,5 +1,4 @@
 import { useRef, useCallback } from 'react';
-import { useToast } from '../contexts/ToastContext';
 
 // Strip common inline markdown so a raw source line can be compared
 // against react-markdown's plain-text extraction. Without this, a line
@@ -188,69 +187,122 @@ export function appendItemToSection(content, sectionTitle, task, options = {}) {
   return lines.join('\n');
 }
 
-/**
- * Hook for optimistic checkbox toggling.
- *
- * Parameters:
- *   getContent: () => string|null — returns current markdown content
- *   setContent: (newContent: string) => void — optimistically update local state
- *   save: (newContent: string) => Promise — persist the change (should reject on failure)
- *
- * Returns a toggle handler: (itemText: string, currentChecked: boolean) => void
- */
-export function useCheckboxToggle(getContent, setContent, save) {
-  const prevContentRef = useRef(null);
-  const { addToast } = useToast();
+// What a page says when the server refused a tick or a row "+" because the
+// text changed since the page showed it (#795). The page undoes the change
+// and leaves its text as it is; the person reloads to see the newer version.
+export const NEWER_ENTRY_MESSAGE = "There's a newer version of this entry, so your change wasn't saved. "
+  + 'Reload the page before continuing.';
+export const NEWER_ARTIFACT_MESSAGE = "There's a newer version of this artifact, so your change wasn't saved. "
+  + 'Reload the page before continuing.';
+export const NEWER_TODO_MESSAGE = "There's a newer version of your todo list, so your change wasn't saved. "
+  + 'Reload the page before continuing.';
+// Long enough to read the instruction in it.
+export const NEWER_MESSAGE_MS = 8000;
 
-  return useCallback((itemText, currentChecked) => {
-    const content = getContent();
-    if (!content) return;
-    prevContentRef.current = content;
-    const newContent = toggleCheckbox(content, itemText, currentChecked);
-    setContent(newContent);
-    save(newContent).catch((err) => {
-      console.error('Failed to toggle checkbox:', err);
-      if (prevContentRef.current !== null) {
-        setContent(prevContentRef.current);
-      }
-      const reason = err.response?.data?.error
-        || err.response?.statusText
-        || err.message
-        || 'Unknown error';
-      addToast(`Couldn't save change — reverted (${reason})`);
-    });
-  }, [getContent, setContent, save, addToast]);
+/** Whether `err` is the server's "the text changed since the page showed it" (409). */
+export function isContentChanged(err) {
+  return err?.response?.status === 409 && err.response.data?.code === 'content_changed';
 }
 
-/**
- * Hook for optimistic per-row task insertion (the hover "+" quick-add).
- * Same getContent/setContent/save contract as useCheckboxToggle.
- *
- * Returns: (afterItemText: string, newText: string) => void — inserts a new
- * item right after the matched row (and its subtree), optimistically, then
- * persists; reverts and toasts on failure.
- */
-export function useTaskInsert(getContent, setContent, save) {
-  const prevContentRef = useRef(null);
-  const { addToast } = useToast();
+/** The edit a tick makes: the line's box set to the opposite of `currentChecked`. */
+export const tickEdit = (itemText, currentChecked) => (content) => toggleCheckbox(content, itemText, currentChecked);
 
-  return useCallback((afterItemText, newText) => {
-    const content = getContent();
-    if (content == null) return;
-    const newContent = insertItemAfter(content, afterItemText, newText);
-    if (newContent === content) return;
-    prevContentRef.current = content;
-    setContent(newContent);
-    save(newContent).catch((err) => {
-      console.error('Failed to insert task:', err);
-      if (prevContentRef.current !== null) {
-        setContent(prevContentRef.current);
+/** The edit the row "+" makes: a new item after the matched row and its subtree. */
+export const insertEdit = (afterItemText, newText) => (content) => insertItemAfter(content, afterItemText, newText);
+
+/**
+ * Optimistic checklist edits (a tick, the row "+", a proposal row moved),
+ * saved only over the text the page showed (#795, Peter 2026-11-24: the tick
+ * shows at once; it is saved only if it skips no newer version).
+ *
+ * Each save sends the new text and `base`, the text it was made on. Saves
+ * go one after the other: a quick second tick waits for the first and is
+ * sent on the text the first one saved. When the server answers that the
+ * text changed (isContentChanged), the page's pending edits are undone and
+ * `notify` says there is a newer version; the page keeps its text (no
+ * reload of its own). Any other failure undoes that edit and names the
+ * reason.
+ *
+ * Options (read at call time, so they may change every render):
+ *   getContent(key)            the text shown for document `key`, or null
+ *   setContent(key, text)      show `text` for document `key`
+ *   save(key, content, base)   Promise; rejects on failure
+ *   newerMessage               the text for the refusal above
+ *   notify(message, ms)        shows a toast
+ *
+ * Returns apply(key, edit, failure): `edit` maps a text to the edited text
+ * (the same text when there is nothing to change); `failure` begins the
+ * message of any other error ("Couldn't save change").
+ */
+export function useChecklistEdits(options) {
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+  // Per document: base (the text the server has, as far as this page
+  // knows), pending (edits shown but not saved yet, oldest first) and shown
+  // (the text this hook last put on the page).
+  const docsRef = useRef(new Map());
+  const chainRef = useRef(Promise.resolve());
+
+  const send = useCallback(async (key, doc, entry) => {
+    // Dropped: an earlier edit of the same text was refused.
+    if (!doc.pending.includes(entry)) return;
+    const { getContent, setContent, save, newerMessage, notify } = optionsRef.current;
+    const base = doc.base;
+    const content = entry.edit(base);
+    const drop = () => { doc.pending = doc.pending.filter((e) => e !== entry); };
+    // Undo on the page, unless something else (a reload, a refetch) has
+    // put another text there meanwhile.
+    const show = (text) => {
+      if (getContent(key) === doc.shown) {
+        doc.shown = text;
+        setContent(key, text);
       }
+    };
+    if (content == null || content === base) {
+      drop();
+      return;
+    }
+    try {
+      await save(key, content, base);
+      doc.base = content;
+      drop();
+    } catch (err) {
+      if (isContentChanged(err)) {
+        doc.pending = [];
+        show(base);
+        notify(newerMessage, NEWER_MESSAGE_MS);
+        return;
+      }
+      console.error(`${entry.failure}:`, err);
+      drop();
+      show(doc.pending.reduce((text, e) => e.edit(text), base));
       const reason = err.response?.data?.error
         || err.response?.statusText
         || err.message
         || 'Unknown error';
-      addToast(`Couldn't add task — reverted (${reason})`);
-    });
-  }, [getContent, setContent, save, addToast]);
+      notify(`${entry.failure} — reverted (${reason})`);
+    }
+  }, []);
+
+  return useCallback((key, edit, failure = "Couldn't save change") => {
+    const { getContent, setContent } = optionsRef.current;
+    const shown = getContent(key);
+    if (shown == null) return;
+    const next = edit(shown);
+    if (next == null || next === shown) return;
+    let doc = docsRef.current.get(key);
+    if (!doc || doc.pending.length === 0) {
+      // Nothing of this page is being saved: what it shows is what the
+      // server sent it, and the base of this edit.
+      doc = { base: shown, pending: [], shown };
+      docsRef.current.set(key, doc);
+    }
+    const entry = { edit, failure };
+    doc.pending = [...doc.pending, entry];
+    doc.shown = next;
+    setContent(key, next);
+    chainRef.current = chainRef.current
+      .then(() => send(key, doc, entry))
+      .catch(() => {});
+  }, [send]);
 }

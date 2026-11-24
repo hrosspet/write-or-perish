@@ -229,6 +229,7 @@ struct VoiceView: View {
             VoiceProposalSlot(content: voice.replyContent, nodeId: voice.lastReplyNodeId,
                               toolCallsMeta: voice.toolCallsMeta,
                               onContentChange: { voice.setReplyContent($0) },
+                              currentContent: { voice.replyContent },
                               onApplied: { voice.updateToolMeta($0, $1) })
             Spacer().frame(height: 32)
             OfflineNotice()
@@ -873,12 +874,15 @@ struct VoiceProposalSlot: View {
     let nodeId: Int?
     let toolCallsMeta: [ToolCallMeta]?
     var onContentChange: (String) -> Void = { _ in }
+    /// The reply's text as the voice turn holds it now (#795).
+    var currentContent: (() -> String?)?
     var onApplied: (String, [String: JSONValue]) -> Void = { _, _ in }
 
     var body: some View {
         if let content, let nodeId, ProposalParser.hasProposalSections(content) {
             ProposalCard(content: content, nodeId: nodeId, toolCallsMeta: toolCallsMeta,
-                         roomy: true, onContentChange: onContentChange, onApplied: onApplied)
+                         roomy: true, onContentChange: onContentChange, currentContent: currentContent,
+                         onApplied: onApplied)
                 .frame(maxWidth: 620)
         }
     }

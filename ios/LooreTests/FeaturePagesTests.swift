@@ -638,7 +638,8 @@ final class ReadReplyTests: StubbedAppTestCase {
     }
 }
 
-/// The todo save rule (design doc §10): re-fetch right before every PATCH.
+/// The todo save rules: a tick and the row "+" are saved on the version the
+/// page shows (#795); quick-add re-fetches right before its PATCH (design doc §10).
 @MainActor
 final class TodoModelTests: StubbedAppTestCase {
     private let shown = "## Today\n\n- [ ] water the plants\n"
@@ -664,14 +665,25 @@ final class TodoModelTests: StubbedAppTestCase {
         return m
     }
 
-    func testToggleRefetchesAndAppliesTheTickToTheFreshContent() async {
+    /// #795: no re-fetch; the tick is made on the list the page shows.
+    func testATickIsSavedOnTheShownListWithoutARefetch() async {
         let m = await model(serverContent: fresher)
         let item = TodoSections.parse(m.todo?.content).first!.items.first!
         await m.toggle(item)
+        // Requests since the page loaded (installing a stub starts the list).
+        XCTAssertEqual(calls, ["PATCH /api/todo/"])
+        XCTAssertEqual(body(of: "PATCH /api/todo/")?["content"] as? String,
+                       "## Today\n\n- [x] water the plants\n")
+    }
+
+    func testQuickAddRefetchesAndGoesOnTheFreshContent() async {
+        let m = await model(serverContent: fresher)
+        let ok = await m.quickAdd("buy bread")
+        XCTAssertTrue(ok)
         XCTAssertEqual(calls.suffix(2), ["GET /api/todo/", "PATCH /api/todo/"])
         XCTAssertEqual(body(of: "PATCH /api/todo/")?["content"] as? String,
-                       "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n", "the AI's item survives")
-        XCTAssertEqual(m.todo?.content, "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n")
+                       "## Today\n\n- [ ] water the plants\n- [ ] added by the AI\n- [ ] buy bread\n",
+                       "the AI's item survives")
     }
 
     func testQuickAddGoesToTheEndOfToday() async {
@@ -698,9 +710,47 @@ final class TodoModelTests: StubbedAppTestCase {
         }
     }
 
-    /// A merge saved a new version between the tick's GET and its PATCH: the
-    /// PATCH is refused, and the tick is applied to the newest list and saved.
-    func testATickRefusedForAStaleListIsAppliedToTheNewestList() async {
+    /// #795: a merge saved a new version after the page loaded. The tick's
+    /// PATCH (with the shown version's revision) is refused; the tick is undone,
+    /// nothing more is sent, and a toast says there is a newer version.
+    func testATickRefusedForAStaleListIsUndone() async {
+        let m = TodoModel(app: app)
+        StubURLProtocol.install { [shown] _ in .json(200, json(["todo": todoJSON(shown, "r1")])) }
+        await m.fetch()
+        StubURLProtocol.install { [fresher] request in
+            if request.httpMethod == "GET" { return .json(200, json(["todo": todoJSON(fresher, "r2", id: 2)])) }
+            return todoChanged(todoJSON(fresher, "r2", id: 2))
+        }
+        let item = TodoSections.parse(m.todo?.content).first!.items.first!
+        await m.toggle(item)
+        let bodies = sentBodies("PATCH")
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual(bodies.first?["base_revision"] as? String, "r1")
+        XCTAssertEqual(m.todo?.content, shown, "undone; the page keeps its list")
+        XCTAssertEqual(app.toasts.toasts.last?.message, TodoModel.newerTodoMessage)
+        XCTAssertEqual(calls, ["PATCH /api/todo/"], "no re-fetch")
+    }
+
+    /// Two quick ticks on a list that changed elsewhere: the first is refused,
+    /// the second (made on the same version) is undone with it, one toast.
+    func testTicksWaitingBehindARefusedOneAreUndoneWithIt() async {
+        let m = TodoModel(app: app)
+        let two = "## Today\n\n- [ ] water the plants\n- [ ] feed the cat\n"
+        StubURLProtocol.install { _ in .json(200, json(["todo": todoJSON(two, "r1")])) }
+        await m.fetch()
+        StubURLProtocol.install { [fresher] _ in todoChanged(todoJSON(fresher, "r2", id: 2)) }
+        let items = TodoSections.parse(m.todo?.content).first!.items
+        async let first: Void = m.toggle(items[0])
+        async let second: Void = m.toggle(items[1])
+        _ = await (first, second)
+        XCTAssertEqual(sentBodies("PATCH").count, 1)
+        XCTAssertEqual(m.todo?.content, two)
+        XCTAssertEqual(app.toasts.toasts.count, 1)
+    }
+
+    /// Quick-add keeps #430: refused for a stale list, it is added to the
+    /// newest list the 409 carries and saved again.
+    func testAQuickAddRefusedForAStaleListGoesOnTheNewestList() async {
         let m = TodoModel(app: app)
         StubURLProtocol.install { [shown] _ in .json(200, json(["todo": todoJSON(shown, "r1")])) }
         await m.fetch()
@@ -711,13 +761,12 @@ final class TodoModelTests: StubbedAppTestCase {
             let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
             return .json(200, json(["todo": todoJSON(sent?["content"] as? String ?? "", "r3", id: 2)]))
         }
-        let item = TodoSections.parse(m.todo?.content).first!.items.first!
-        await m.toggle(item)
+        let ok = await m.quickAdd("buy bread")
+        XCTAssertTrue(ok)
         let bodies = sentBodies("PATCH")
         XCTAssertEqual(bodies.count, 2)
-        XCTAssertEqual(bodies.first?["base_revision"] as? String, "r1")
         XCTAssertEqual(bodies.last?["base_revision"] as? String, "r2")
-        let expected = "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n"
+        let expected = "## Today\n\n- [ ] water the plants\n- [ ] added by the AI\n- [ ] buy bread\n"
         XCTAssertEqual(bodies.last?["content"] as? String, expected, "the merge's item survives")
         XCTAssertEqual(m.todo?.content, expected)
         XCTAssertTrue(app.toasts.toasts.isEmpty)
@@ -801,7 +850,7 @@ final class TodoModelTests: StubbedAppTestCase {
         let both = "## Today\n\n- [x] water the plants\n- [x] feed the cat\n"
         XCTAssertEqual(server.content, both, "the second tick's PATCH builds on the first one's")
         XCTAssertEqual(m.todo?.content, both)
-        XCTAssertEqual(calls.suffix(4), ["GET /api/todo/", "PATCH /api/todo/", "GET /api/todo/", "PATCH /api/todo/"])
+        XCTAssertEqual(calls, ["GET /api/todo/", "PATCH /api/todo/", "PATCH /api/todo/"])
     }
 
     func testAQuickAddThenATickKeepsTheNewTask() async {

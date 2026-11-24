@@ -910,33 +910,42 @@ final class ThreadModel {
 
     // MARK: Checklists and proposal edits on the focal node
 
-    func applyContentEdit(_ newContent: String, failure: @escaping (String) -> String) {
-        guard let app, let old = node?.content, newContent != old else { return }
-        node?.content = newContent
-        Task {
-            do {
-                let _: NodeUpdateResponse = try await app.api.put(APIPath.node(nodeId), json: .object([
-                    "content": .string(newContent),
+    /// What the screen says when a tick or "+" was refused because the entry
+    /// changed elsewhere (#795). The thread loads again when it is opened again.
+    static let newerEntryMessage =
+        "There's a newer version of this entry, so your change wasn't saved. Go back and open it again before continuing."
+
+    /// Ticks and the row "+" in the focal entry: shown at once, saved one after
+    /// the other, each only over the text the screen shows (#795).
+    @ObservationIgnored private let checklistEdits = ContentEditQueue()
+
+    func applyContentEdit(_ edit: @escaping (String) -> String, failure: @escaping (String) -> String) {
+        guard let app else { return }
+        let id = nodeId
+        checklistEdits.apply(edit, to: ContentEditQueue.Target(
+            onScreen: { [weak self] in self?.node.map(\.content) },
+            show: { [weak self] in self?.node?.content = $0 },
+            save: { content, base in
+                let _: NodeUpdateResponse = try await app.api.put(APIPath.node(id), json: .object([
+                    "content": .string(content),
+                    "base_content": .string(base),
                 ]))
-            } catch {
-                node?.content = old
-                let reason = (error as? APIError)?.serverMessage ?? (error as? APIError)?.errorDescription
-                    ?? error.localizedDescription
-                app.toasts.show(failure(reason))
-            }
-        }
+            },
+            notify: { [weak app] in app?.toasts.show($0, duration: 8) },
+            newerMessage: Self.newerEntryMessage
+        ), failure: failure)
     }
 
     func toggleCheckbox(_ itemText: String, checked: Bool) {
         guard let content = node?.content, !content.isEmpty else { return }
-        applyContentEdit(MarkdownEdits.toggleCheckbox(content, itemText: itemText, currentChecked: checked)) {
+        applyContentEdit({ MarkdownEdits.toggleCheckbox($0, itemText: itemText, currentChecked: checked) }) {
             "Couldn't save change — reverted (\($0))"
         }
     }
 
     func insertTask(after itemText: String, _ newText: String) {
-        guard let content = node?.content else { return }
-        applyContentEdit(MarkdownEdits.insertItemAfter(content, afterItemText: itemText, newText: newText)) {
+        guard node?.content != nil else { return }
+        applyContentEdit({ MarkdownEdits.insertItemAfter($0, afterItemText: itemText, newText: newText) }) {
             "Couldn't add task — reverted (\($0))"
         }
     }
