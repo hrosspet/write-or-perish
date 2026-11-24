@@ -28,7 +28,7 @@ import useSubmitShortcut from "../hooks/useSubmitShortcut";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel, trainRefused = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, parentPrivacyLevel, parentOwnedByViewer, trainRefused = false },
     ref
   ) => {
     const { user } = useUser();
@@ -65,6 +65,16 @@ const NodeForm = forwardRef(
     // not the account's default.
     const [parentPrivacy, setParentPrivacy] = useState(
       (!editMode && parentId && parentPrivacyLevel) || null);
+    // Is the parent the user's own (they wrote it, or asked for the AI
+    // reply)? From the form's own request for the parent once it
+    // answers, before that from the page (parentOwnedByViewer). Under a
+    // public parent of the user's own the reply may be Private or
+    // Circles (Peter, 2026-11-24: "they should adhere to the form's
+    // selection"); under someone else's it is public (#228).
+    const [parentOwnerId, setParentOwnerId] = useState(undefined);
+    const parentOwned = parentOwnerId !== undefined
+      ? !!user && parentOwnerId === user.id
+      : !!parentOwnedByViewer;
     const [pendingPaste, setPendingPaste] = useState(null);
     const [splitAcknowledged, setSplitAcknowledged] = useState(false);
 
@@ -191,6 +201,9 @@ const NodeForm = forwardRef(
           .then((response) => {
             const parent = response.data;
             setParentPrivacy(parent.privacy_level || "private");
+            // An AI reply belongs to the user who asked for it.
+            setParentOwnerId((parent.node_type === "llm"
+              ? parent.parent_user_id : parent.user?.id) ?? null);
             if (!initialPrivacyLevel && !initialAiUsage) {
               // Set privacy settings to match parent's settings. AI usage
               // is the backend's reply default (#362): the parent's, but
@@ -220,21 +233,24 @@ const NodeForm = forwardRef(
       setPrivacyLevel(parentPrivacyLevel);
     }, [parentPrivacyLevel, parentId, editMode]);
 
-    // Replies in a public thread are public (#228): pin the STATE, not just
-    // the display — a remembered 'private' from loore_last_privacy_level
-    // must never reach the submit path.
+    // Replies under someone else's public node are public (#228): pin the
+    // STATE, not just the display — a remembered 'private' from
+    // loore_last_privacy_level must never reach the submit path. Under a
+    // public node of the user's own the reply starts at Public (the
+    // parent's level) and the selector stays free.
+    const publicParentLock = !editMode && parentPrivacy === "public"
+      && !parentOwned;
     useEffect(() => {
-      if (!editMode && parentPrivacy === "public"
-          && privacyLevel !== "public") {
+      if (publicParentLock && privacyLevel !== "public") {
         setPrivacyLevel("public");
       }
-    }, [parentPrivacy, privacyLevel, editMode]);
+    }, [publicParentLock, privacyLevel]);
 
     // A public (or circles) entry gets no automatic reply (Peter,
     // 2026-11-12): the toggle shows off and can't be turned on, and the
     // stored preference is left as the user set it for private entries.
     const autoGenerateLocked = isSharedPrivacy(
-      !editMode && parentPrivacy === "public" ? "public" : privacyLevel);
+      publicParentLock ? "public" : privacyLevel);
     const autoGenerateOn = useAutoGenerate && !autoGenerateLocked;
 
     // Auto-populate form with draft when loaded
@@ -516,11 +532,15 @@ const NodeForm = forwardRef(
         }
       }
 
-      // Replying under a PUBLIC node: the reply is public (#228, enforced
-      // server-side too; the state is pinned public by the effect above).
-      // Make the consent felt once — the dialog offers don't-show-again.
+      // Replying under a PUBLIC node with a public reply: under someone
+      // else's node always (#228, enforced server-side too; the state is
+      // pinned public by the effect above), under the user's own when
+      // Public is chosen. Make the consent felt once — the dialog offers
+      // don't-show-again.
       if (
-        !editMode && parentPrivacy === "public" && !publicConfirmed
+        !editMode && parentPrivacy === "public"
+        && (publicParentLock || privacyLevel === "public")
+        && !publicConfirmed
         && localStorage.getItem(PUBLIC_REPLY_ACK_KEY) !== "true"
       ) {
         setShowPublicReplyDialog(true);
@@ -929,13 +949,12 @@ const NodeForm = forwardRef(
         {/* Privacy Settings */}
         {!hidePowerFeatures && (
           <PrivacySelector
-            privacyLevel={parentPrivacy === "public" && !editMode
-              ? "public" : privacyLevel}
+            privacyLevel={publicParentLock ? "public" : privacyLevel}
             aiUsage={aiUsage}
             onPrivacyChange={setPrivacyLevel}
             onAIUsageChange={setAiUsage}
             disabled={loading}
-            lockPrivacy={parentPrivacy === "public" && !editMode}
+            lockPrivacy={publicParentLock}
             trainRefused={trainRefused}
           />
         )}

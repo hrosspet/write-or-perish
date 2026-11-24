@@ -20,6 +20,9 @@ struct NodeFormConfig {
     /// The parent's privacy as the host shows it now (a reply). The form follows
     /// it when it changes (an edit of the parent above the form).
     var parentPrivacy: PrivacyLevel?
+    /// The parent is the viewer's own (they wrote it, or asked for the AI reply),
+    /// as the host knows it; the form's own request for the parent replaces it.
+    var parentOwned: Bool?
     var edit: Edit?
     var hidePowerFeatures = false
     var hideAudioUpload = false
@@ -111,8 +114,12 @@ final class NodeFormModel {
             }
         }
     }
-    /// The parent's privacy (replying): a public parent makes the reply public.
+    /// The parent's privacy (replying): a public parent of someone else's makes
+    /// the reply public.
     private(set) var parentPrivacy: PrivacyLevel?
+    /// The parent is the viewer's own: under a public one the reply may be Private
+    /// or Circles (Peter, 2026-11-24: "they should adhere to the form's selection").
+    private(set) var parentOwned = false
     var useAgenticPrompt: Bool {
         didSet { if config.allowAgenticPrompt { defaults.set(useAgenticPrompt, forKey: DefaultsKey.agenticReply) } }
     }
@@ -205,8 +212,14 @@ final class NodeFormModel {
         if config.parentId != nil, !config.isEdit, let known = config.parentPrivacy {
             parentPrivacyChanged(known)
         }
+        if config.parentId != nil, !config.isEdit, let owned = config.parentOwned {
+            parentOwned = owned
+        }
         if let parentId = config.parentId, !config.isEdit {
             if let parent = try? await app.api.nodeDetail(parentId) {
+                // An AI reply belongs to the user who asked for it.
+                let ownerId = parent.nodeType == .llm ? parent.parentUserId : parent.user?.id
+                parentOwned = ownerId != nil && ownerId == app.user?.id
                 parentPrivacyChanged(parent.privacyLevel)
                 aiUsage = parent.replyAIUsage ?? parent.aiUsage
             }
@@ -239,9 +252,9 @@ final class NodeFormModel {
     }
 
     /// The parent's privacy now (on load, and after it was edited while the form
-    /// was open): the reply takes it. A public parent pins the reply to public
-    /// (and the public-reply question comes back); a private one returns it to
-    /// private. The text typed so far stays.
+    /// was open): the reply takes it. A public parent of someone else's pins the
+    /// reply to public (and the public-reply question comes back); a private one
+    /// returns it to private. The text typed so far stays.
     func parentPrivacyChanged(_ level: PrivacyLevel) {
         guard config.parentId != nil, !config.isEdit else { return }
         parentPrivacy = level
@@ -258,12 +271,19 @@ final class NodeFormModel {
         drafts.resume()
     }
 
-    /// Replying under a public node: the reply is public, whatever was remembered.
+    /// Replying under someone else's public node: the reply is public (#228),
+    /// whatever was remembered. Under a public node of the viewer's own it starts
+    /// at Public (the parent's level) and the selector stays free.
+    var lockPrivacy: Bool { !config.isEdit && parentPrivacy == .public && !parentOwned }
+
     var effectivePrivacy: PrivacyLevel {
-        !config.isEdit && parentPrivacy == .public ? .public : privacy
+        lockPrivacy ? .public : privacy
     }
 
-    var lockPrivacy: Bool { !config.isEdit && parentPrivacy == .public }
+    /// "This reply will be public" asks first: a public reply under a public node.
+    var asksPublicReply: Bool {
+        !config.isEdit && parentPrivacy == .public && effectivePrivacy == .public
+    }
 
     /// A public or circles entry gets no automatic reply (Peter, 2026-11-12): the
     /// Auto-generate toggle shows off and can't be turned on. The stored
@@ -505,7 +525,7 @@ final class NodeFormModel {
                 return
             }
         }
-        if edit == nil, parentPrivacy == .public, !publicConfirmed,
+        if asksPublicReply, !publicConfirmed,
            defaults.string(forKey: DefaultsKey.publicReplyAck) != "true" {
             dialog = .publicReply
             return

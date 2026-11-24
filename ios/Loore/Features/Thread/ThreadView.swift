@@ -294,6 +294,7 @@ private struct ThreadContent: View {
                                     hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode, compact: true,
                                     placeholder: model.isReadReply ? "Ask about these picks, or say what you make of them…"
                                         : "Type what's on your mind…")
+        config.parentOwned = model.isOwner
         if model.isReadReply {
             config.submitOverride = { [model, autoGenerate] submission in
                 try await model.submitReadReply(submission, autoGenerate: autoGenerate)
