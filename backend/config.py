@@ -562,7 +562,11 @@ class Config:
     #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
     #                       #348): conversation calls pass the previous call's
     #                       response id and record why the cache missed. Older
-    #                       models must not get the option.
+    #                       models must not get the option. The flag also
+    #                       marks the models that take prompt_cache_options
+    #                       at all: a one-shot request (a digest, a profile
+    #                       build, ...) on them asks for no prompt cache and
+    #                       pays no cache write (#803, utils/one_shot_cache).
     #
     # Model picker keys (#355):
     #   deprecated — hidden from every picker and never inherited from a

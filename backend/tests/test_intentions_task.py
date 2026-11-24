@@ -432,8 +432,9 @@ def test_sync_mode_calls_model_once_and_saves_at_full_price(app, wired, monkeypa
     stages = []
     saved = it.run_infer_intentions_sync_impl(u.id, progress=stages.append)
     assert saved["batch"] is False and saved["version"] == 1
+    # One-shot (#803): the provider code sends no cache field to Anthropic.
     assert calls == [("claude-opus-5.5", {"max_tokens": 32000,
-                                          "user_id": u.id})]
+                                          "user_id": u.id, "one_shot": True})]
     assert stages and "synchronously" in stages[0]
     log = APICostLog.query.filter_by(user_id=u.id, request_type="intentions_infer").one()
     assert log.cost_microdollars == int(100_000 * 4.0 + 1_000 * 20.0)  # full price
