@@ -91,12 +91,53 @@ def validate_profile_models(config):
             f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
 
 
+def validate_model_successors(supported):
+    """Refuse to boot on a ``replaced_by`` (the model that takes a retired
+    model's place) that does not lead to an active model of the retired
+    model's provider, or that is set on an active model: a typo would
+    move nobody and say nothing, and another provider's model would move
+    users to that provider, which is never acceptable. A replacement that
+    is retired itself is followed to its own replacement (as
+    llm_nodes.successor_model does). A retired model that could chat
+    needs a chat successor, one that could Read a Read successor."""
+    for model_id, cfg in supported.items():
+        successor = cfg.get("replaced_by")
+        if not successor:
+            continue
+        if not cfg.get("deprecated"):
+            raise RuntimeError(
+                f"{model_id!r} names replaced_by={successor!r} but is not "
+                f"deprecated.")
+        seen = {model_id}
+        target = supported.get(successor) or {}
+        while (target.get("deprecated") and target.get("replaced_by")
+               and successor not in seen
+               and target.get("provider") == cfg.get("provider")):
+            seen.add(successor)
+            successor = target["replaced_by"]
+            target = supported.get(successor) or {}
+        if (not target or target.get("deprecated")
+                or target.get("provider") != cfg.get("provider")):
+            raise RuntimeError(
+                f"{model_id!r}: replaced_by={successor!r} is not an active "
+                f"{cfg.get('provider')} model.")
+        if cfg.get("chat", True) and not target.get("chat", True):
+            raise RuntimeError(
+                f"{model_id!r}: replaced_by={successor!r} is read only, "
+                f"and {model_id!r} was a chat model.")
+        if cfg.get("read") and not target.get("read"):
+            raise RuntimeError(
+                f"{model_id!r}: replaced_by={successor!r} is not flagged "
+                f"'read', and {model_id!r} was a Read model.")
+
+
 def validate_default_model(config):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
     deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, on
     a READ_DEFAULT_MODEL that is not an active read model, or on a
     CHAT_MODEL_<PROVIDER> that is not an active chat model of that
-    provider.
+    provider, or on a retired model's replacement that does not fit
+    (validate_model_successors).
 
     The keys are the dotted display ids (``claude-opus-4.6``); the API ids
     use dashes (``claude-opus-4-6``). Setting the API id in the env file
@@ -157,6 +198,7 @@ def validate_default_model(config):
                 raise RuntimeError(
                     f"{key}={chat_model!r} is not an active {provider} "
                     f"chat model. Active chat models: {chat_models}")
+        validate_model_successors(supported)
         validate_profile_models(config)
         return
     hint = ""

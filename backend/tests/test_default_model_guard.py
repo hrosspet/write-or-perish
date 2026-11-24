@@ -145,3 +145,80 @@ def test_the_shipped_chat_defaults_pass():
         "CHAT_MODEL_ANTHROPIC": Config.CHAT_MODEL_ANTHROPIC,
         "CHAT_MODEL_OPENAI": Config.CHAT_MODEL_OPENAI,
         "SUPPORTED_MODELS": Config.SUPPORTED_MODELS})
+
+
+# ── A retired model's replacement (replaced_by, 2026-11-24) ──────────────
+
+def test_the_shipped_replacements_pass_and_stay_within_openai():
+    from backend import validate_model_successors
+    from backend.config import Config
+    supported = Config.SUPPORTED_MODELS
+    validate_model_successors(supported)
+    named = {k: v["replaced_by"] for k, v in supported.items()
+             if v.get("replaced_by")}
+    assert named == {"gpt-6-astra": "gpt-6.2-astra",
+                     "gpt-6-sol": "gpt-6.2-sol"}
+    for retired, successor in named.items():
+        assert supported[retired]["deprecated"] is True
+        assert supported[successor]["provider"] == "openai"
+    # Luna 6 and Luna 5.6 are not retired (Peter, 2026-11-24).
+    for kept in ("gpt-6-luna", "gpt-5.6-luna"):
+        assert not supported[kept].get("deprecated"), kept
+
+
+@pytest.mark.parametrize("successor, why", [
+    ("claude-opus-5.5", "is not an active openai model"),
+    ("gpt-5.5", "is not an active openai model"),
+    ("gpt-6.3", "is not an active openai model"),
+    ("gpt-6.1-sol", "is read only"),
+    ("gpt-6.2-astra", "is not flagged 'read'"),
+])
+def test_a_replacement_that_does_not_fit_refuses_to_boot(successor, why):
+    from backend import validate_model_successors
+    models = {
+        "claude-opus-5.5": {"provider": "anthropic"},
+        "gpt-5.5": {"provider": "openai", "deprecated": True},
+        "gpt-6.1-sol": {"provider": "openai", "read": True, "chat": False},
+        "gpt-6.2-astra": {"provider": "openai"},
+        "gpt-6.2-sol": {"provider": "openai", "read": True},
+        "gpt-6-sol": {"provider": "openai", "read": True, "deprecated": True,
+                      "replaced_by": successor},
+    }
+    with pytest.raises(RuntimeError) as e:
+        validate_model_successors(models)
+    assert why in str(e.value)
+    # Through the boot check too.
+    with pytest.raises(RuntimeError):
+        validate_default_model({"DEFAULT_LLM_MODEL": "claude-opus-5.5",
+                                "SUPPORTED_MODELS": models})
+    models["gpt-6-sol"]["replaced_by"] = "gpt-6.2-sol"
+    validate_model_successors(models)
+
+
+def test_a_retired_replacement_is_followed_to_its_own():
+    """When GPT-6.2 Sol is retired in turn, GPT-6 Sol's entry need not
+    change: its replacement's replacement counts. A loop never ends on an
+    active model and refuses to boot."""
+    from backend import validate_model_successors
+    models = {
+        "gpt-6-sol": {"provider": "openai", "read": True, "deprecated": True,
+                      "replaced_by": "gpt-6.2-sol"},
+        "gpt-6.2-sol": {"provider": "openai", "read": True,
+                        "deprecated": True, "replaced_by": "gpt-6.4-sol"},
+        "gpt-6.4-sol": {"provider": "openai", "read": True},
+    }
+    validate_model_successors(models)
+    models["gpt-6.4-sol"]["deprecated"] = True
+    models["gpt-6.4-sol"]["replaced_by"] = "gpt-6-sol"
+    with pytest.raises(RuntimeError) as e:
+        validate_model_successors(models)
+    assert "is not an active openai model" in str(e.value)
+
+
+def test_a_replacement_on_an_active_model_refuses_to_boot():
+    from backend import validate_model_successors
+    with pytest.raises(RuntimeError) as e:
+        validate_model_successors({
+            "gpt-6-sol": {"provider": "openai", "replaced_by": "gpt-6.2-sol"},
+            "gpt-6.2-sol": {"provider": "openai"}})
+    assert "is not deprecated" in str(e.value)

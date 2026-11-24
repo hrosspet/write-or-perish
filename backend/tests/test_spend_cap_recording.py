@@ -676,14 +676,22 @@ class TestVoiceTurnUsesTheAccountsModel:
     on the account's model, and the text replies after it follow; text
     replies alone keep the thread's model. This holds for every account
     (#784). With GPT-6.2 Astra as OpenAI's default (#775), an account
-    whose saved OpenAI model is retired sends GPT-6.2 Astra; one that
-    saved GPT-6 Astra sends GPT-6 Astra."""
+    whose saved OpenAI model is retired sends GPT-6.2 Astra. Since GPT-6
+    Astra and GPT-6 Sol were retired (2026-11-24), an account that saved
+    one sends its 6.2 version (the dashboard resolves it), and an app
+    still holding the account from before the deploy, which sends the
+    retired id, gets the 6.2 version from the server."""
 
-    @pytest.mark.parametrize("saved, sent", [
-        ("gpt-5.5", "gpt-6.2-astra"),
-        ("gpt-6-astra", "gpt-6-astra"),
+    @pytest.mark.parametrize("saved, sent, runs", [
+        ("gpt-5.5", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-sol"),
+        # An app that loaded the account before the deploy.
+        ("gpt-6-astra", "gpt-6-astra", "gpt-6.2-astra"),
+        ("gpt-6-sol", "gpt-6-sol", "gpt-6.2-sol"),
     ])
-    def test_a_voice_turn_in_a_gpt_6_astra_thread(self, st, saved, sent):
+    def test_a_voice_turn_in_a_gpt_6_astra_thread(self, st, saved, sent,
+                                                  runs):
         from backend.config import Config
         from backend.utils.llm_nodes import (
             effective_preferred_model, resolve_chat_model)
@@ -708,11 +716,13 @@ class TestVoiceTurnUsesTheAccountsModel:
         _db.session.add(reply)
         draft = _recording(user, "sess-voice", [], st._test_root)
         _db.session.commit()
-        # A text reply here keeps the thread's model.
-        assert resolve_chat_model(reply, user) == ("gpt-6-astra",
+        # A text reply here keeps the thread's model: GPT-6 Astra is
+        # retired, so its 6.2 version.
+        assert resolve_chat_model(reply, user) == ("gpt-6.2-astra",
                                                    "predecessor")
-        # What both Voice clients send: the account's model.
-        assert effective_preferred_model(user) == sent
+        # What both Voice clients send: the account's model, as the
+        # dashboard resolves it.
+        assert effective_preferred_model(user) == runs
         saved_llm = sys.modules.get("backend.tasks.llm_completion")
         sys.modules["backend.tasks.llm_completion"] = MagicMock()
         try:
@@ -726,7 +736,7 @@ class TestVoiceTurnUsesTheAccountsModel:
                 sys.modules["backend.tasks.llm_completion"] = saved_llm
         _db.session.refresh(draft)
         voice_reply = _db.session.get(Node, draft.llm_node_id)
-        assert voice_reply.llm_model == sent
+        assert voice_reply.llm_model == runs
         # The text replies after it follow the Voice turn.
-        assert resolve_chat_model(voice_reply, user) == (sent, "predecessor")
+        assert resolve_chat_model(voice_reply, user) == (runs, "predecessor")
         assert _db.session.get(User, user.id).preferred_model == saved

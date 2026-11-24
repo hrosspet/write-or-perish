@@ -25,8 +25,11 @@ MODELS = {
     "claude-opus-4.8": {"provider": "anthropic", "api_model": "claude-opus-4-8",
                         "context_window": 1000000, "deprecated": True,
                         "input_price_per_mtok": 5.0, "output_price_per_mtok": 25.0},
-    # The real entry: its window, input ceiling and long-context pricing
-    # are what the OpenAI sizing and cost tests check.
+    # The real entries: their window, input ceiling and long-context
+    # pricing are what the OpenAI sizing and cost tests check. GPT-6 Astra
+    # is retired (2026-11-24) and names GPT-6.2 Astra as its replacement;
+    # its entry still prices the items that ran on it.
+    "gpt-6.2-astra": Config.SUPPORTED_MODELS["gpt-6.2-astra"],
     "gpt-6-astra": Config.SUPPORTED_MODELS["gpt-6-astra"],
     "gpt-5.5": {"provider": "openai", "api_model": "gpt-5.5",
                 "context_window": 1050000, "max_input_tokens": 922000,
