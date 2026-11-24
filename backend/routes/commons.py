@@ -1,6 +1,6 @@
 """Commons routes (the public forum) (#228, dark behind SHARE_V1 with the Share family).
 
-- /feed (members): public root nodes by everyone, newest first — the
+- /feed (members): public thread tops by everyone, newest first — the
   Commons. Log's public sibling.
 - /node/<id> (NO auth — the funnel): a public node and its PUBLIC
   descendants, readable logged out so a link shared on the open web shows
@@ -22,6 +22,10 @@ from backend.extensions import db
 from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.privacy import PrivacyLevel
+from backend.utils.public_threads import (
+    card_entries, public_children_filter, public_prompt_roots, public_root_of,
+    thread_top_filter,
+)
 from backend.utils.slugs import permalink_for
 from backend.utils.timefmt import iso_utc
 
@@ -104,19 +108,26 @@ def _author_name(node):
 @commons_bp.route("/feed", methods=["GET"])
 @login_required
 def feed():
-    """Public root nodes, everyone, newest first. Members-only surface —
-    needs the user's own opt-in (#228 dark ship)."""
+    """Public thread tops, everyone, newest first: public roots, and the
+    public first entry of a thread whose prompt root is private
+    (utils/public_threads). A public prompt root's card is the first
+    public entry of its owner under it: its id, text, reply count and
+    permalink (else the root's). Members-only surface — needs the user's
+    own opt-in (#228 dark ship)."""
     if not _enabled() or not current_user.public_sharing_enabled:
         return jsonify({"error": "Not found"}), 404
     page = request.args.get("page", 1, type=int)
     per_page = min(request.args.get("per_page", 20, type=int), 100)
+    roots = public_prompt_roots()
     query = _public_alive(
-        Node.query.filter(Node.parent_id.is_(None))
+        Node.query.filter(thread_top_filter(roots.bare))
     ).order_by(Node.created_at.desc())
     pagination = query.paginate(page=page, per_page=per_page,
                                 error_out=False)
+    cards = card_entries(pagination.items, roots)
     items = []
-    for node in pagination.items:
+    for top in pagination.items:
+        node = cards.get(top.id, top)
         try:
             content = (node.get_content() or "").strip()
         except Exception as e:  # noqa: BLE001 — one unreadable entry
@@ -130,13 +141,13 @@ def feed():
                            "left out", node.id, describe_exception(e))
             continue
         reply_count = _public_alive(
-            Node.query.filter(Node.parent_id == node.id)).count()
+            Node.query.filter(public_children_filter(node.id))).count()
         items.append({
             "id": node.id,
             "username": _author_name(node),
-            "permalink": permalink_for(node),
+            "permalink": permalink_for(node) or permalink_for(top),
             "content": content[:600] + ("…" if len(content) > 600 else ""),
-            "created_at": iso_utc(node.created_at),
+            "created_at": iso_utc(top.created_at),
             "reply_count": reply_count,
         })
     return jsonify({
@@ -154,8 +165,10 @@ def _serialize_public_subtree(node, budget):
         return None
     budget[0] -= 1
     children = []
+    # Its children, and the public nodes under a private prompt entry of
+    # their owner's below it, shown in that entry's place.
     child_rows = _public_alive(
-        Node.query.filter(Node.parent_id == node.id)
+        Node.query.filter(public_children_filter(node.id))
     ).order_by(Node.created_at.asc()).all()
     for child in child_rows:
         serialized = _serialize_public_subtree(child, budget)
@@ -213,15 +226,9 @@ def public_thread(node_id):
         return jsonify({"error": "Not found"}), 404
 
     # Walk up to the nearest public root so a deep-linked reply still
-    # renders its thread; stop at the first non-public ancestor boundary.
-    root = node
-    visited = set()
-    while (root.parent_id and root.id not in visited):
-        visited.add(root.id)
-        parent = Node.query.get(root.parent_id)
-        if not _publicly_visible(parent):
-            break
-        root = parent
+    # renders its thread; stop at the first non-public ancestor boundary
+    # (a private prompt entry of the same person is passed through).
+    root = public_root_of(node, _publicly_visible)
 
     budget = [MAX_THREAD_NODES]
     thread = _serialize_public_subtree(root, budget)

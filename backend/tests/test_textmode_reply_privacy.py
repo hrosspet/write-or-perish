@@ -6,8 +6,10 @@ The message is saved at the level the form sent, whatever the node's
 level is now (Peter, 2026-11-24: "The privacy form is clear and it should
 be adhered to"); nothing is refused for a difference between the two. A
 client that sends no level gets the node's. The prompt node attached
-under the node takes the more private of the two levels, and an
-automatic reply follows the message's level.
+under the node is given the more private of the two levels, and from
+that it is Public only for a Public level under a Public default
+(session_helpers.prompt_entry_privacy); an automatic reply follows the
+message's level.
 
 Route-level tests; the generation task is mocked.
 """
@@ -194,6 +196,8 @@ def test_private_chosen_under_a_shared_node_is_saved_private(
 
 
 def test_circles_chosen_under_a_public_node_is_saved_circles(app):
+    """The prompt node is private: a Text-mode prompt entry is Public
+    only for a Public message (session_helpers.prompt_entry_privacy)."""
     gleaning = _gleaning("public")
 
     resp = _post(app, gleaning, privacy_level="circles")
@@ -202,15 +206,18 @@ def test_circles_chosen_under_a_public_node_is_saved_circles(app):
     data = resp.get_json()
     assert _message(resp).privacy_level == "circles"
     prompt = _db.session.get(Node, data["prompt_node_id"])
-    assert prompt.privacy_level == "circles"
+    assert prompt.privacy_level == "private"
     assert "llm_node_id" not in data
     assert data["llm_error_code"]
 
 
-def test_public_chosen_under_a_private_node_is_saved_public(app):
+@pytest.mark.parametrize("default", ["private", "public"])
+def test_public_chosen_under_a_private_node_is_saved_public(app, default):
     """As a typed reply sent to POST /nodes/ is. The reply is not made
     by itself for a public message; the prompt node attached under the
-    private node stays private."""
+    private node stays private, also under a Public default."""
+    _user("ben").default_privacy_level = default
+    _db.session.commit()
     gleaning = _gleaning("private")
 
     resp = _post(app, gleaning, privacy_level="public")
@@ -225,7 +232,12 @@ def test_public_chosen_under_a_private_node_is_saved_public(app):
     assert prompt.privacy_level == "private"
 
 
-def test_public_chosen_under_a_public_node_is_saved_public(app):
+@pytest.mark.parametrize("default", ["private", "public"])
+def test_public_chosen_under_a_public_node_is_saved_public(app, default):
+    """The prompt node is Public only under a Public default
+    (session_helpers.prompt_entry_privacy)."""
+    _user("ben").default_privacy_level = default
+    _db.session.commit()
     gleaning = _gleaning("public")
 
     resp = _post(app, gleaning, privacy_level="public")
@@ -235,7 +247,7 @@ def test_public_chosen_under_a_public_node_is_saved_public(app):
     assert _message(resp).privacy_level == "public"
     assert "llm_node_id" not in data
     prompt = _db.session.get(Node, data["prompt_node_id"])
-    assert prompt.privacy_level == "public"
+    assert prompt.privacy_level == default
 
 
 def test_private_chosen_under_a_private_node_gets_a_private_reply(app):

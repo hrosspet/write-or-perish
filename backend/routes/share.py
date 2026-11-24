@@ -392,17 +392,24 @@ def public_shares(username):
     user, moved = resolve_public_handle(username)
     if not user:
         return jsonify({"error": "Not found"}), 404
-    # The user's living public roots — shares are enriched with their
+    # The user's living public thread tops (roots, and the public first
+    # entry under a private prompt root) — shares are enriched with their
     # type/publish date; direct-created public roots (craft path) appear
     # too, so everything public has a home page (#228). One page of them
     # (?page=N, PUBLIC_LISTING_PAGE_SIZE), as the Commons feed pages:
-    # pinned pieces lead (newest pin first), then publish date.
+    # pinned pieces lead (newest pin first), then publish date. A public
+    # prompt root's card is its owner's first public entry under it
+    # (utils/public_threads): its id, text and permalink (else the
+    # root's); the pin and the date stay the root's.
     from backend.routes.commons import (
         PUBLIC_LISTING_PAGE_SIZE, listing_page, public_root_order)
     page = listing_page()
     size = PUBLIC_LISTING_PAGE_SIZE
+    from backend.utils.public_threads import (
+        card_entries, public_prompt_roots, thread_top_filter)
+    roots = public_prompt_roots(user.id)
     nodes = Node.query.filter(
-        Node.parent_id.is_(None),
+        thread_top_filter(roots.bare),
         Node.deleted_at.is_(None),
         Node.privacy_level == "public",
         (Node.human_owner_id == user.id) | (Node.user_id == user.id),
@@ -424,9 +431,11 @@ def public_shares(username):
             ShareDraft.public_node_id.in_([n.id for n in nodes]),
         ).all()
     } if nodes else {}
+    cards = card_entries(nodes, roots)
     items = []
-    for node in nodes:
-        share = share_by_node.get(node.id)
+    for top in nodes:
+        share = share_by_node.get(top.id)
+        node = cards.get(top.id, top)
         content = (node.get_content() or "").strip()
         items.append({
             "id": node.id,
@@ -435,11 +444,11 @@ def public_shares(username):
             "content": content[:600] + ("…" if len(content) > 600 else ""),
             "share_type": share.share_type if share else None,
             "public_node_id": node.id,
-            "permalink": permalink_for(node),
-            "pinned": node.pinned_at is not None,
+            "permalink": permalink_for(node) or permalink_for(top),
+            "pinned": top.pinned_at is not None,
             "published_at": iso_utc(
                 share.published_at if share and share.published_at
-                else node.created_at),
+                else top.created_at),
         })
     body = {"username": user.username, "shares": items,
             "has_more": has_more, "page": page}
