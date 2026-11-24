@@ -477,6 +477,8 @@ final class SharedThreadModelTests: StubbedAppTestCase {
         _ = try await model.submitReadReply(NodeFormSubmission(content: "why?", parentId: 10, privacy: .circles, aiUsage: .chat),
                                             autoGenerate: true)
         XCTAssertEqual(body(of: "POST /api/textmode/from-node/10")?["auto_generate"] as? Bool, false)
+        // The form's privacy goes along, as on a recorded read reply.
+        XCTAssertEqual(body(of: "POST /api/textmode/from-node/10")?["privacy_level"] as? String, "circles")
     }
 
     func testARecordedReadReplyIsSavedWithTheFormsSettings() async throws {
