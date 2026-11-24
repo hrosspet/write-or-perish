@@ -66,8 +66,8 @@ from backend.extensions import db
 from backend.utils.prompts import get_user_prompt_record
 from backend.utils.llm_nodes import (
     REPLY_NOT_QUEUED_MESSAGE, AIUsageRefused, ai_usage_refused_response,
-    create_llm_placeholder, enqueue_reply_job, is_read_model, reply_refusal,
-    resolve_read_model,
+    create_llm_placeholder, current_read_model, enqueue_reply_job,
+    is_read_model, reply_refusal, resolve_read_model,
 )
 from backend.utils.placeholders import (
     UserExportValidationError, ca_tweets_allowed, ca_tweets_denied_message,
@@ -109,6 +109,9 @@ def _resolve_model(anchor_node):
             return resolve_read_model(anchor_node, user=current_user)[0], None
         except GleanModelUnavailable as e:
             return None, (jsonify({"error": str(e)}), 400)
+    # A retired read model (a picker opened before it was retired) runs
+    # as the one named to replace it (GPT-6 Sol → GPT-6.2 Sol).
+    model_id = current_read_model(model_id) or model_id
     if not is_read_model(model_id):
         names = [cfg.get("display_name", key)
                  for key, cfg in current_app.config["SUPPORTED_MODELS"].items()

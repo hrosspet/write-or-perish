@@ -678,13 +678,22 @@ class TestVoiceTurnContinuesOnTheThreadsModel:
     the rule a Text reply that names no model follows), and the chain
     runs on the model it is handed. With GPT-6.2 Astra as OpenAI's default
     (#775), an account whose saved OpenAI model is retired sends GPT-6.2
-    Astra; its GPT-6 Astra threads stay on GPT-6 Astra."""
+    Astra. Since GPT-6 Astra and GPT-6 Sol were retired (2026-11-24), an
+    account that saved one sends its 6.2 version (the dashboard resolves
+    it), an app still holding the account from before the deploy sends
+    the retired id, and a thread on GPT-6 Astra continues on GPT-6.2
+    Astra whatever was sent."""
 
-    @pytest.mark.parametrize("saved, sent", [
-        ("gpt-5.5", "gpt-6.2-astra"),
-        ("gpt-6-astra", "gpt-6-astra"),
+    @pytest.mark.parametrize("saved, sent, account", [
+        ("gpt-5.5", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-sol"),
+        # An app that loaded the account before the deploy.
+        ("gpt-6-astra", "gpt-6-astra", "gpt-6.2-astra"),
+        ("gpt-6-sol", "gpt-6-sol", "gpt-6.2-sol"),
     ])
-    def test_a_voice_turn_in_a_gpt_6_astra_thread(self, st, saved, sent):
+    def test_a_voice_turn_in_a_gpt_6_astra_thread(self, st, saved, sent,
+                                                  account):
         from backend.config import Config
         from backend.utils.llm_nodes import (
             effective_preferred_model, resolve_chat_model, voice_turn_model)
@@ -709,14 +718,16 @@ class TestVoiceTurnContinuesOnTheThreadsModel:
         _db.session.add(reply)
         draft = _recording(user, "sess-voice", [], st._test_root)
         _db.session.commit()
-        # A text reply that names no model here keeps the thread's model.
-        assert resolve_chat_model(reply, user) == ("gpt-6-astra",
+        # A text reply that names no model here keeps the thread's model:
+        # GPT-6 Astra is retired, so its 6.2 version.
+        assert resolve_chat_model(reply, user) == ("gpt-6.2-astra",
                                                    "predecessor")
-        # What both Voice clients send: the account's model ...
-        assert effective_preferred_model(user) == sent
+        # What both Voice clients send: the account's model, as the
+        # dashboard resolves it ...
+        assert effective_preferred_model(user) == account
         # ... and what the finalize route hands the chain instead.
         model = voice_turn_model(reply, user, sent)
-        assert model == "gpt-6-astra"
+        assert model == "gpt-6.2-astra"
         saved_llm = sys.modules.get("backend.tasks.llm_completion")
         sys.modules["backend.tasks.llm_completion"] = MagicMock()
         try:
@@ -730,8 +741,8 @@ class TestVoiceTurnContinuesOnTheThreadsModel:
                 sys.modules["backend.tasks.llm_completion"] = saved_llm
         _db.session.refresh(draft)
         voice_reply = _db.session.get(Node, draft.llm_node_id)
-        assert voice_reply.llm_model == "gpt-6-astra"
+        assert voice_reply.llm_model == "gpt-6.2-astra"
         # The text replies after it stay on the thread's model too.
-        assert resolve_chat_model(voice_reply, user) == ("gpt-6-astra",
+        assert resolve_chat_model(voice_reply, user) == ("gpt-6.2-astra",
                                                          "predecessor")
         assert _db.session.get(User, user.id).preferred_model == saved

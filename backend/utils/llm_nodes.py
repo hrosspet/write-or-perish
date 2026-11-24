@@ -127,7 +127,9 @@ def is_chat_model(model_id):
 # from SUPPORTED_MODELS) can still be saved: an account preference, a
 # thread's last reply, a stored session's model, a page opened before the
 # deprecation. What runs in its place is a model of the same provider:
-# the user's own model there if they have one, else that provider's
+# the newer model named to replace it ("replaced_by": GPT-6 Astra →
+# GPT-6.2 Astra, GPT-6 Sol → GPT-6.2 Sol, Peter 2026-11-24), else the
+# user's own model there if they have one, else that provider's
 # default. Never another provider's: "A user's model is theirs" (Peter,
 # 2026-10-02; #418, #487).
 CHAT_MODEL_KEYS = {
@@ -176,16 +178,54 @@ def provider_chat_model(provider):
     return None
 
 
+def successor_model(model_id):
+    """The active model named to take the place of *model_id*, a retired
+    model: its SUPPORTED_MODELS entry's ``replaced_by`` (GPT-6 Sol →
+    GPT-6.2 Sol), followed on while the named model is retired too (a
+    later retirement of GPT-6.2 Sol with a replacement of its own). Only
+    a model of the same provider counts (the boot check,
+    validate_model_successors, rules out any other). None when no
+    entry on the way names one."""
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+    provider = saved_model_provider(model_id)
+    seen = {model_id}
+    current = model_id
+    while True:
+        named = (supported.get(current) or {}).get("replaced_by")
+        if (not named or named in seen
+                or saved_model_provider(named) != provider):
+            return None
+        if is_active_model(named):
+            return named
+        seen.add(named)
+        current = named
+
+
+def current_read_model(model_id):
+    """*model_id* while it is an active read model, else the read model
+    named to replace it (successor_model; GPT-6 Sol → GPT-6.2 Sol), else
+    None."""
+    if is_read_model(model_id):
+        return model_id
+    successor = successor_model(model_id)
+    return successor if is_read_model(successor) else None
+
+
 def same_provider_chat_model(model_id, *candidates):
     """The chat model that runs in place of *model_id*, a saved model no
-    longer offered for chat: the first of *candidates* (the thread's and
-    the user's own models, nearest first) that is an active chat model
-    of the same provider, else that provider's default
+    longer offered for chat: the model named to replace it
+    (successor_model: GPT-6 Astra → GPT-6.2 Astra) while it is an active
+    chat model; else the first of *candidates* (the thread's and the
+    user's own models, nearest first) that is an active chat model of
+    the same provider, else that provider's default
     (provider_chat_model). None when the provider can't be told or has
     no chat model."""
     provider = saved_model_provider(model_id)
     if provider is None:
         return None
+    successor = successor_model(model_id)
+    if is_chat_model(successor):
+        return successor
     for candidate in candidates:
         if (is_chat_model(candidate)
                 and saved_model_provider(candidate) == provider):
@@ -339,7 +379,8 @@ def resolve_chat_model(parent_node, user, chain=None):
     If the closest such reply is on a model recognized but not usable for
     chat (deprecated, read only, or the historical ``gpt-4.5-preview``
     legacy id), the walk stops there and the thread stays with that
-    model's provider (#487): the user's account model when it is that
+    model's provider (#487): the model named to replace it (GPT-6 Astra
+    → GPT-6.2 Astra), else the user's account model when it is that
     provider's, else the provider's default (same_provider_chat_model),
     still "predecessor". Walking past it to find an even older active
     model would pick a model nobody chose for this point of the thread.
@@ -430,8 +471,11 @@ def resolve_read_model(anchor_node, chain=None, user=None):
         for node in chain.llm_replies():
             if node.id not in chain.reads:
                 continue
-            if is_read_model(node.llm_model):
-                return node.llm_model, "predecessor"
+            # A read on a retired read model: the one named to replace it
+            # (current_read_model), else the default.
+            read_model = current_read_model(node.llm_model)
+            if read_model:
+                return read_model, "predecessor"
             break
         return current_app.config["READ_DEFAULT_MODEL"], "default"
     provider = glean_provider(anchor_node, user, chain=chain)
@@ -444,9 +488,11 @@ def resolve_read_model(anchor_node, chain=None, user=None):
             if (node.id not in chain.reads
                     or (node.human_owner_id or node.user_id) != user.id):
                 continue
-            if (is_read_model(node.llm_model)
-                    and model_provider(node.llm_model) == provider):
-                return node.llm_model, "predecessor"
+            # Also the user's read on a retired read model: the one named
+            # to replace it (GPT-6 Sol → GPT-6.2 Sol, current_read_model).
+            read_model = current_read_model(node.llm_model)
+            if read_model and model_provider(read_model) == provider:
+                return read_model, "predecessor"
             break
     return glean_model_for_provider(provider), "provider_default"
 
@@ -704,9 +750,11 @@ def _read_turn_model(parent, owner, model_id, chain):
     # their own: nobody picks a model for someone else's thread.
     owns_parent = owner is not None and (
         (parent.human_owner_id or parent.user_id) == owner.id)
-    if (owns_parent and is_read_model(model_id)
-            and may_choose_glean_model(owner)):
-        return model_id
+    # A retired read model (a page opened before it was retired) counts
+    # as the one named to replace it (current_read_model).
+    named = current_read_model(model_id)
+    if owns_parent and named and may_choose_glean_model(owner):
+        return named
     new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
     if new_model_id != model_id:
         current_app.logger.info(

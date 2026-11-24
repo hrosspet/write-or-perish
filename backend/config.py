@@ -77,11 +77,10 @@ class Config:
     # validate_default_model).
     # OpenAI's is GPT-6.2 Astra since 2026-11-23 (Peter: "Astra 6.2 should
     # become the new OpenAI chat default"; it was GPT-6 Astra). Moving it
-    # rewrites no saved value: an account that saved GPT-6 Astra keeps it
-    # (still offered), and a text reply in a thread on GPT-6 Astra stays
-    # on it. A Voice turn runs on the account's model, as for every
-    # account (#784), so for an account whose saved OpenAI model is
-    # retired it now runs on GPT-6.2 Astra, also in such a thread.
+    # rewrites no saved value. GPT-6 Astra itself is retired since
+    # 2026-11-24 (its entry's "replaced_by"): an account or a thread on it
+    # gets GPT-6.2 Astra. A Voice turn runs on the account's model, as for
+    # every account (#784).
     CHAT_MODEL_ANTHROPIC = (os.environ.get("CHAT_MODEL_ANTHROPIC")
                             or "claude-opus-5.5")
     CHAT_MODEL_OPENAI = (os.environ.get("CHAT_MODEL_OPENAI")
@@ -507,8 +506,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "10"
-    PRICING_UPDATED_AT = "2026-11-23"
+    PRICING_VERSION = "11"
+    PRICING_UPDATED_AT = "2026-11-24"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
@@ -545,7 +544,25 @@ class Config:
     #                of the same provider (#487): the user's own model of
     #                that provider, else CHAT_MODEL_<PROVIDER> /
     #                LLM_NAME. Deprecate a model rather than remove its
-    #                entry: the entry is how its provider is known.
+    #                entry: the entry is how its provider is known, and
+    #                its prices price the replies that ran on it (cost
+    #                rows of a batch collected after the deprecation).
+    #   replaced_by — on a deprecated model: the newer model of the same
+    #                provider and line that takes its place (GPT-6 Astra →
+    #                GPT-6.2 Astra). It comes first, before the thread's
+    #                and the user's own models: a preference, a thread, a
+    #                request or a user's own earlier read on the retired
+    #                model moves to it, while it is an active chat model
+    #                (for a read: an active read model). A replacement
+    #                retired in turn is followed to its own replacement.
+    #                Checked at boot (validate_model_successors): it leads
+    #                to an active model of the same provider. Without it
+    #                the rule above applies. A server setting that names
+    #                the retired model (LLM_NAME, CHAT_MODEL_*,
+    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*) runs on the
+    #                replacement, with one warning line at boot
+    #                (replace_retired_settings); without a replacement it
+    #                is refused at boot.
     #   featured   — in the picker's short list (with the selected model);
     #                the rest sit behind "More models…". Set by hand.
     #   read       — a read (Community Archive picks) may run on it; the
@@ -577,8 +594,9 @@ class Config:
             "max_input_tokens": 922000,
             "display_name": "GPT-6.2 Astra",
             # Added at Peter's request (2026-11-23: "we should add Astra
-            # 6.2 to Loore"); featured beside GPT-6 Astra. OpenAI's chat
-            # default (CHAT_MODEL_OPENAI) since the same day.
+            # 6.2 to Loore"); featured. OpenAI's chat default
+            # (CHAT_MODEL_OPENAI) since the same day, and GPT-6 Astra's
+            # replacement since 2026-11-24.
             "featured": True,
             "context_window": 1050000,
             # Verified 2026-11-23 on the OpenAI pricing + model pages:
@@ -589,6 +607,36 @@ class Config:
             # cache, 1.5x output for the whole request); batch half.
             "input_price_per_mtok": 8.00,
             "output_price_per_mtok": 40.00,
+            "cached_input_multiplier": 0.05,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
+        "gpt-6.2-sol": {
+            # ASSUMED o200k, as for gpt-6-sol: OpenAI names no tokenizer.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6.2-sol",
+            # OpenAI's diagnostics guide: "GPT-5.6 and later" (2026-11-24).
+            "cache_diagnostics": True,
+            # Model page (2026-11-24): 1.05M window, 922k max input, 128k
+            # max output; reasoning effort "none" is rejected (Loore sends
+            # no effort on a live call).
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6.2 Sol",
+            # Added at Peter's request (2026-11-24: "we should also
+            # deprecate Sol 6, and add Sol 6.2"), in GPT-6 Sol's place
+            # and with its flags: chat and Read, not featured.
+            "read": True,
+            "context_window": 1050000,
+            # Verified 2026-11-24 on the OpenAI pricing + model pages:
+            # $2.00 / $10.00, cached input $0.10 (0.05x, where gpt-6-sol
+            # is 0.1x), 30-minute cache writes $2.50 (the default 1.25x);
+            # >272k input: $4.00 / $15.00, cached $0.20, writes $5.00 (2x
+            # input and cache, 1.5x output for the whole request); batch
+            # half. The same prices as gpt-6.1-sol.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
             "cached_input_multiplier": 0.05,
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
@@ -625,7 +673,6 @@ class Config:
             "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Astra",
-            "featured": True,
             "context_window": 1050000,
             # Verified 2026-09-03 on the OpenAI pricing page.
             "input_price_per_mtok": 10.00,
@@ -641,6 +688,11 @@ class Config:
             # after the first chunk, so a wrong guess costs at most one
             # mis-sized chunk.
             "token_multiplier": 2.0,
+            # Retired 2026-11-24 (Peter: "we should make Astra 6 deprecated,
+            # this will shift user's preferred model to Astra 6.2"). OpenAI
+            # still serves it; the entry stays for its replies' prices.
+            "deprecated": True,
+            "replaced_by": "gpt-6.2-astra",
         },
         "gpt-6-sol": {
             # ASSUMED o200k like GPT-5.x (also the provider default); not
@@ -664,6 +716,11 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
+            # Retired 2026-11-24 (Peter: "we should also deprecate Sol 6,
+            # and add Sol 6.2"). OpenAI still serves it; the entry stays for
+            # its replies' prices.
+            "deprecated": True,
+            "replaced_by": "gpt-6.2-sol",
         },
         "gpt-6-luna": {
             # ASSUMED o200k, as for gpt-6-sol.

@@ -20,16 +20,25 @@ Authoring rules:
   get their section in the commit that turns them ON, not at merge.
 -->
 
+<!-- id: gpt-6-astra-sol-retired -->
+## 2026-11-24 — GPT-6 Astra and GPT-6 Sol are replaced by their 6.2 versions
+
+Loore no longer offers GPT-6 Astra and GPT-6 Sol. Their newer versions take their place: GPT-6.2 Astra, and GPT-6.2 Sol, which is new in Loore. Both are from OpenAI, like the models they replace.
+
+If GPT-6 Astra was your model, Loore now uses GPT-6.2 Astra. If it was GPT-6 Sol, Loore now uses GPT-6.2 Sol. Conversations that ran on either continue on its 6.2 version. You don't need to do anything, and you can pick another model on the [Account page](/account#model).
+
+Neither costs more to run. GPT-6.2 Astra costs 20% less than GPT-6 Astra for what it reads and writes, and 60% less for cached input (the earlier part of a conversation, sent again with each new message). GPT-6.2 Sol costs the same as GPT-6 Sol, and half as much for cached input.
+
+GPT-6 Luna and GPT-5.6 Luna stay as they are.
+
 <!-- id: gpt-6-2-astra -->
 ## 2026-11-23 — A new model to talk to: GPT-6.2 Astra
 
 GPT-6.2 Astra is now available in Loore — pick it in the [Account page](/account#model)'s model selector. It's OpenAI's newest frontier model.
 
-It's also Loore's new default OpenAI model. If you use OpenAI's models and the model you picked is no longer offered, Loore now uses GPT-6.2 Astra in its place (until now, GPT-6 Astra).
+It's also Loore's new default OpenAI model. If you use OpenAI's models and the model you picked is no longer offered and has no newer version in Loore, Loore now uses GPT-6.2 Astra in its place (until now, GPT-6 Astra).
 
 It costs less to run than GPT-6 Astra: OpenAI charges 20% less for what it reads and writes, and 60% less for cached input (the earlier part of a conversation, sent again with each new message).
-
-A model you picked stays as you picked it. If you chose GPT-6 Astra, Loore keeps using GPT-6 Astra, and a conversation on GPT-6 Astra continues on it.
 
 <!-- id: archive-search-for-everyone -->
 ## 2026-09-22 — Loore can now search your archive in every conversation

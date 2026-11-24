@@ -31,7 +31,9 @@ from backend.extensions import db as _db
 from backend.models import Draft, Node, User
 
 ACCOUNT = "claude-opus-5.5"
-THREAD = "gpt-6-astra"
+# An offered model of the other provider (GPT-6 Astra, which this file
+# used first, was retired on 2026-11-24 in favour of GPT-6.2 Astra).
+THREAD = "gpt-6.2-astra"
 
 
 @pytest.fixture
@@ -162,20 +164,26 @@ class TestStreamingFinalize:
         assert self._finalize(models, user, finalize_task, reply,
                               model=None) == THREAD
 
-    @pytest.mark.parametrize("saved, sent", [
+    @pytest.mark.parametrize("saved, sent, account", [
         # #775: a saved OpenAI model no longer offered stands for GPT-6.2
-        # Astra, which both apps then send.
-        ("gpt-5.5", "gpt-6.2-astra"),
-        ("gpt-6-astra", "gpt-6-astra"),
+        # Astra, which both apps then send. Since GPT-6 Astra and GPT-6
+        # Sol were retired (2026-11-24), a saved one stands for its 6.2
+        # version; an app that loaded the account before the deploy still
+        # sends the retired id.
+        ("gpt-5.5", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-astra", "gpt-6.2-astra", "gpt-6.2-astra"),
+        ("gpt-6-sol", "gpt-6.2-sol", "gpt-6.2-sol"),
+        ("gpt-6-astra", "gpt-6-astra", "gpt-6.2-astra"),
+        ("gpt-6-sol", "gpt-6-sol", "gpt-6.2-sol"),
     ])
-    def test_a_gpt_6_astra_thread_stays_on_gpt_6_astra(
-            self, models, finalize_task, saved, sent):
+    def test_a_gpt_6_astra_thread_continues_on_gpt_6_2_astra(
+            self, models, finalize_task, saved, sent, account):
         from backend.utils.llm_nodes import effective_preferred_model
         user = _speaker(saved)
         reply = _voice_thread(user, "gpt-6-astra")
-        assert effective_preferred_model(user) == sent
+        assert effective_preferred_model(user) == account
         assert self._finalize(models, user, finalize_task, reply,
-                              model=sent) == "gpt-6-astra"
+                              model=sent) == "gpt-6.2-astra"
         assert _db.session.get(User, user.id).preferred_model == saved
 
 
@@ -282,7 +290,7 @@ class TestFromNode:
 # that names no model alike, and the account's model answers.
 
 def _members_thread(alice):
-    """Bob's public thread with his AI reply on GPT-6 Astra, and Alice's
+    """Bob's public thread with his AI reply on GPT-6.2 Astra, and Alice's
     public entry under it."""
     bob = _user("bob")
     bob.preferred_model = THREAD
