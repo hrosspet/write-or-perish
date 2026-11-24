@@ -103,8 +103,8 @@ private struct NodeFormBody: View {
                 RegenerateTtsDialog(onChoice: model.answerTts, onCancel: model.cancelDialog)
             case .scope?:
                 ApplyToRepliesDialog(
-                    privacyChanged: config.edit?.initialPrivacy != nil && model.privacy != config.edit?.initialPrivacy,
-                    aiUsageChanged: config.edit?.initialAIUsage != nil && model.aiUsage != config.edit?.initialAIUsage,
+                    privacyChanged: model.openedPrivacy != nil && model.privacy != model.openedPrivacy,
+                    aiUsageChanged: model.openedAIUsage != nil && model.aiUsage != model.openedAIUsage,
                     onChoice: model.answerScope, onCancel: model.cancelDialog)
             case .publicReply?:
                 PublicReplyDialog(onConfirm: model.answerPublicReply, onCancel: model.cancelDialog)

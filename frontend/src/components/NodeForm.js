@@ -864,10 +864,14 @@ const NodeForm = forwardRef(
           // to do with it. It is saved as a draft at once, with the form's
           // base: another device's Save may have deleted this form's draft,
           // and a reload must not lose it (#799 review). Reopened, the
-          // form offers it beside the entry's current text.
+          // form offers it beside the entry's current text. Only typed
+          // text: a refused settings-only Save keeps no copy of the old
+          // text as "your unsaved edit" (#799 second review).
           setNewerVersion(true);
-          saveDraftNow(content);
-          setHasDraft(true);
+          if (content !== initialContent) {
+            saveDraftNow(content);
+            setHasDraft(true);
+          }
         } else if (uploadedFile && isSpendCapError(err)) {
           // The client-side cap flag was stale; the server refused the
           // upload before storing anything (#341). The banner is up; the

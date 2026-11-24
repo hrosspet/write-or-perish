@@ -173,6 +173,11 @@ final class NodeFormModel {
     /// False while an edit form reads the entry and its draft: the editor waits,
     /// so no typing lands on the page's older text.
     private(set) var ready: Bool
+    /// The privacy and AI usage the edit form opened on: the page's, then the
+    /// entry's as just read (#799 second review). A Save that changes either
+    /// asks whether replies follow.
+    private(set) var openedPrivacy: PrivacyLevel?
+    private(set) var openedAIUsage: AIUsage?
 
     /// What the form says when its Save was refused for a newer version (#799).
     static let newerEntryEditMessage =
@@ -188,6 +193,8 @@ final class NodeFormModel {
         content = config.edit?.initialContent ?? ""
         base = config.edit?.initialContent ?? ""
         ready = !config.isEdit
+        openedPrivacy = config.edit?.initialPrivacy
+        openedAIUsage = config.edit?.initialAIUsage
         let user = app.user
         let remembers = !config.isEdit && config.parentId == nil
         func remembered(_ key: String) -> String? { remembers ? defaults.string(forKey: key) : nil }
@@ -268,10 +275,20 @@ final class NodeFormModel {
     /// do the Save's base and the draft's. Offline: the page's copy (its Save is
     /// still checked against the stored text).
     private func readCurrentEntry(_ edit: NodeFormConfig.Edit) async {
-        guard let fresh = try? await app.api.nodeDetail(edit.nodeId), fresh.content != base else { return }
-        if content == base { content = fresh.content }
-        base = fresh.content
-        drafts.base = fresh.content
+        guard let fresh = try? await app.api.nodeDetail(edit.nodeId) else { return }
+        if fresh.content != base {
+            if content == base { content = fresh.content }
+            base = fresh.content
+            drafts.base = fresh.content
+        }
+        // Its privacy and AI usage too (#799 second review): a page left open
+        // may still show Public after the entry was made Private elsewhere, and
+        // a Save from it would make the newer text public. A setting the person
+        // already changed here stays theirs.
+        if privacy == openedPrivacy { privacy = fresh.privacyLevel }
+        openedPrivacy = fresh.privacyLevel
+        if aiUsage == openedAIUsage { aiUsage = fresh.aiUsage }
+        openedAIUsage = fresh.aiUsage
     }
 
     /// The parent's privacy now (on load, and after it was edited while the form
@@ -524,8 +541,8 @@ final class NodeFormModel {
             return
         }
         if let edit, edit.hasChildren, applyToReplies == nil,
-           (edit.initialPrivacy != nil && privacy != edit.initialPrivacy)
-            || (edit.initialAIUsage != nil && aiUsage != edit.initialAIUsage) {
+           (openedPrivacy != nil && privacy != openedPrivacy)
+            || (openedAIUsage != nil && aiUsage != openedAIUsage) {
             pendingRegenerateTts = regenerateTts
             dialog = .scope
             return
@@ -572,9 +589,13 @@ final class NodeFormModel {
                 // device's Save may have deleted this form's draft, and going
                 // back must not lose the text (#799 review). Reopened, the form
                 // offers it beside the entry's current text.
-                drafts.save(content)
-                await drafts.flush()
-                hasDraft = true
+                // Only typed text: a refused settings-only Save keeps no copy of
+                // the old text as "your unsaved edit" (#799 second review).
+                if content != base {
+                    drafts.save(content)
+                    await drafts.flush()
+                    hasDraft = true
+                }
             } else if uploadedFile != nil, SpendCap.isSpendCapError(error) {
                 app.toasts.show(SpendCap.toastMessage(.upload), duration: 8)
             } else if let apiError = error as? APIError {

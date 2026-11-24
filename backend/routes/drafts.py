@@ -181,16 +181,16 @@ def _edit_drafts(node_id):
 
 def _row_for_base(node, base):
     """The edit draft an edit form opened on the text *base* saves into:
-    the newest row written on that text; else the newest row, when a
-    client that sends no base saved it and it is not older than the entry
-    (the form loaded it as current); else None (a new row)."""
-    rows = _edit_drafts(node.id).all()
-    for row in rows:
+    the newest row written on that text; else the row GET loads as
+    current (_current_edit_draft), when a client that sends no base saved
+    it (the form loaded it, so its typing continues it, even when an older
+    row was saved after it: #799 second review); else None (a new row)."""
+    for row in _edit_drafts(node.id):
         if row.get_base_content() == base:
             return row
-    if (rows and rows[0].get_base_content() is None
-            and not _older_than_entry(rows[0], node)):
-        return rows[0]
+    current = _current_edit_draft(node)
+    if current is not None and current.get_base_content() is None:
+        return current
     return None
 
 

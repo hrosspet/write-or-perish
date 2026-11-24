@@ -13,16 +13,17 @@ private func json(_ body: [String: Any]) -> String {
 final class EditFormBaseTests: StubbedAppTestCase {
     private let openedOn = "Call the bank on Monday.\r\n- [ ] deploy\n"
 
-    private func nodeJSON(_ content: String) -> String {
+    private func nodeJSON(_ content: String, privacy: String = "private") -> String {
         json(["id": 9, "content": content, "node_type": "user", "user": ["id": 5, "username": "seowriter"],
-              "privacy_level": "private", "ai_usage": "chat", "child_count": 0, "children": [], "ancestors": []])
+              "privacy_level": privacy, "ai_usage": "chat", "child_count": 0, "children": [], "ancestors": []])
     }
 
     /// An edit form opened on `openedOn`; the server's entry is `current`
     /// (the same unless a test says otherwise) and its draft `draftJSON`.
     private func editForm(current: String? = nil, draftJSON: String? = nil,
+                          pagePrivacy: PrivacyLevel = .private, entryPrivacy: String = "private",
                           put: @escaping (URLRequest) -> StubResponse) -> (NodeFormModel, () -> NodeFormResult?) {
-        let node = nodeJSON(current ?? openedOn)
+        let node = nodeJSON(current ?? openedOn, privacy: entryPrivacy)
         StubURLProtocol.install { request in
             let path = request.url?.path(percentEncoded: true)
             if request.httpMethod == "PUT" { return put(request) }
@@ -33,7 +34,7 @@ final class EditFormBaseTests: StubbedAppTestCase {
             return .json(200, #"{"id":5,"content":"typed","updated_at":"2026-11-24T10:00:00Z"}"#)
         }
         let model = NodeFormModel(config: NodeFormConfig(edit: .init(nodeId: 9, initialContent: openedOn,
-                                                                     initialPrivacy: .private, initialAIUsage: .chat)),
+                                                                     initialPrivacy: pagePrivacy, initialAIUsage: .chat)),
                                   app: app, defaults: defaults)
         var captured: NodeFormResult?
         model.onSuccess = { captured = $0 }
@@ -146,6 +147,44 @@ final class EditFormBaseTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "POST /api/drafts/")?["base_content"] as? String, current)
         await model.submit()
         XCTAssertEqual(body(of: "PUT /api/nodes/9")?["base_content"] as? String, current)
+    }
+
+    // #799 second review, 1: the thread page still shows Public; the entry was
+    // made Private elsewhere. Edit takes the entry's settings as it reads it,
+    // so a Save does not make the newer text public again.
+    func testEditTakesTheEntrysCurrentPrivacy() async {
+        let (model, _) = editForm(pagePrivacy: .public, entryPrivacy: "private") { _ in
+            .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+        }
+        await model.start()
+        XCTAssertEqual(model.privacy, .private)
+        model.content = "a typo fixed"
+        await model.submit()
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["privacy_level"] as? String, "private")
+    }
+
+    func testAPrivacyChangedInTheFormStaysTheirs() async {
+        let (model, _) = editForm(pagePrivacy: .public, entryPrivacy: "private") { _ in
+            .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+        }
+        model.privacy = .circles  // picked while the form reads the entry
+        await model.start()
+        XCTAssertEqual(model.privacy, .circles)
+        XCTAssertEqual(model.openedPrivacy, .private)
+    }
+
+    // #799 second review, 2: a refused Save whose text is untouched (only a
+    // setting widened) keeps no draft: the old text is not "your unsaved edit".
+    func testARefusedSaveWithUntouchedTextSavesNoDraft() async {
+        let (model, _) = editForm { _ in
+            .json(409, #"{"error":"There's a newer version of this text","code":"content_changed"}"#)
+        }
+        await model.start()
+        model.privacy = .public
+        await model.submit()
+        XCTAssertTrue(model.newerVersion)
+        XCTAssertFalse(calls.contains("POST /api/drafts/"))
+        XCTAssertFalse(model.hasDraft)
     }
 
     func testTheArtifactSaveCarriesItsBase() {

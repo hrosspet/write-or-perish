@@ -156,6 +156,19 @@ test('a refused Save saves the text as a draft at once, with its base', async ()
   }]);
 });
 
+// #799 second review, 2: a refused Save whose text is untouched (only a
+// setting widened) keeps no draft: the old text is not "your unsaved edit".
+test('a refused Save with untouched text saves no draft', async () => {
+  mockPut.mockRejectedValueOnce(changed());
+  renderEdit();
+  await waitFor(() => expect(mockGet).toHaveBeenCalled());
+  save();
+
+  expect(await screen.findByText(NEWER_ENTRY_EDIT_MESSAGE)).toBeInTheDocument();
+  await new Promise((r) => setTimeout(r, 50));
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
 // #799 review 2: a Save deletes only the drafts its form showed: its own row
 // and the older edit on offer. Another device's unsaved edit stays.
 test('a Save deletes only the drafts the form showed', async () => {

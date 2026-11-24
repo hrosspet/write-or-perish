@@ -457,6 +457,29 @@ def test_two_devices_on_two_versions_keep_both_drafts(client, alice):
         laptop: v1 + "\nlaptop, more", phone: v2 + "\nphone, then laptop"}
 
 
+def test_typing_continues_the_draft_an_installed_build_left(client, alice):
+    """#799 second review, 4: an installed iPhone build (no base) typed on
+    v2 (row Y), then the laptop's old form typed on v1 again (row X, now the
+    newest). A reloaded form loads Y; its typing goes into Y, not into a new
+    row, so a Save that deletes the rows it showed leaves no saved text
+    behind as an "unsaved edit"."""
+    entry = _entry(alice)
+    v1 = _shown(client, entry.id)
+    laptop = _autosave(client, entry, v1 + "\nlaptop", v1)
+    v2 = v1.replace("- [ ] deploy", "- [x] deploy")
+    client.put(f"/nodes/{entry.id}", json={"content": v2, "base_content": v1})
+    old_phone = client.post("/drafts/", json={
+        "content": v2 + "\nphone", "node_id": entry.id}).get_json()["id"]
+    assert _autosave(client, entry, v1 + "\nlaptop, more", v1) == laptop
+
+    got = _draft(client, entry)
+    assert got["id"] == old_phone
+    assert got["older_draft"]["id"] == laptop
+    # The reloaded form types on v2: into the row it loaded.
+    assert _autosave(client, entry, v2 + "\nphone, then web", v2) == old_phone
+    assert set(_drafts_of(entry)) == {laptop, old_phone}
+
+
 def test_a_save_deletes_only_the_drafts_its_form_showed(client, alice):
     entry = _entry(alice)
     v1 = _shown(client, entry.id)
