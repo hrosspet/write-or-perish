@@ -12,6 +12,13 @@ When the renewal payment fails, the account is stored as a late payment
 end: paid later, with the events of the payment lost, the account gets
 its access back; canceled by Stripe after the last retry, it is not asked
 again.
+
+When a trial's first payment fails and is paid later, its events lost,
+the job also records the payment once Stripe has the subscription's
+latest invoice paid above zero, so the account leaves the trial's usage
+ceiling for its level's, as invoice.paid would have done. The event,
+arriving later, changes nothing a second time; the referral's free weeks
+come with it.
 Stripe is a stub here; nothing reaches it.
 """
 import ast
@@ -42,13 +49,14 @@ for _mod in ["backend.models", "backend.extensions"]:
 
 from backend import celery_queues  # noqa: E402
 from backend.extensions import db as _db  # noqa: E402
-from backend.models import User, APICostLog, TrialCard  # noqa: E402
+from backend.models import (  # noqa: E402
+    User, APICostLog, Referral, TrialCard, UserNotification)
 from backend.utils import period_reread, stripe_billing  # noqa: E402
 from backend.utils.period_reread import (  # noqa: E402
     ReadOnlyGateway, StripeChangeRefused, reread_ended_periods)
 from backend.utils.trial_cards import card_hash  # noqa: E402
 from backend.utils.spend import (  # noqa: E402
-    enforce_user_spend_cap, user_is_capped)
+    enforce_user_spend_cap, under_trial_ceiling, user_is_capped)
 
 PAID = datetime(2027, 1, 20, 10, 0, 0)         # the period's start
 PERIOD_END = datetime(2027, 2, 20, 10, 0, 0)   # what the payment covers
@@ -67,6 +75,9 @@ CONFIG = {
     "SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER": 100.0,
     "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED": 50.0,
     "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD": 30.0,
+    "SUBSCRIPTION_PRICE_CENTS_STANDARD": 3000,
+    "SUBSCRIPTION_CURRENCY": "usd",
+    "REFERRAL_CREDIT_FRACTION": 0.25,
     "SPEND_ALERT_EMAIL": "alerts@example.com",
 }
 
@@ -86,17 +97,48 @@ def app():
 
 
 class StubStripe:
-    """Stripe's side: the subscriptions it has, by id. Counts the reads.
-    *down*: every read raises, as when Stripe cannot be reached."""
+    """Stripe's side: the subscriptions and invoices it has, by id.
+    Counts the reads. *down*: every read raises, as when Stripe cannot be
+    reached. *refused*: ids whose read Stripe refuses (400)."""
 
     def __init__(self):
         self.subs = {}
         self.reads = []
+        self.invoices = {}
+        self.invoice_reads = []
         self.down = False
         self.on_read = None
         self.payment_methods = {}
         self.changes = []
         self.refused = set()
+        self.credits = []
+
+    def retrieve_invoice(self, invoice_id):
+        self.invoice_reads.append(invoice_id)
+        if self.down:
+            raise ConnectionError("stub: Stripe cannot be reached")
+        if invoice_id in self.refused:
+            error = Exception("stub: invalid request")
+            error.http_status = 400
+            raise error
+        if invoice_id not in self.invoices:
+            error = Exception("stub: no such invoice")
+            error.http_status = 404
+            raise error
+        return self.invoices[invoice_id]
+
+    def list_balance_transactions(self, customer_id):
+        return [txn for customer, txn in self.credits
+                if customer == customer_id]
+
+    def create_balance_transaction(self, customer_id, params,
+                                   idempotency_key=None):
+        self.changes.append(("create_balance_transaction", customer_id))
+        txn = {"id": f"cbtxn_{len(self.credits) + 1}",
+               "amount": params["amount"], "currency": params["currency"],
+               "metadata": params.get("metadata") or {}}
+        self.credits.append((customer_id, txn))
+        return txn
 
     def retrieve_payment_method(self, payment_method_id):
         return self.payment_methods[payment_method_id]
@@ -416,6 +458,8 @@ def test_a_late_payment_paid_later_gives_access_without_its_events(
 
     assert (result["due"], result["asked"], result["changed"]) == (1, 1, 1)
     assert stripe.reads == ["sub_1"]
+    # It paid before: its invoice is not read, nothing more is recorded.
+    assert stripe.invoice_reads == [] and result["payment_recorded"] == 0
     assert u.subscription_status == "active"
     assert u.subscription_grants_access
     assert u.subscription_period_end == NEXT_END
@@ -428,23 +472,39 @@ def test_a_late_payment_paid_later_gives_access_without_its_events(
     assert result["due"] == 0 and stripe.reads == ["sub_1"]
 
 
+def _account(user):
+    """Every column of the account, as stored."""
+    _db.session.refresh(user)
+    return {a.key: getattr(user, a.key)
+            for a in User.__mapper__.column_attrs}
+
+
+def _invoice_paid_event(stripe, invoice):
+    outcome = stripe_billing.handle_event(
+        stripe, {"type": "invoice.paid", "data": {"object": invoice}},
+        CONFIG)
+    _db.session.commit()
+    return outcome
+
+
 def test_the_payments_event_after_the_job_carries_nothing_a_second_time(
         app, stripe):
     u = _renewal_failed(stripe)
     stripe.subs["sub_1"] = _stripe_sub(u, PERIOD_END, NEXT_END)
     reread_ended_periods(CONFIG, now=FEB_LATE)
+    after_job = _account(u)
 
-    outcome = stripe_billing.handle_event(
-        stripe, {"type": "invoice.paid", "data": {"object": {
-            "id": "in_1", "subscription": "sub_1",
-            "amount_paid": 5000, "total": 5000}}}, CONFIG)
-    _db.session.commit()
+    outcome = _invoice_paid_event(stripe, {
+        "id": "in_1", "subscription": "sub_1",
+        "amount_paid": 5000, "total": 5000})
 
     assert outcome == "applied"
     assert u.subscription_status == "active"
     assert u.spend_period_start == PERIOD_END
     assert u.spend_period_carry_microdollars == 10_000_000
     assert not user_is_capped(u, now=FEB_LATE)
+    # Not one column of the account changes.
+    assert _account(u) == after_job
 
 
 def test_a_payment_event_applied_during_the_read_is_kept(app, stripe):
@@ -546,6 +606,256 @@ def test_a_read_stripe_refuses_for_one_account_does_not_end_the_run(
     # Asked again the next hour.
     reread_ended_periods(CONFIG, now=FEB_LATE + timedelta(hours=1))
     assert stripe.reads == ["sub_1", "sub_2", "sub_1"]
+
+
+# ── A trial's first payment failed: paid later, its events lost ──────────
+
+TRIAL_START = datetime(2027, 1, 10, 10, 0, 0)
+TRIAL_END = datetime(2027, 1, 24, 10, 0, 0)     # the first charge fails
+FIRST_END = datetime(2027, 2, 24, 10, 0, 0)     # the first paid period's end
+PAID_LATE = datetime(2027, 1, 27, 12, 0, 0)     # the person pays
+
+
+def _invoice(invoice_id, sub_id, status="paid", total=5000, paid=None):
+    """An invoice as Stripe gives it (API 2025-03-31 and later: its
+    subscription under parent.subscription_details)."""
+    if paid is None:
+        paid = total if status == "paid" else 0
+    return {"id": invoice_id, "object": "invoice", "status": status,
+            "amount_paid": paid, "total": total, "currency": "usd",
+            "parent": {"subscription_details": {"subscription": sub_id}}}
+
+
+def _trial_sub(user, status, end=FIRST_END, latest_invoice=None):
+    sub = _stripe_sub(user, TRIAL_END, end, status=status)
+    sub.update(trial_start=_stamp(TRIAL_START), trial_end=_stamp(TRIAL_END),
+               latest_invoice=latest_invoice)
+    return sub
+
+
+def _trial_subscriber(n=1, used=35.0):
+    """A subscriber in the 14-day trial, *used* USD of the trial's $30
+    ceiling used."""
+    u = _subscriber(n, subscription_status="trialing",
+                    subscription_ever_paid=False,
+                    subscription_trial_used=True,
+                    subscription_trial_sub_id=f"sub_{n}",
+                    subscription_trial_start=TRIAL_START,
+                    subscription_trial_end=TRIAL_END,
+                    subscription_period_start=TRIAL_START,
+                    subscription_period_end=TRIAL_END)
+    _use(u, used, TRIAL_START + timedelta(days=3))
+    return u
+
+
+def _first_payment_failed(stripe, n=1):
+    """A subscriber whose trial ended on 2027-01-24 with $35 used, and
+    whose first payment failed. The event of the failure was applied: the
+    account is stored as a late payment, never paid."""
+    u = _trial_subscriber(n)
+    assert user_is_capped(u, now=TRIAL_END)          # the trial's $30
+    sub_id = u.stripe_subscription_id
+    stripe.invoices[f"in_{n}"] = _invoice(f"in_{n}", sub_id, status="open")
+    stripe.subs[sub_id] = _trial_sub(u, "past_due", latest_invoice=f"in_{n}")
+    _event(stripe, u)
+    stripe.reads.clear()
+    assert u.subscription_status == "past_due"
+    assert not u.subscription_ever_paid
+    assert not u.subscription_grants_access
+    return u
+
+
+def _paid_late(stripe, u, n=1):
+    """Stripe's side after the person paid the first invoice."""
+    sub_id = u.stripe_subscription_id
+    stripe.invoices[f"in_{n}"] = _invoice(f"in_{n}", sub_id)
+    stripe.subs[sub_id] = _trial_sub(u, "active", latest_invoice=f"in_{n}")
+
+
+def test_a_first_payment_made_late_ends_the_trials_ceiling(
+        app, stripe, caplog):
+    """Peter, 2026-11-24: "the usage ceiling should be updated too"."""
+    u = _first_payment_failed(stripe)
+    # Still late at Stripe: the subscription is read, its invoice is not.
+    result = reread_ended_periods(CONFIG, now=PAID_LATE - timedelta(hours=1))
+    assert result["unchanged"] == 1
+    assert stripe.reads == ["sub_1"] and stripe.invoice_reads == []
+
+    _paid_late(stripe, u)
+    with caplog.at_level(logging.INFO, logger=period_reread.__name__):
+        result = reread_ended_periods(CONFIG, now=PAID_LATE)
+
+    assert [r.getMessage() for r in caplog.records
+            if r.name == period_reread.__name__] == [
+        f"Period read again: user {u.id}, subscription sub_1: past_due -> "
+        "active, payment recorded (invoice in_1 paid)"]
+    assert (result["changed"], result["payment_recorded"]) == (1, 1)
+    assert stripe.reads == ["sub_1", "sub_1"]
+    assert stripe.invoice_reads == ["in_1"]
+    assert stripe.changes == []                       # nothing at Stripe
+    assert u.subscription_status == "active"
+    assert u.subscription_ever_paid
+    assert not u.subscription_trial_capped
+    assert not under_trial_ceiling(u)
+    # The level's $50 from the trial's start: the $35 of the trial count,
+    # and $10 more is still inside it (the trial's $30 would block it).
+    assert not user_is_capped(u, now=PAID_LATE)
+    _use(u, 10.0, PAID_LATE)
+    assert not user_is_capped(u, now=PAID_LATE)
+    _use(u, 5.0, PAID_LATE)
+    assert user_is_capped(u, now=PAID_LATE)
+    # Paid, its period ahead: not asked again.
+    result = reread_ended_periods(CONFIG, now=PAID_LATE + timedelta(hours=1))
+    assert result["due"] == 0 and stripe.invoice_reads == ["in_1"]
+
+
+@pytest.mark.parametrize("stripe_has", [
+    "trial_made_longer", "first_invoice_not_charged_yet", "invoice_open",
+    "invoice_of_zero", "invoice_void", "invoice_of_another_subscription",
+    "no_invoice"])
+def test_nothing_short_of_a_paid_invoice_records_a_payment(
+        app, stripe, stripe_has):
+    """Stored: a trial whose end passed (its events lost). Stripe's
+    answer, whatever it is, records no payment unless the subscription's
+    latest invoice is paid above zero: the trial's ceiling stays."""
+    u = _trial_subscriber(used=5.0)
+    invoice = _invoice("in_1", "sub_1", status="draft")
+    sub = _trial_sub(u, "active", latest_invoice="in_1")
+    if stripe_has == "trial_made_longer":
+        longer = TRIAL_END + timedelta(days=7)
+        sub = _stripe_sub(u, TRIAL_START, longer, status="trialing")
+        sub.update(trial_start=_stamp(TRIAL_START), trial_end=_stamp(longer),
+                   latest_invoice="in_0")
+        invoice = _invoice("in_0", "sub_1", total=0)  # the trial's own
+    elif stripe_has == "invoice_open":
+        invoice = _invoice("in_1", "sub_1", status="open")
+    elif stripe_has == "invoice_of_zero":
+        invoice = _invoice("in_1", "sub_1", total=0)
+    elif stripe_has == "invoice_void":
+        invoice = _invoice("in_1", "sub_1", status="void")
+    elif stripe_has == "invoice_of_another_subscription":
+        invoice = _invoice("in_1", "sub_other")
+    elif stripe_has == "no_invoice":
+        sub["latest_invoice"] = None
+    stripe.subs["sub_1"] = sub
+    stripe.invoices[invoice["id"]] = invoice
+
+    result = reread_ended_periods(CONFIG,
+                                  now=TRIAL_END + timedelta(hours=1))
+
+    assert result["changed"] == 1 and result["payment_recorded"] == 0
+    assert not u.subscription_ever_paid
+    assert under_trial_ceiling(u)
+    # Only an active subscription's invoice is read, once.
+    read = stripe_has not in ("trial_made_longer", "no_invoice")
+    assert stripe.invoice_reads == (["in_1"] if read else [])
+
+
+def test_the_payments_event_after_the_job_changes_nothing_a_second_time(
+        app, stripe):
+    """The job recorded the payment; then invoice.paid arrives. The
+    account stays as the job left it, the referral's free weeks (a credit
+    written at Stripe, which the job never writes) are given now, once."""
+    inviter = _subscriber(9)
+    u = _first_payment_failed(stripe)
+    _db.session.add(Referral(inviter_id=inviter.id, friend_id=u.id))
+    _db.session.commit()
+    _paid_late(stripe, u)
+    reread_ended_periods(CONFIG, now=PAID_LATE)
+    referral = Referral.query.filter_by(friend_id=u.id).one()
+    assert referral.rewarded_at is None and stripe.changes == []
+    after_job = _account(u)
+
+    assert _invoice_paid_event(stripe, stripe.invoices["in_1"]) == "applied"
+
+    assert _account(u) == after_job
+    assert referral.friend_reward == referral.inviter_reward == "granted"
+    assert stripe.changes == [("create_balance_transaction", "cus_1"),
+                              ("create_balance_transaction", "cus_9")]
+    assert UserNotification.query.filter_by(
+        type="referral_reward").count() == 2
+
+    # Sent again (the second payment event of the same invoice): nothing.
+    assert _invoice_paid_event(stripe, stripe.invoices["in_1"]) == "applied"
+    assert _account(u) == after_job
+    assert len(stripe.changes) == 2
+
+
+def test_a_payment_recorded_during_the_read_is_kept(app, stripe):
+    """The job reads the paid subscription; before it takes the account's
+    lock, invoice.paid records the payment. The job's read is dropped."""
+    u = _first_payment_failed(stripe)
+    _paid_late(stripe, u)
+
+    def paid_meanwhile(_sub_id):
+        stripe.on_read = None
+        _invoice_paid_event(stripe, stripe.invoices["in_1"])
+    stripe.on_read = paid_meanwhile
+
+    result = reread_ended_periods(CONFIG, now=PAID_LATE)
+
+    assert result["event_first"] == 1 and result["payment_recorded"] == 0
+    assert u.subscription_status == "active" and u.subscription_ever_paid
+
+
+def test_stripe_unreachable_at_the_invoice_writes_nothing_and_ends_the_run(
+        app, stripe):
+    u1 = _first_payment_failed(stripe, 1)
+    u2 = _first_payment_failed(stripe, 2)
+    _paid_late(stripe, u1, 1)
+    _paid_late(stripe, u2, 2)
+
+    def down_after_the_subscription(_sub_id):
+        stripe.on_read = None
+        stripe.down = True
+    stripe.on_read = down_after_the_subscription
+
+    result = reread_ended_periods(CONFIG, now=PAID_LATE)
+
+    assert result["status"] == "stripe_unreachable"
+    assert stripe.reads == ["sub_1"] and stripe.invoice_reads == ["in_1"]
+    for u in (u1, u2):
+        _db.session.refresh(u)
+        assert u.subscription_status == "past_due"
+        assert not u.subscription_ever_paid
+
+    # The next hour, Stripe answers: both, with their payments.
+    stripe.down = False
+    result = reread_ended_periods(CONFIG, now=PAID_LATE + timedelta(hours=1))
+    assert (result["changed"], result["payment_recorded"]) == (2, 2)
+    assert u1.subscription_ever_paid and u2.subscription_ever_paid
+
+
+def test_an_invoice_stripe_refuses_gives_access_and_leaves_the_payment(
+        app, stripe, caplog):
+    """Stripe refuses one account's invoice read (400): its subscription
+    still gives access again, its payment waits for its event, and the
+    next account is read."""
+    u1 = _first_payment_failed(stripe, 1)
+    u2 = _first_payment_failed(stripe, 2)
+    _paid_late(stripe, u1, 1)
+    _paid_late(stripe, u2, 2)
+    stripe.refused.add("in_1")
+
+    with caplog.at_level(logging.INFO, logger=period_reread.__name__):
+        result = reread_ended_periods(CONFIG, now=PAID_LATE)
+
+    assert result["status"] == "ok"
+    assert (result["changed"], result["payment_recorded"],
+            result["failed"]) == (2, 1, 0)
+    assert stripe.invoice_reads == ["in_1", "in_2"]
+    assert u1.subscription_status == "active" and u1.subscription_grants_access
+    assert not u1.subscription_ever_paid and under_trial_ceiling(u1)
+    assert u2.subscription_ever_paid and not under_trial_ceiling(u2)
+    assert (f"Period read again: Stripe refused the read of invoice in_1 "
+            f"of subscription sub_1 (user {u1.id}): Exception; the payment "
+            "is left to its event") in [
+        r.getMessage() for r in caplog.records
+        if r.name == period_reread.__name__]
+
+    # Its event, when it arrives, records the payment.
+    _invoice_paid_event(stripe, stripe.invoices["in_1"])
+    assert u1.subscription_ever_paid and not under_trial_ceiling(u1)
 
 
 def test_a_lower_level_that_arrives_with_the_renewal(app, stripe):
