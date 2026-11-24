@@ -143,6 +143,65 @@ describe('under someone else\'s public entry', () => {
   });
 });
 
+// The user's edit wins: a choice made while the form's request for the
+// parent is still open is kept when that request answers.
+describe('a choice made before the request for the parent answers', () => {
+  const holdParent = (parent) => {
+    let answer;
+    mockGet.mockImplementation((url) => (
+      String(url) === '/nodes/10'
+        ? new Promise((resolve) => { answer = () => resolve({ data: parent }); })
+        : Promise.reject({ response: { status: 404 } })));
+    return () => act(async () => { answer(); await Promise.resolve(); });
+  };
+  const aiUsageSelect = () => screen.getAllByRole('combobox')[1];
+
+  test('Private stays Private, and is sent Private with the question turned off', async () => {
+    localStorage.setItem('loore_public_reply_ack', 'true');
+    const answer = holdParent(MINE);
+    const { ref } = await renderReply({ parentOwnedByViewer: true });
+    fireEvent.change(privacySelect(), { target: { value: 'private' } });
+    await answer();
+    expect(privacySelect()).toHaveValue('private');
+    await send(ref);
+    expect(mockPost).toHaveBeenCalledTimes(1);
+    expect(mockPost.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ privacy_level: 'private' }));
+  });
+
+  test('None stays None', async () => {
+    const answer = holdParent(MINE);
+    const { ref } = await renderReply({ parentOwnedByViewer: true });
+    fireEvent.change(privacySelect(), { target: { value: 'private' } });
+    fireEvent.change(aiUsageSelect(), { target: { value: 'none' } });
+    await answer();
+    expect(aiUsageSelect()).toHaveValue('none');
+    await send(ref);
+    expect(mockPost.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ privacy_level: 'private', ai_usage: 'none' }));
+  });
+
+  test('untouched selectors still take the parent\'s settings', async () => {
+    const answer = holdParent({ ...MINE, privacy_level: 'private', ai_usage: 'none' });
+    await renderReply({ parentOwnedByViewer: true });
+    await answer();
+    expect(privacySelect()).toHaveValue('private');
+    expect(aiUsageSelect()).toHaveValue('none');
+  });
+
+  test('under someone else\'s entry the answer still locks the level to Public', async () => {
+    localStorage.setItem('loore_public_reply_ack', 'true');
+    const answer = holdParent(THEIRS);
+    const { ref } = await renderReply({ parentOwnedByViewer: true });
+    fireEvent.change(privacySelect(), { target: { value: 'private' } });
+    await answer();
+    expect(screen.getByText('Public — inherited from the thread.')).toBeInTheDocument();
+    await send(ref);
+    expect(mockPost.mock.calls[0][1]).toEqual(
+      expect.objectContaining({ privacy_level: 'public' }));
+  });
+});
+
 describe('before the request for the parent answers', () => {
   test('a page that knows the parent is the user\'s own leaves the selector free', async () => {
     mockGet.mockImplementation(() => new Promise(() => {}));

@@ -114,6 +114,20 @@ const NodeForm = forwardRef(
       || "none"
     );
 
+    // Has the user changed the privacy / AI usage selector themselves? From
+    // then on the parent's settings arriving later (the form's request for
+    // the parent, an edit of the parent above) leave that choice alone.
+    const privacyChosenRef = useRef(false);
+    const aiUsageChosenRef = useRef(false);
+    const choosePrivacy = (level) => {
+      privacyChosenRef.current = true;
+      setPrivacyLevel(level);
+    };
+    const chooseAiUsage = (usage) => {
+      aiUsageChosenRef.current = true;
+      setAiUsage(usage);
+    };
+
     // Persist choices whenever the user changes them on a fresh top-level
     // entry, so the next Write dialog opens with the same selections.
     useEffect(() => {
@@ -208,9 +222,16 @@ const NodeForm = forwardRef(
               // Set privacy settings to match parent's settings. AI usage
               // is the backend's reply default (#362): the parent's, but
               // under a Read the thread's, since a Read's nodes are 'chat'
-              // only for the tweets they quote.
-              setPrivacyLevel(parent.privacy_level || "private");
-              setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
+              // only for the tweets they quote. A selector the user has
+              // already changed keeps their choice (the user's edit wins):
+              // a Private picked before this answer arrives must not turn
+              // Public, nor a None turn Chat.
+              if (!privacyChosenRef.current) {
+                setPrivacyLevel(parent.privacy_level || "private");
+              }
+              if (!aiUsageChosenRef.current) {
+                setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
+              }
             }
           })
           .catch((err) => {
@@ -222,15 +243,16 @@ const NodeForm = forwardRef(
 
     // The parent's privacy as the page holds it now: an edit of the parent
     // while this form is open (made public, or private again) moves the
-    // reply's privacy with it, and the public-reply dialog follows. The
-    // first value comes from the fetch above; the text typed stays.
+    // reply's privacy with it, and the public-reply dialog follows, unless
+    // the user has chosen the reply's level themselves. The first value
+    // comes from the fetch above; the text typed stays.
     const seenParentPrivacyProp = useRef(parentPrivacyLevel);
     useEffect(() => {
       if (editMode || !parentId || !parentPrivacyLevel) return;
       if (seenParentPrivacyProp.current === parentPrivacyLevel) return;
       seenParentPrivacyProp.current = parentPrivacyLevel;
       setParentPrivacy(parentPrivacyLevel);
-      setPrivacyLevel(parentPrivacyLevel);
+      if (!privacyChosenRef.current) setPrivacyLevel(parentPrivacyLevel);
     }, [parentPrivacyLevel, parentId, editMode]);
 
     // Replies under someone else's public node are public (#228): pin the
@@ -951,8 +973,8 @@ const NodeForm = forwardRef(
           <PrivacySelector
             privacyLevel={publicParentLock ? "public" : privacyLevel}
             aiUsage={aiUsage}
-            onPrivacyChange={setPrivacyLevel}
-            onAIUsageChange={setAiUsage}
+            onPrivacyChange={choosePrivacy}
+            onAIUsageChange={chooseAiUsage}
             disabled={loading}
             lockPrivacy={publicParentLock}
             trainRefused={trainRefused}

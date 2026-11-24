@@ -222,6 +222,59 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(model.effectivePrivacy, .public)
     }
 
+    /// The user's edit wins: a Private and a None picked while the form's request
+    /// for the parent is still open stay when it answers, and are sent.
+    func testChoicesMadeBeforeTheParentLoadsAreKept() async {
+        let gate = DispatchSemaphore(value: 0)
+        let parent = Self.ownPublicParents[0]
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path(percentEncoded: true) ?? "") {
+            case ("GET", "/api/nodes/7"):
+                gate.wait()
+                return .json(200, parent)
+            case ("GET", "/api/drafts/"): return .json(404, #"{"error":"No draft"}"#)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":8}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        defaults.set("true", forKey: DefaultsKey.publicReplyAck)
+        var config = NodeFormConfig(parentId: 7)
+        config.parentPrivacy = .public
+        config.parentOwned = true
+        let (model, result) = form(config)
+        let starting = Task { await model.start() }
+        for _ in 0..<100 where model.parentPrivacy != .public { await Task.yield() }
+        XCTAssertFalse(model.lockPrivacy)
+        model.choosePrivacy(.private)
+        model.chooseAIUsage(.off)
+        gate.signal()
+        await starting.value
+        XCTAssertEqual(model.privacy, .private)
+        XCTAssertEqual(model.aiUsage, .off)
+        model.content = "for me only"
+        await model.submit()
+        XCTAssertEqual(result()?.id, 8)
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "private")
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["ai_usage"] as? String, "none")
+    }
+
+    /// Untouched selectors still take the parent's settings, and someone else's
+    /// public parent still pins the reply to public whatever was picked.
+    func testTheParentsSettingsStillApplyWhereNothingWasChosenOrItIsLocked() async {
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"private","ai_usage":"none"}"#)
+        let (untouched, _) = form(NodeFormConfig(parentId: 7))
+        await untouched.start()
+        XCTAssertEqual(untouched.privacy, .private)
+        XCTAssertEqual(untouched.aiUsage, .off)
+
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":6,"username":"anna"},"privacy_level":"public","ai_usage":"chat"}"#)
+        let (theirs, _) = form(NodeFormConfig(parentId: 7))
+        theirs.choosePrivacy(.private)
+        await theirs.start()
+        XCTAssertTrue(theirs.lockPrivacy)
+        XCTAssertEqual(theirs.effectivePrivacy, .public)
+    }
+
     /// The form's request for the parent failed: the host's knowledge decides.
     func testWhenTheParentCannotBeLoadedTheHostsOwnershipDecides() async {
         StubURLProtocol.install { request in

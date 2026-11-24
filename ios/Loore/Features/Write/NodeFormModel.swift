@@ -120,6 +120,11 @@ final class NodeFormModel {
     /// The parent is the viewer's own: under a public one the reply may be Private
     /// or Circles (Peter, 2026-11-24: "they should adhere to the form's selection").
     private(set) var parentOwned = false
+    /// The person changed the privacy / AI usage selector: the parent's settings
+    /// arriving later (the form's request for the parent, an edit of the parent)
+    /// leave that choice alone (the user's edit wins).
+    @ObservationIgnored private(set) var privacyChosen = false
+    @ObservationIgnored private(set) var aiUsageChosen = false
     var useAgenticPrompt: Bool {
         didSet { if config.allowAgenticPrompt { defaults.set(useAgenticPrompt, forKey: DefaultsKey.agenticReply) } }
     }
@@ -221,7 +226,8 @@ final class NodeFormModel {
                 let ownerId = parent.nodeType == .llm ? parent.parentUserId : parent.user?.id
                 parentOwned = ownerId != nil && ownerId == app.user?.id
                 parentPrivacyChanged(parent.privacyLevel)
-                aiUsage = parent.replyAIUsage ?? parent.aiUsage
+                // A None picked before this answer arrived stays None.
+                if !aiUsageChosen { aiUsage = parent.replyAIUsage ?? parent.aiUsage }
             }
         }
         await draftLoad
@@ -252,13 +258,26 @@ final class NodeFormModel {
     }
 
     /// The parent's privacy now (on load, and after it was edited while the form
-    /// was open): the reply takes it. A public parent of someone else's pins the
-    /// reply to public (and the public-reply question comes back); a private one
-    /// returns it to private. The text typed so far stays.
+    /// was open): the reply takes it, unless the person chose the reply's level
+    /// themselves (a Private picked before the parent loaded must not turn Public).
+    /// A public parent of someone else's pins the reply to public whatever was
+    /// chosen (and the public-reply question comes back). The text typed so far stays.
     func parentPrivacyChanged(_ level: PrivacyLevel) {
         guard config.parentId != nil, !config.isEdit else { return }
         parentPrivacy = level
+        if !privacyChosen { privacy = level }
+    }
+
+    /// The person picked a level in the selector.
+    func choosePrivacy(_ level: PrivacyLevel) {
+        privacyChosen = true
         privacy = level
+    }
+
+    /// The person picked an AI usage in the selector.
+    func chooseAIUsage(_ usage: AIUsage) {
+        aiUsageChosen = true
+        aiUsage = usage
     }
 
     /// The form left the screen: save the pending draft now (the debounce and the
