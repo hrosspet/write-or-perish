@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import {
+  NEWER_MESSAGE_MS, NEWER_TODO_MESSAGE,
   appendItemToSection, hasCheckboxItem, insertItemAfter, stripInlineMarkdown, toggleCheckbox,
 } from '../utils/markdown';
 import { useToast } from '../contexts/ToastContext';
@@ -371,16 +372,22 @@ export default function TodoPage() {
   const { addToast } = useToast();
 
   // In-place edits (tick, row "+", quick-add) are shown at once and saved
-  // one at a time, in order (#430). A save applies its edit to the newest
-  // list the server returned and sends that list's revision. When the list
-  // changed elsewhere in between (a todo merge, another device or tab), the
-  // server refuses with the newest list (409); the edit is then applied to
-  // that list and saved again, so the user's change lands and the other
-  // change stays. An edit whose item is no longer in the newest list is
-  // dropped, and the newest list is shown, rather than guessing where it
-  // belongs. What the page shows is the server's list with the edits still
-  // being saved applied on top. An edit is a function from a list's content
-  // to the new content, or to null when its item isn't in that list.
+  // one at a time, in order (#430). A save applies its edit to the list the
+  // server last returned to this page and sends that list's revision, so
+  // quick ticks each build on the one before. When the list changed
+  // elsewhere in between (a todo merge, another device or tab), the server
+  // refuses (409) and saves nothing:
+  // - a tick or the row "+" (`onShownVersion`) is saved only on the version
+  //   the page shows (#795, Peter 2026-11-24): it is undone, with every tick
+  //   still waiting, and a toast says there is a newer version and to
+  //   reload. The page keeps showing its list.
+  // - quick-add is applied to the newest list the 409 carries and saved
+  //   again (#430), which the page then shows: it adds a line to Today and
+  //   changes none. An edit whose item is no longer in that list is dropped
+  //   rather than guessed.
+  // What the page shows is the server's list with the edits still being
+  // saved applied on top. An edit is a function from a list's content to the
+  // new content, or to null when its item isn't in that list.
   const serverTodoRef = useRef(null);
   const pendingEditsRef = useRef([]);
   const saveChainRef = useRef(Promise.resolve());
@@ -396,14 +403,14 @@ export default function TodoPage() {
     setTodo({ ...server, content });
   }, []);
 
-  const saveEdit = useCallback(async (edit) => {
+  const saveEdit = useCallback(async (edit, onShownVersion) => {
     let base = serverTodoRef.current;
     if (!base) return { ok: false, reason: 'error', newest: null };
-    // The first try, and one more on the newest list after a 409.
+    // The first try, and (quick-add) one more on the newest list after a 409.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const content = edit(base.content);
       if (content === null) return { ok: false, reason: 'gone', newest: base };
-      // Already so in the newest list (e.g. ticked on another device).
+      // Already so in the list (e.g. ticked on another device).
       if (content === base.content) return { ok: true, newest: base };
       try {
         const res = await api.patch('/todo', { content, base_revision: base.revision });
@@ -411,6 +418,8 @@ export default function TodoPage() {
       } catch (err) {
         const newest = err.response?.status === 409 ? err.response.data?.todo : null;
         if (!newest) return { ok: false, reason: 'error', err, newest: base };
+        // Nothing saved; the page keeps the list it shows (#795).
+        if (onShownVersion) return { ok: false, reason: 'newer', newest: base };
         base = newest;
       }
     }
@@ -419,13 +428,25 @@ export default function TodoPage() {
 
   // Resolves to whether the edit was saved. `failure` names the action in
   // the toast ("Couldn't save change"); without it nothing is toasted.
-  const applyEdit = useCallback((edit, { failure, gone } = {}) => {
+  // `onShownVersion`: saved only on the version the page shows (a tick, the
+  // row "+"), see above.
+  const applyEdit = useCallback((edit, { failure, gone, onShownVersion = false } = {}) => {
     if (!serverTodoRef.current) return Promise.resolve(false);
-    const entry = { edit };
+    const entry = { edit, onShownVersion };
     pendingEditsRef.current = [...pendingEditsRef.current, entry];
     showTodo(serverTodoRef.current);
     const run = saveChainRef.current.then(async () => {
-      const result = await saveEdit(edit);
+      // Undone already: a tick before it on the same version was refused.
+      if (!pendingEditsRef.current.includes(entry)) return false;
+      const result = await saveEdit(edit, onShownVersion);
+      if (result.reason === 'newer') {
+        // The ticks still waiting were made on the same version: undone
+        // too, with one toast.
+        pendingEditsRef.current = pendingEditsRef.current.filter((e) => !e.onShownVersion);
+        showTodo(result.newest);
+        addToast(NEWER_TODO_MESSAGE, NEWER_MESSAGE_MS);
+        return false;
+      }
       pendingEditsRef.current = pendingEditsRef.current.filter((e) => e !== entry);
       showTodo(result.newest);
       if (!result.ok && failure) {
@@ -473,7 +494,7 @@ export default function TodoPage() {
     const checked = item.checked;
     applyEdit(
       (content) => (hasCheckboxItem(content, key) ? toggleCheckbox(content, key, checked) : null),
-      { failure: "Couldn't save change" },
+      { failure: "Couldn't save change", onShownVersion: true },
     );
   };
   const handleInsertAfter = (item, text) => {
@@ -486,6 +507,7 @@ export default function TodoPage() {
       {
         failure: "Couldn't add task",
         gone: `Couldn't add "${text}": the item above it changed since this page loaded. Showing the newest list.`,
+        onShownVersion: true,
       },
     );
   };

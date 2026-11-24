@@ -1393,7 +1393,7 @@ function VoiceSession({
         nodeId={lastLlmNodeIdRef.current}
         toolCallsMeta={toolCallsMeta}
         onContentChange={setLlmContent}
-        onError={(msg) => addToast(msg)}
+        onError={(msg, ms) => addToast(msg, ms)}
       />
 
       <div style={{ height: '32px' }} />

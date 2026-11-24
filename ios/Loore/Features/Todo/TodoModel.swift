@@ -1,21 +1,22 @@
 import Foundation
 import Observation
 
-/// The todo document and its saves (web `TodoPage` + `useCheckboxToggle` /
-/// `useTaskInsert`). Every in-place edit re-fetches the todo right before its
-/// `PATCH` and applies the same text-keyed edit to the fresh content (design
-/// doc §10); the page also re-fetches after "todo changed". The `PATCH` sends
-/// the revision of the list it edited (#477): when a save, revert or todo merge
-/// landed in between, the server refuses with the newest list (409
-/// `todo_changed`), and the edit is applied to that list and saved once more,
-/// as on the web (#430). The editor's Save sends the revision the editor was
+/// The todo document and its saves (web `TodoPage`). Every in-place `PATCH`
+/// sends the revision of the list it edited (#477): when a save, revert or todo
+/// merge landed in between, the server refuses with the newest list (409
+/// `todo_changed`). A tick and the row "+" are applied to the version the page
+/// shows and, refused, are undone with a toast that there is a newer version
+/// (#795, as on the web). Quick-add re-fetches the todo right before its
+/// `PATCH`, applies its text-keyed edit to the fresh content (design doc §10)
+/// and, refused, to the newest list once more (#430). The page also re-fetches
+/// after "todo changed". The editor's Save sends the revision the editor was
 /// opened on (#476); a refusal comes back as `.changed` for the page to offer
 /// the choice.
 ///
-/// In-place edits are saved one at a time, in tap order: an edit's re-fetch
-/// waits for the previous edit's `PATCH`, so two quick ticks (or a quick-add and
-/// a tick) both reach the server. What is shown is the last todo the server
-/// returned plus the edits still being saved.
+/// In-place edits are saved one at a time, in tap order: an edit waits for the
+/// previous edit's `PATCH`, so two quick ticks (or a quick-add and a tick) both
+/// reach the server, each on the version the one before returned. What is shown
+/// is the last todo the server returned plus the edits still being saved.
 @MainActor
 @Observable
 final class TodoModel {
@@ -33,6 +34,8 @@ final class TodoModel {
     private struct PendingEdit {
         let id = UUID()
         let apply: (String) -> String
+        /// A tick or "+": saved only on the version the page shows (#795).
+        var onShownVersion = false
     }
 
     init(app: AppState? = nil) {
@@ -113,19 +116,26 @@ final class TodoModel {
         showServer(todo)
     }
 
-    /// Tick / untick by the item's stripped label (every matching line).
+    /// What the page says when a tick or "+" was refused because the list
+    /// changed elsewhere (#795). The page loads the list again when it opens.
+    static let newerTodoMessage =
+        "There's a newer version of your todo list, so your change wasn't saved. Leave the list and open it again before continuing."
+
+    /// Tick / untick by the item's stripped label (every matching line). Saved
+    /// only on the version the page shows (#795).
     func toggle(_ item: TodoSections.Item) async {
         let key = MarkdownEdits.stripInlineMarkdown(item.text).jsTrimmed
         let checked = item.checked ?? false
-        _ = await patch(failure: "Couldn't save change — reverted") { content in
+        _ = await patch(failure: "Couldn't save change — reverted", onShownVersion: true) { content in
             MarkdownEdits.toggleCheckbox(content, itemText: key, currentChecked: checked)
         }
     }
 
-    /// The row "+": a sibling after the item and its subtree.
+    /// The row "+": a sibling after the item and its subtree. Saved only on the
+    /// version the page shows (#795).
     func insertAfter(_ item: TodoSections.Item, text: String) async {
         let key = MarkdownEdits.stripInlineMarkdown(item.text).jsTrimmed
-        _ = await patch(failure: "Couldn't add task — reverted", skipUnchanged: true) { content in
+        _ = await patch(failure: "Couldn't add task — reverted", skipUnchanged: true, onShownVersion: true) { content in
             MarkdownEdits.insertItemAfter(content, afterItemText: key, newText: text)
         }
     }
@@ -141,25 +151,67 @@ final class TodoModel {
     }
 
     /// Optimistic in-place edit: apply `edit` to what is shown, then (after the
-    /// edits before it) re-fetch, apply the same edit to the server's latest
-    /// content and `PATCH` it. On failure the shown content goes back to the
-    /// server's latest plus the edits still pending, and (with `failure`) a toast
-    /// names the reason.
-    func patch(failure: String?, skipUnchanged: Bool = false, edit: @escaping (String) -> String) async -> Bool {
+    /// edits before it) `PATCH` it. On failure the shown content goes back to
+    /// the server's latest plus the edits still pending, and (with `failure`) a
+    /// toast names the reason.
+    ///
+    /// `onShownVersion` (a tick, the row "+", #795): the edit is applied to the
+    /// version the page shows (the last one the server returned to it) and saved
+    /// with that version's revision. When the list changed elsewhere the server
+    /// refuses (409): nothing is saved, the edit and every tick still waiting
+    /// are undone, the page keeps its list and a toast says there is a newer
+    /// version. Without it (quick-add) the list is re-fetched right before the
+    /// `PATCH` and the edit applied to the newest one, once more after a 409.
+    func patch(failure: String?, skipUnchanged: Bool = false, onShownVersion: Bool = false,
+               edit: @escaping (String) -> String) async -> Bool {
         guard app != nil, let current = todo else { return false }
         let optimistic = edit(current.content)
         if skipUnchanged && optimistic == current.content { return false }
-        let entry = PendingEdit(apply: edit)
+        let entry = PendingEdit(apply: edit, onShownVersion: onShownVersion)
         pending.append(entry)
         todo?.content = optimistic
         let previous = saveQueue
         let step = Task { [weak self] () -> Bool in
             await previous?.value
             guard let self else { return false }
+            if onShownVersion {
+                return await self.sendOnShownVersion(entry, fallback: current.content, failure: failure)
+            }
             return await self.send(entry, fallback: current.content, failure: failure)
         }
         saveQueue = Task { _ = await step.value }
         return await step.value
+    }
+
+    /// A tick or "+" (#795): saved on `confirmed`, the version the page shows.
+    private func sendOnShownVersion(_ entry: PendingEdit, fallback: String, failure: String?) async -> Bool {
+        // Undone already: a tick before it on the same version was refused.
+        guard pending.contains(where: { $0.id == entry.id }) else { return false }
+        guard let app else {
+            finish(entry, server: confirmed)
+            return false
+        }
+        do {
+            let saved = try await sendPatch(entry, on: confirmed, fallback: fallback, app: app)
+            finish(entry, server: saved)
+            return true
+        } catch {
+            if Self.newestTodo(in: error) != nil {
+                // The ticks still waiting were made on the same version: undone
+                // too, with one toast. The page keeps the list it shows.
+                pending.removeAll { $0.onShownVersion }
+                showServer(confirmed)
+                app.toasts.show(Self.newerTodoMessage, duration: 8)
+                return false
+            }
+            finish(entry, server: confirmed)
+            if let failure {
+                let apiError = error as? APIError
+                let reason = apiError?.serverMessage ?? apiError?.errorDescription ?? "Unknown error"
+                app.toasts.show("\(failure) (\(reason))")
+            }
+            return false
+        }
     }
 
     private func send(_ entry: PendingEdit, fallback: String, failure: String?) async -> Bool {

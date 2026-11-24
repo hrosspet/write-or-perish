@@ -532,6 +532,7 @@ private struct FocalCard: View {
                 ProposalCard(content: node.content, nodeId: node.id, toolCallsMeta: node.toolCallsMeta,
                              shareOnly: !model.isLLMNode, canAct: model.isOwner,
                              onContentChange: model.isOwner ? { model.setContent($0) } : nil,
+                             currentContent: { model.node?.content },
                              onApplied: { model.updateToolMeta($0, $1) })
                 if let after = split?.after, !after.isEmpty {
                     QuotedContentView(content: after, quotes: model.quotes,

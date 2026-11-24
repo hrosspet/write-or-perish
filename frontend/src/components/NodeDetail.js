@@ -19,7 +19,9 @@ import {
   AUTO_GENERATE_OFF_HINT, ONLY_YOU_SEE_REPLY, isAutoGenerateOff,
   isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
-import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
+import {
+  NEWER_ENTRY_MESSAGE, insertEdit, tickEdit, useChecklistEdits,
+} from "../utils/markdown";
 import { llmRequestErrorToast } from "../utils/llmRequestError";
 import {
   contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
@@ -603,11 +605,25 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     ));
   }, [llmTaskNodeId, id, llmStatus, polledMeta]);
 
-  const getNodeContent = useCallback(() => node?.content, [node]);
-  const setNodeContent = useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []);
-  const saveNodeContent = useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]);
-  const handleCheckboxToggle = useCheckboxToggle(getNodeContent, setNodeContent, saveNodeContent);
-  const handleTaskInsert = useTaskInsert(getNodeContent, setNodeContent, saveNodeContent);
+  // Ticks and the row "+" in the entry's checklists (#795): shown at once,
+  // saved only over the text the page shows (base_content), one after the
+  // other; refused when the entry changed elsewhere, then undone with a
+  // toast that asks for a reload.
+  const nodeRef = useRef(node);
+  nodeRef.current = node;
+  const applyChecklistEdit = useChecklistEdits({
+    getContent: (key) => (nodeRef.current && nodeRef.current.id === key ? nodeRef.current.content : null),
+    setContent: (key, content) => setNode(prev => (prev && prev.id === key ? { ...prev, content } : prev)),
+    save: (key, content, base) => api.put(`/nodes/${key}`, { content, base_content: base }),
+    newerMessage: NEWER_ENTRY_MESSAGE,
+    notify: addToast,
+  });
+  const handleCheckboxToggle = useCallback((itemText, checked) => applyChecklistEdit(
+    nodeRef.current?.id, tickEdit(itemText, checked), "Couldn't save change",
+  ), [applyChecklistEdit]);
+  const handleTaskInsert = useCallback((afterItemText, newText) => applyChecklistEdit(
+    nodeRef.current?.id, insertEdit(afterItemText, newText), "Couldn't add task",
+  ), [applyChecklistEdit]);
 
   // The action row: [LLM Response | model] [Read further | model]. When
   // the second group wraps onto a line of its own (a phone), the row
@@ -1830,7 +1846,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                   tc.name === toolName ? { ...tc, ...updates } : tc),
               };
             })}
-            onError={(msg) => addToast(msg)}
+            onError={(msg, ms) => addToast(msg, ms)}
           />
         )}
         {showProposal && proposalAfter && (

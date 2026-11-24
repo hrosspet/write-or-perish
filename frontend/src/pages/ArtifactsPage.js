@@ -11,7 +11,9 @@ import { useToast } from '../contexts/ToastContext';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import useEscapeKey from '../hooks/useEscapeKey';
 import { compareArtifacts, neighborAfterDelete } from '../utils/artifactKinds';
-import { useCheckboxToggle, useTaskInsert } from '../utils/markdown';
+import {
+  NEWER_ARTIFACT_MESSAGE, insertEdit, tickEdit, useChecklistEdits,
+} from '../utils/markdown';
 import { formatDate } from '../utils/date';
 
 const KIND_BLURBS = {
@@ -138,24 +140,33 @@ export default function ArtifactsPage() {
   // a new version when the AI wrote the latest one or a session pinned it;
   // the response's row metadata replaces ours either way (content stays
   // the optimistic local copy, so a slow response can't undo a later click).
-  const getArtifactContent = useCallback(
-    () => artifacts.find((a) => a.kind === activeKind)?.content,
-    [artifacts, activeKind],
-  );
-  const setArtifactContent = useCallback((content) => {
-    setArtifacts((prev) => prev.map((a) => (a.kind === activeKind ? { ...a, content } : a)));
-  }, [activeKind]);
-  const saveArtifactContent = useCallback(
-    (content) => api.patch(`/artifacts/${activeKind}`, { content }).then((res) => {
-      const saved = res.data.artifact;
-      setArtifacts((prev) => prev.map((a) => (a.kind === saved.kind
-        ? { ...a, id: saved.id, generated_by: saved.generated_by, created_at: saved.created_at }
-        : a)));
-    }),
-    [activeKind],
-  );
-  const handleCheckboxToggle = useCheckboxToggle(getArtifactContent, setArtifactContent, saveArtifactContent);
-  const handleTaskInsert = useTaskInsert(getArtifactContent, setArtifactContent, saveArtifactContent);
+  // Each click is saved only over the text the page shows (base_content,
+  // #795), one after the other: when the artifact changed elsewhere (the
+  // AI wrote a version, another tab ticked a box) nothing is saved, the
+  // click is undone and a toast asks for a reload.
+  const artifactsRef = useRef(artifacts);
+  artifactsRef.current = artifacts;
+  const applyChecklistEdit = useChecklistEdits({
+    getContent: (kind) => artifactsRef.current.find((a) => a.kind === kind)?.content,
+    setContent: (kind, content) => {
+      setArtifacts((prev) => prev.map((a) => (a.kind === kind ? { ...a, content } : a)));
+    },
+    save: (kind, content, base) => api.patch(`/artifacts/${kind}`, { content, base_content: base })
+      .then((res) => {
+        const saved = res.data.artifact;
+        setArtifacts((prev) => prev.map((a) => (a.kind === saved.kind
+          ? { ...a, id: saved.id, generated_by: saved.generated_by, created_at: saved.created_at }
+          : a)));
+      }),
+    newerMessage: NEWER_ARTIFACT_MESSAGE,
+    notify: addToast,
+  });
+  const handleCheckboxToggle = useCallback((itemText, checked) => applyChecklistEdit(
+    activeKind, tickEdit(itemText, checked), "Couldn't save change",
+  ), [applyChecklistEdit, activeKind]);
+  const handleTaskInsert = useCallback((afterItemText, newText) => applyChecklistEdit(
+    activeKind, insertEdit(afterItemText, newText), "Couldn't add task",
+  ), [applyChecklistEdit, activeKind]);
 
   // Surface a kind that has no row yet (not a default, not created) as an
   // empty, editable artifact so deep links never land on a blank page —

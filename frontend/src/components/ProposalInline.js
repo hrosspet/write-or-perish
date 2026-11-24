@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
 import CopyButton from './CopyButton';
-import { insertItemAfter } from '../utils/markdown';
+import { NEWER_ENTRY_MESSAGE, insertItemAfter, useChecklistEdits } from '../utils/markdown';
 
 export function stripInlineMarkdown(text) {
   return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
@@ -644,39 +644,34 @@ export default function ProposalInline({
     && applyStatus !== 'completed'
     && applyStatus !== 'started';
 
+  // A tick moves a row between Completed and New Tasks in the reply's text;
+  // the hover "+" inserts a row. Both are shown at once and saved only over
+  // the text the card shows (#795), one after the other; when the reply
+  // changed elsewhere nothing is saved, the change is undone and a toast
+  // asks for a reload.
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const applyEdit = useChecklistEdits({
+    getContent: () => contentRef.current,
+    setContent: (_key, text) => onContentChange?.(text),
+    save: (key, text, base) => api.put(`/nodes/${key}`, { content: text, base_content: base }),
+    newerMessage: NEWER_ENTRY_MESSAGE,
+    notify: (message, ms) => onError?.(message, ms),
+  });
+
   const handleToggleItem = useCallback((itemText, fromSection, toSection, opts) => {
     if (!toggleable || !nodeId) return;
-    const newContent = moveProposalItem(content, itemText, fromSection, toSection, opts);
-    if (newContent === content) return;
-    const prevContent = content;
-    onContentChange(newContent);
-    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
-      console.error('Failed to toggle proposal item:', err);
-      onContentChange(prevContent);
-      if (onError) {
-        const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
-        onError(`Couldn't save change — reverted (${reason})`);
-      }
-    });
-  }, [content, nodeId, onContentChange, onError, toggleable]);
+    applyEdit(nodeId, (text) => moveProposalItem(text, itemText, fromSection, toSection, opts),
+      "Couldn't save change");
+  }, [applyEdit, nodeId, toggleable]);
 
   // Insert a new task immediately below a given "New Tasks" row (the hover "+"),
-  // preserving the section's plain-bullet style. Same optimistic+revert path.
+  // preserving the section's plain-bullet style. Same path as a tick.
   const handleInsertAfter = useCallback((afterItem, newTask) => {
     const task = (newTask || '').trim();
     if (!toggleable || !nodeId || !task) return;
-    const newContent = insertItemAfter(content, afterItem, task);
-    if (newContent === content) return;
-    const prevContent = content;
-    onContentChange(newContent);
-    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
-      onContentChange(prevContent);
-      if (onError) {
-        const reason = err?.response?.data?.error || err?.message || 'Unknown error';
-        onError(`Couldn't add task — reverted (${reason})`);
-      }
-    });
-  }, [content, nodeId, onContentChange, onError, toggleable]);
+    applyEdit(nodeId, (text) => insertItemAfter(text, afterItem, task), "Couldn't add task");
+  }, [applyEdit, nodeId, toggleable]);
 
   useEffect(() => {
     if (!toolCallsMeta) return;

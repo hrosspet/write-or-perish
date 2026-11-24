@@ -889,6 +889,22 @@ def update_node(node_id):
     if new_content is None:
         return jsonify({"error": "Content required for update"}), 400
 
+    # A checklist tick or row "+" names the text the page showed (#795):
+    # saved only while that is still the entry's text, so a page left open
+    # never puts its older text over a newer edit. The row is locked first,
+    # so two such saves from two tabs can't both pass the check.
+    from backend.utils.content_base import (
+        base_content_of, content_changed_response)
+    base_content, bad_base = base_content_of(data)
+    if bad_base is not None:
+        return bad_base
+    if base_content is not None:
+        node = Node.query.filter_by(id=node.id).populate_existing() \
+            .with_for_update().one()
+        if node.get_content() != base_content:
+            db.session.rollback()
+            return content_changed_response()
+
     # Edits don't auto-split (re-parenting children mid-edit would be
     # surprising); above-cap content is rejected and the UI guides the
     # user to split into separate entries instead.
