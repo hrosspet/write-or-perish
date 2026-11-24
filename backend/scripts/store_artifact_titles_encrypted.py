@@ -51,7 +51,7 @@ from backend.models import UserArtifact  # noqa: E402
 from backend.utils import encryption  # noqa: E402
 from backend.utils.hidden_rows import including_hidden_rows  # noqa: E402
 
-# Rows per batch. Small on purpose: the production machine has 4 GB, and
+# Rows per batch. Small on purpose, to keep the memory a batch needs low;
 # a batch is one transaction.
 BATCH_SIZE = 200
 PAUSE_SECONDS = 0.2

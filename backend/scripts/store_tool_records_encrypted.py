@@ -54,8 +54,8 @@ from backend.extensions import db  # noqa: E402
 from backend.models import Node  # noqa: E402
 from backend.utils import encryption, tool_record  # noqa: E402
 
-# Rows per batch and per data key. Small on purpose: the production
-# machine has 4 GB, and a batch is one transaction.
+# Rows per batch and per data key. Small on purpose, to keep the memory
+# a batch needs low; a batch is one transaction.
 BATCH_SIZE = 200
 PAUSE_SECONDS = 0.2
 

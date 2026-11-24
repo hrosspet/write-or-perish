@@ -34,7 +34,7 @@ DOCX_UNEXPECTED_ERROR = (
 # ── Limits on one notes zip (heuristics, listed in the PR) ────────────────
 # Text of the .md files in one upload, unpacked: what analyze holds and
 # sends back, and the confirm posts again and parses (each several times
-# its size in memory on a server of 4 GB). A large vault of 10,000 notes
+# its size in memory on the server). A large vault of 10,000 notes
 # of 3 KB is 30 MB, a daily journal kept for ten years about 10 MB: 64 MB
 # leaves a 40 MB vault clear room. The confirm's body limit
 # (IMPORT_CONFIRM_MAX_BODY_BYTES, 96 MB) takes this text with its JSON
