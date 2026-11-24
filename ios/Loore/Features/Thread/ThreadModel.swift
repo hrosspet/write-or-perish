@@ -40,7 +40,27 @@ final class ThreadModel {
     private(set) var llmRequesting = false
     private(set) var llmPollStatus: TaskStatus?
     private(set) var streamText = ""
+    /// The model the LLM Response picker shows: the account's until the picker fills
+    /// in the thread's.
     var selectedModel: String?
+    /// The model the person picked in that picker on this page, else nil.
+    private(set) var pickedModel: String?
+
+    /// The picker's row was chosen (not the default it fills in by itself).
+    func modelPicked(_ id: String) {
+        selectedModel = id
+        pickedModel = id
+    }
+
+    /// The model a reply asked for on this page names (#791): the one picked here,
+    /// while the picker still shows it. Otherwise none, and the server continues on
+    /// the thread's model (`resolve_chat_model`), the account's in a thread with no AI
+    /// reply yet. The account's model sent unpicked moved the thread to it, and that
+    /// turn read the whole thread uncached.
+    var requestModel: String? {
+        guard let pickedModel, pickedModel == selectedModel else { return nil }
+        return pickedModel
+    }
 
     // UI state
     private(set) var pinLoading = false
@@ -579,7 +599,8 @@ final class ThreadModel {
     /// LLM Response is the user's own request and does not say so.
     func requestLLM(for parentId: Int, automatic: Bool = false) async throws -> Int {
         guard let app else { throw CancellationError() }
-        var body: [String: JSONValue] = ["model": .optional(selectedModel), "source_mode": .string("textmode")]
+        var body: [String: JSONValue] = ["source_mode": .string("textmode")]
+        if let requestModel { body["model"] = .string(requestModel) }
         if automatic { body["auto_generate"] = .bool(true) }
         let answer: LLMRequestResponse = try await app.api.post(APIPath.nodeLLM(parentId), json: .object(body))
         return answer.nodeId
@@ -681,7 +702,7 @@ final class ThreadModel {
             if submission.aiUsage != .off {
                 body["agentic"] = .bool(true)
                 body["auto_generate"] = .bool(auto)
-                body["model"] = .optional(selectedModel)
+                if let requestModel { body["model"] = .string(requestModel) }
             }
             let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
@@ -697,10 +718,12 @@ final class ThreadModel {
             ]))
             return NodeFormResult(id: created.id)
         }
-        let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeFromNode(nodeId), json: .object([
+        var body: [String: JSONValue] = [
             "content": .string(submission.content), "ai_usage": .string(submission.aiUsage.rawString),
-            "model": .optional(selectedModel), "auto_generate": .bool(auto),
-        ]))
+            "auto_generate": .bool(auto),
+        ]
+        if let requestModel { body["model"] = .string(requestModel) }
+        let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeFromNode(nodeId), json: .object(body))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                               promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped,
                                   spendCapLiftsWithPayment: answer.spendCapLiftsWithPayment, llmError: answer.llmError,
@@ -839,9 +862,10 @@ final class ThreadModel {
         pageError = nil
         Task {
             do {
-                let answer: VoiceFromNodeResponse = try await app.api.post(APIPath.voiceFromNode(nodeId), json: .object([
-                    "model": .optional(selectedModel),
-                ]))
+                // No model: Voice continues on the thread's model (#784); the LLM
+                // Response picker's choice is for LLM Response.
+                let answer: VoiceFromNodeResponse = try await app.api.post(APIPath.voiceFromNode(nodeId),
+                                                                           json: .object([:]))
                 // A thread started from the Glean card keeps its Glean button on the
                 // Voice screen too (#435). A gleaning answers "ready": nothing plays.
                 let glean = gleanThread && gleanEnabled

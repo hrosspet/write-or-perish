@@ -585,7 +585,9 @@ final class ThreadModelTests: StubbedAppTestCase {
         var auto = true
         let binding = Binding(get: { auto }, set: { auto = $0 })
         await model.inlineReplySent(NodeFormResult(id: 11), autoGenerate: binding)
-        XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["model"] as? String, "gpt-6-luna")
+        // No model, so the server continues on the thread's (#791).
+        XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["auto_generate"] as? Bool, true)
+        XCTAssertNil(body(of: "POST /api/nodes/11/llm")?["model"])
         // The entry's page opens once its node is fetched (NodePrefetch).
         let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: 77) }
         XCTAssertTrue(opened)
