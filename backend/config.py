@@ -443,35 +443,41 @@ class Config:
         os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "600")
 
     # --- Saved References Digest (backend/tasks/external_digest.py) ---
-    # The digest's model, one per provider of the account's own model
-    # (llm_nodes.default_model_for): the middle model of that provider
-    # (Peter, 2026-11-23/24: "The digest runs on the middle model of the
-    # account's own provider: Sonnet 5.5 for Anthropic accounts, Sol for
-    # OpenAI accounts"; Haiku 5.5 and Luna are not used for it). Each must
-    # be an active model of THAT provider (checked at boot,
-    # validate_digest_settings): an account's references never reach
-    # another provider, and the digest never falls back to another model.
-    # Before 2026-11-24 the digest ran on the account's own chat model.
+    # The digest's model (Peter, 2026-11-24: "pls make Sol 6.2 default for
+    # digests for users who either use OAI models or who allowed to use
+    # both providers. For anthropic only users use Sonnet 5.5"; Haiku 5.5
+    # and Luna are not used for it). DIGEST_MODEL_OPENAI for an account
+    # whose own model (llm_nodes.default_model_for) is OpenAI's, and for
+    # one that answered "both providers" (User.profile_both_providers);
+    # DIGEST_MODEL_ANTHROPIC for an account on an Anthropic model that
+    # answered "one provider" or never answered. Each must be an active
+    # model of THAT provider (checked at boot, validate_digest_settings).
+    # On a failure the digest never falls back to another provider or
+    # model. Before 2026-11-24 the digest ran on the account's own chat
+    # model.
     DIGEST_MODEL_ANTHROPIC = (
         os.environ.get("DIGEST_MODEL_ANTHROPIC") or "claude-sonnet-5.5")
     DIGEST_MODEL_OPENAI = (
         os.environ.get("DIGEST_MODEL_OPENAI") or "gpt-6.2-sol")
-    # Heuristic: the most of the saved list one digest reads, in units of
-    # 4 characters of its rendered lines (each line and its line break),
-    # the unit of the profile planner (utils/chunk_plan). The newest items
-    # come first; the oldest beyond it are left out and counted in the
-    # corpus header. One cap for both providers (Peter, 2026-11-24).
-    # 250,000: GPT-6.2 Sol bills the whole request at 2x input and 1.5x
-    # output above 272,000 input tokens. Measured on the owner's list
-    # (2026-11-23), a unit is 1.038 OpenAI tokens and 1.491 Claude tokens,
-    # so a list at the cap is about 259,500 tokens on Sol plus about 275
-    # for the instructions and the header (o200k), 4.5 % under the step,
-    # and about 373,000 tokens on Sonnet 5.5, whose price is flat across
-    # its 1M window. A list denser than 1.087 tokens per unit (more
-    # non-English text, for one) crosses the step on Sol at the cap.
-    # Before: 300,000 characters (75,000 units) and 1,500 items; there is
-    # no item cap any more.
-    DIGEST_MAX_UNITS = int(os.environ.get("DIGEST_MAX_UNITS") or "250000")
+    # Heuristic: the most one digest request may hold, in o200k tokens
+    # (OpenAI's tokenizer, counted on this machine), the whole request:
+    # instructions, corpus header, message framing and the listed lines.
+    # The saved list is listed newest-saved first until the next line
+    # would pass it; the rest is left out and counted in the header.
+    # Peter, 2026-11-24: "The cap should be based on OAI's price hike. Use
+    # the same for Sonnet 5.5, even though there is no hike": GPT-6.2 Sol
+    # bills the whole request at 2x input and 1.5x output above 272,000
+    # input tokens, and the same list goes to Sonnet 5.5 (flat pricing,
+    # a 1M window, 3.9 times the cap; on the owner's list Claude's
+    # tokenizer made 1.44 tokens per o200k token). 258,400 = 272,000 less
+    # a 5 % margin (the planner's CAP_MARGIN, utils/chunk_plan): the
+    # tokens Sol bills can differ from tiktoken's count. Counted in
+    # tokens, not characters: text dense in tokens crosses the step far
+    # sooner (o200k tokens per 4 characters, synthetic lists, 2026-11-24:
+    # English 0.93 to 1.17, Czech 1.43, Korean 1.98, Japanese 3.10).
+    # Before 2026-11-24: 300,000 characters and 1,500 items.
+    DIGEST_MAX_PROMPT_TOKENS = int(
+        os.environ.get("DIGEST_MAX_PROMPT_TOKENS") or "258400")
 
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search

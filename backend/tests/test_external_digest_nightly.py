@@ -68,7 +68,7 @@ def _make_app():
     }
     app.config["DIGEST_MODEL_ANTHROPIC"] = "claude-sonnet-5.5"
     app.config["DIGEST_MODEL_OPENAI"] = "gpt-6.2-sol"
-    app.config["DIGEST_MAX_UNITS"] = Config.DIGEST_MAX_UNITS
+    app.config["DIGEST_MAX_PROMPT_TOKENS"] = Config.DIGEST_MAX_PROMPT_TOKENS
     _db.init_app(app)
     return app
 

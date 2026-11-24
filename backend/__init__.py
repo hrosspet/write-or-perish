@@ -103,7 +103,7 @@ def validate_digest_settings(config):
     SUPPORTED_MODELS key of the provider its setting names, as for the
     profile models: an account's references reach only models of its own
     provider. No "chat" requirement: Sonnet 5.5 is read only in the
-    pickers and still runs background jobs. A cap below one unit would
+    pickers and still runs background jobs. A cap below one token would
     leave every digest empty."""
     supported = config.get("SUPPORTED_MODELS") or {}
     for key, provider in DIGEST_MODEL_KEYS:
@@ -114,10 +114,10 @@ def validate_digest_settings(config):
         if not cfg or cfg.get("deprecated") or cfg.get("provider") != provider:
             raise RuntimeError(
                 f"{key}={model_id!r} is not an active {provider} model.")
-    units = config.get("DIGEST_MAX_UNITS")
-    if units is not None and int(units) < 1:
+    tokens = config.get("DIGEST_MAX_PROMPT_TOKENS")
+    if tokens is not None and int(tokens) < 1:
         raise RuntimeError(
-            f"DIGEST_MAX_UNITS={units!r} must be at least 1.")
+            f"DIGEST_MAX_PROMPT_TOKENS={tokens!r} must be at least 1.")
 
 
 _encryption_off_noted = False

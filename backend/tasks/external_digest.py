@@ -14,10 +14,13 @@ with the corpus, not with what just arrived: riding individual saves
 cost $26 in one day of clipping (30 rebuilds x ~77k input tokens of a
 1223-item corpus on a flagship model).
 
-It runs on the middle model of the account's own provider (Peter,
-2026-11-24: Sonnet 5.5 for Anthropic accounts, GPT-6.2 Sol for OpenAI
-accounts; DIGEST_MODEL_ANTHROPIC / DIGEST_MODEL_OPENAI), never on
-another provider's model and with no fallback to another model.
+It runs on GPT-6.2 Sol for an account on an OpenAI model or one that
+answered "both providers", and on Sonnet 5.5 for an account that keeps
+to Anthropic (Peter, 2026-11-24; DIGEST_MODEL_OPENAI /
+DIGEST_MODEL_ANTHROPIC), with no fallback to another provider or model.
+The list is capped in OpenAI tokens under GPT-6.2 Sol's price step, for
+both models (DIGEST_MAX_PROMPT_TOKENS), and the first time an account's
+list is cut there, one warning goes to Sentry.
 
 Nothing waits on a digest, so the nightly sweep submits every stale
 user's rebuild as ONE provider batch (~50% cheaper, <=24h SLA) and a
@@ -25,6 +28,8 @@ beat collector saves the results — see sweep_external_digests /
 collect_external_digest_batches. The synchronous rebuild_external_digest
 task stays as the direct path (a future "rebuild now" button).
 """
+import math
+from dataclasses import dataclass
 from datetime import datetime
 
 from celery.utils.log import get_task_logger
@@ -46,7 +51,7 @@ from backend.utils.error_privacy import describe_exception
 from backend.utils import refusal_backoff, soft_limit
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
-from backend.utils.profile_providers import profile_provider
+from backend.utils.profile_providers import agreed_to_both, profile_provider
 from backend.utils.approval import background_work_allowed, not_active
 from backend.utils.llm_batch import (
     BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
@@ -82,19 +87,30 @@ DIGEST_MAX_TOKENS = 10000
 # Each item is one line of the prompt, its text (with the title, if any)
 # cropped to this many characters.
 ITEM_SNIPPET_CHARS = 280
-# The cap on the rendered list is DIGEST_MAX_UNITS (config.py; one
-# setting, overridable by the environment variable of the same name), in
-# units of this many characters: the stored unit (Node.token_count is
-# len(text) // 4) that the profile planner counts (utils/chunk_plan). It
-# replaces the cap of 300,000 characters and 1,500 items (2026-11-24);
-# there is no item cap.
-CHARS_PER_UNIT = 4
+# The cap on the whole request is DIGEST_MAX_PROMPT_TOKENS (config.py;
+# one setting, overridable by the environment variable of the same name),
+# counted in o200k tokens on this machine (tokens.o200k_counter): each
+# listed line with one more token for its line break (an overcount of
+# about 1 %, on the safe side), plus the instructions, the longest form
+# of the corpus header and the message framing. It replaces the cap of
+# 300,000 characters and 1,500 items (2026-11-24); there is no item cap.
+# Per-message framing of a chat request, as LLMProvider.count_tokens
+# counts it for OpenAI.
+MESSAGE_FRAMING_TOKENS = 4
+# Heuristic: o200k tokens per character when the encoding cannot be
+# loaded in this process (tokens._o200k_encoding; it then never retries):
+# the densest text measured, Japanese, is 3.10 tokens per 4 characters
+# (0.775 a character), rounded up, so the estimate errs short.
+ESTIMATED_TOKENS_PER_CHAR = 0.8
 # Rows fetched from the database per round trip while the list is
-# rendered. The list is read newest first and only until the cap is
-# reached, never loaded whole: a list of tens of thousands of saved
+# rendered. The list is read newest-saved first and only until the cap
+# is reached, never loaded whole: a list of tens of thousands of saved
 # tweets would not fit the worker's memory. Memory only: it changes
 # nothing in the prompt.
 RENDER_ROWS_PER_FETCH = 500
+# The Sentry issue every account's first cut at the cap is grouped into.
+CUT_EVENT_MESSAGE = "Saved References Digest: a list is cut at the token cap"
+CUT_EVENT_FINGERPRINT = ["external-digest-list-cut-at-cap"]
 
 DIGEST_PROMPT = """\
 Below is a collection of tweets and bookmarks a user saved on external \
@@ -166,17 +182,32 @@ def _setting(key):
     return getattr(Config, key) if value in (None, "") else value
 
 
+def _digest_provider(user):
+    """The provider whose digest model the user's digest runs on (Peter,
+    2026-11-24: "pls make Sol 6.2 default for digests for users who
+    either use OAI models or who allowed to use both providers. For
+    anthropic only users use Sonnet 5.5"):
+
+    - "openai": the account answered "both providers"
+      (profile_providers.agreed_to_both, read from the database now),
+      whatever its own model;
+    - else the provider of the account's own model (profile_provider:
+      the preferred model, else the default model), so an account on an
+      OpenAI model stays on OpenAI and one on an Anthropic model that
+      answered "one provider", or never answered, stays on Anthropic."""
+    if agreed_to_both(user):
+        return "openai"
+    return profile_provider(user)
+
+
 def _digest_model_id(user):
-    """The model the user's digest runs on: the digest setting of the
-    provider of the account's own model (profile_provider: the preferred
-    model, else the default model), DIGEST_MODEL_ANTHROPIC or
-    DIGEST_MODEL_OPENAI (Peter, 2026-11-24: the middle model of the
-    account's own provider). None when that provider can't be told or
-    its setting names no model of that provider (the boot check rules
-    that out): the digest is then not built and the account stays due,
-    as for a model that is not configured. Never another provider's
-    model, and no fallback to another model of the same provider."""
-    provider = profile_provider(user)
+    """The model the user's digest runs on: DIGEST_MODEL_OPENAI or
+    DIGEST_MODEL_ANTHROPIC, by ``_digest_provider``. None when the
+    provider can't be told or its setting names no model of that
+    provider (the boot check rules that out): the digest is then not
+    built and the account stays due, as for a model that is not
+    configured. No fallback to the other provider or another model."""
+    provider = _digest_provider(user)
     if provider not in ("anthropic", "openai"):
         return None
     model_id = _setting(f"DIGEST_MODEL_{provider.upper()}")
@@ -187,35 +218,102 @@ def _digest_model_id(user):
 
 
 def _newest_first():
-    """The list's order: by posting date, newest first, and an item that
-    states none (a PDF, a page without a date) by when it was saved
-    (Peter, 2026-11-24), so it takes its place among the others instead
-    of coming last and being cut first. "Saved" is ``saved_at``, which a
-    re-clip does not move, else ``fetched_at`` (rows from before
-    ``saved_at`` existed)."""
-    return (func.coalesce(ExternalItem.posted_at, ExternalItem.saved_at,
-                          ExternalItem.fetched_at).desc().nullslast(),
+    """The list's order (Peter, 2026-11-24: "Why don't we use the
+    timestamp when it's saved?"): by the day the person saved the
+    reference, newest first; within a day, by its publishing date, newest
+    first, undated last; then by the moment it was saved, then id. The
+    oldest-saved are the ones the cap leaves out.
+
+    "Saved" is ``saved_at``, else ``fetched_at`` for rows from before
+    ``saved_at`` existed (the convention of
+    external_sync.count_known_bookmarks); a re-clip does not move
+    ``saved_at``. Heuristic: the day (UTC), because every row of a bulk
+    import gets its own insert time, microseconds to minutes apart, so
+    the moment alone would order an import by the order of its file and
+    the publishing date would never decide."""
+    saved = func.coalesce(ExternalItem.saved_at, ExternalItem.fetched_at)
+    return (func.date(saved).desc().nullslast(),
+            ExternalItem.posted_at.desc().nullslast(),
+            saved.desc().nullslast(),
             ExternalItem.id.desc())
 
 
-def _render_digest_prompt(user_id):
-    """The digest prompt over the user's current corpus, or None when
-    they have no items. Returns (prompt_text, total_items).
+# The corpus header. It states the count explicitly: the model can't
+# count a long list and will otherwise invent a "sample of ~N" caveat.
+HEADER_ALL = ("The corpus holds {total} saved items; ALL of them are "
+              "listed below.")
+HEADER_CUT = ("The corpus holds {total} saved items; the {listed} most "
+              "recently saved are listed below ({left_out} saved earlier "
+              "are not shown).")
 
-    Items are rendered newest first (``_newest_first``) until the next
-    line would pass DIGEST_MAX_UNITS; the older ones are left out and
-    counted in the header. Rows are fetched RENDER_ROWS_PER_FETCH at a
-    time and decrypted only up to the cap — the one place that reads the
-    corpus."""
+
+@dataclass
+class Rendered:
+    """A digest prompt over the user's list."""
+    prompt: str
+    total: int      # the user's saved references
+    listed: int     # the lines in the prompt
+    tokens: int     # the request's tokens as the cap counts them
+    cut: bool       # the cap left the rest of the list out
+    counted: str    # "o200k" (tiktoken) or "estimate"
+
+
+def _token_counter():
+    """(count, how): o200k_base on this machine (tokens.o200k_counter),
+    else ESTIMATED_TOKENS_PER_CHAR."""
+    from backend.utils.tokens import o200k_counter
+    count = o200k_counter()
+    if count is not None:
+        return count, "o200k"
+    return (lambda text: math.ceil(len(text or "")
+                                   * ESTIMATED_TOKENS_PER_CHAR)), "estimate"
+
+
+def _fixed_prompt_tokens(count, total):
+    """The request's tokens besides the listed lines: the instructions,
+    the longest form of the corpus header for *total* items and the line
+    break after it, and the message framing."""
+    longest = HEADER_CUT.format(total=total, listed=total, left_out=total)
+    return (count(DIGEST_PROMPT.replace("{corpus}", "")) + count(longest)
+            + 1 + MESSAGE_FRAMING_TOKENS)
+
+
+def _line(item):
+    """The item's line in the prompt, or None for an item without text."""
+    text = (item.get_content() or "").strip().replace("\n", " ")
+    if not text:
+        return None
+    snippet = text[:ITEM_SNIPPET_CHARS]
+    stamp = item.posted_at.strftime("%Y-%m-%d") if item.posted_at else "?"
+    author = item.author_handle or item.source
+    if item.source not in BYLINE_SOURCES:
+        author = f"@{author}"
+    if item.title:
+        snippet = f"{item.title} — {snippet}"[:ITEM_SNIPPET_CHARS]
+    return f"- {author} ({stamp}): {snippet}"
+
+
+def _render_digest_prompt(user_id):
+    """The digest prompt over the user's current list (a Rendered), or
+    None when they have no saved references.
+
+    Lines are added newest-saved first (``_newest_first``) while the
+    request stays within DIGEST_MAX_PROMPT_TOKENS, each counted with one
+    token for its line break; the rest is left out and counted in the
+    header. Rows are fetched RENDER_ROWS_PER_FETCH at a time and
+    decrypted one by one, so a rebuild decrypts the lines it lists and
+    the one that did not fit, nothing further — the one place that reads
+    the corpus."""
     total = ExternalItem.query.filter(
         ExternalItem.user_id == user_id, ExternalItem.saved()).count()
     if not total:
         return None
 
-    budget_chars = int(_setting("DIGEST_MAX_UNITS")) * CHARS_PER_UNIT
+    count, counted = _token_counter()
+    cap = int(_setting("DIGEST_MAX_PROMPT_TOKENS"))
+    used = _fixed_prompt_tokens(count, total)
     lines = []
-    used = 0
-    truncated = False
+    cut = False
     rows = db.session.execute(
         select(ExternalItem).where(
             ExternalItem.user_id == user_id, ExternalItem.saved())
@@ -223,22 +321,12 @@ def _render_digest_prompt(user_id):
         .execution_options(yield_per=RENDER_ROWS_PER_FETCH))
     try:
         for item in rows.scalars():
-            text = (item.get_content() or "").strip().replace("\n", " ")
-            if not text:
+            line = _line(item)
+            if line is None:
                 continue
-            snippet = text[:ITEM_SNIPPET_CHARS]
-            stamp = (item.posted_at.strftime("%Y-%m-%d")
-                     if item.posted_at else "?")
-            author = item.author_handle or item.source
-            if item.source not in BYLINE_SOURCES:
-                author = f"@{author}"
-            if item.title:
-                snippet = f"{item.title} — {snippet}"[:ITEM_SNIPPET_CHARS]
-            line = f"- {author} ({stamp}): {snippet}"
-            # The line and its line break: the joined list's characters.
-            size = len(line) + 1
-            if used + size > budget_chars:
-                truncated = True
+            size = count(line) + 1   # the line and its line break
+            if used + size > cap:
+                cut = True
                 break
             lines.append(line)
             used += size
@@ -247,17 +335,66 @@ def _render_digest_prompt(user_id):
         # through a server-side cursor that a commit would invalidate.
         rows.close()
 
-    # State the count explicitly — the model can't count a long list
-    # and will otherwise invent a "sample of ~N" caveat.
-    if truncated or len(lines) < total:
-        header = (f"The corpus holds {total} saved items; the "
-                  f"{len(lines)} most recent are listed below "
-                  f"({total - len(lines)} older items not shown).")
+    if cut or len(lines) < total:
+        header = HEADER_CUT.format(total=total, listed=len(lines),
+                                   left_out=total - len(lines))
     else:
-        header = (f"The corpus holds {total} saved items; ALL of them "
-                  f"are listed below.")
+        header = HEADER_ALL.format(total=total)
     corpus = header + "\n" + "\n".join(lines)
-    return DIGEST_PROMPT.replace("{corpus}", corpus), total
+    return Rendered(DIGEST_PROMPT.replace("{corpus}", corpus), total,
+                    len(lines), used, cut, counted)
+
+
+def _sentry_active():
+    try:
+        import sentry_sdk
+        return sentry_sdk.get_client().is_active()
+    except Exception:  # noqa: BLE001 — no Sentry, no report
+        return False
+
+
+def _report_cut(user_id, rendered, cap):
+    """One Sentry warning (Peter, 2026-11-24: "I'd like to know when users
+    start crossing that threshold"): a fixed message and fingerprint, so
+    every account's report lands in one issue, and numbers only: the
+    account's id, the request's tokens, the cap, the lines kept and the
+    references left out. Never a text or a name."""
+    logger.warning("Digest for user %s: list cut at the token cap (%s "
+                   "tokens, cap %s, %s listed, %s left out)", user_id,
+                   rendered.tokens, cap, rendered.listed,
+                   rendered.total - rendered.listed)
+    try:
+        import sentry_sdk
+        with sentry_sdk.new_scope() as scope:
+            scope.fingerprint = list(CUT_EVENT_FINGERPRINT)
+            scope.set_extra("user_id", user_id)
+            scope.set_extra("prompt_tokens", rendered.tokens)
+            scope.set_extra("counted", rendered.counted)
+            scope.set_extra("cap_tokens", cap)
+            scope.set_extra("items_kept", rendered.listed)
+            scope.set_extra("items_cut", rendered.total - rendered.listed)
+            sentry_sdk.capture_message(CUT_EVENT_MESSAGE, level="warning")
+    except Exception:  # pragma: no cover — reporting never stops a digest
+        logger.exception("Sentry report of a digest cut failed")
+
+
+def _note_cut(user, rendered):
+    """Report the first time the cap cuts this account's list, once
+    (User.digest_cut_reported_at, kept across restarts), and again only
+    after a list that fitted whole in between, which clears the mark.
+    Nothing is reported or marked while Sentry is not set up (local
+    instances, tests). Commits a change of the mark."""
+    if rendered.cut:
+        if user.digest_cut_reported_at is not None or not _sentry_active():
+            return
+        _report_cut(user.id, rendered,
+                    int(_setting("DIGEST_MAX_PROMPT_TOKENS")))
+        user.digest_cut_reported_at = datetime.utcnow()
+    elif user.digest_cut_reported_at is not None:
+        user.digest_cut_reported_at = None
+    else:
+        return
+    db.session.commit()
 
 
 def _log_empty_digest_cost(user_id, model_id, response, batch):
@@ -407,7 +544,8 @@ def _submit_digest_batch(users):
             continue
         if rendered is None:
             continue
-        prompt_text, total = rendered
+        _note_cut(user, rendered)
+        prompt_text, total = rendered.prompt, rendered.total
         custom_id = f"external-digest-{user.id}"
         requests_by_provider.setdefault(model_cfg["provider"], []).append({
             "custom_id": custom_id,
@@ -627,7 +765,8 @@ def rebuild_external_digest(self, user_id, force=False):
         rendered = _render_digest_prompt(user_id)
         if rendered is None:
             return {"status": "no_items"}
-        prompt_text, total = rendered
+        _note_cut(user, rendered)
+        prompt_text, total = rendered.prompt, rendered.total
 
         api_keys = get_api_keys_for_usage(flask_app.config, 'chat')
         messages = [{

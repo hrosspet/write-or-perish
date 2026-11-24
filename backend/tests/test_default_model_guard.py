@@ -237,7 +237,7 @@ def _shipped(**settings):
             Config.PROFILE_MERGE_MODEL_CROSS_PROVIDER,
         "DIGEST_MODEL_ANTHROPIC": Config.DIGEST_MODEL_ANTHROPIC,
         "DIGEST_MODEL_OPENAI": Config.DIGEST_MODEL_OPENAI,
-        "DIGEST_MAX_UNITS": Config.DIGEST_MAX_UNITS,
+        "DIGEST_MAX_PROMPT_TOKENS": Config.DIGEST_MAX_PROMPT_TOKENS,
     }
     config.update(settings)
     return config
@@ -286,7 +286,7 @@ def test_a_retired_setting_boots_on_its_replacement_with_a_warning(
     ("DIGEST_MODEL_OPENAI", "claude-sonnet-5.5",
      "is not an active openai model"),
     ("DIGEST_MODEL_OPENAI", "gpt-5.5", "is not an active openai model"),
-    ("DIGEST_MAX_UNITS", 0, "must be at least 1"),
+    ("DIGEST_MAX_PROMPT_TOKENS", 0, "must be at least 1"),
     # The replacement can't do what the setting needs: GPT-6 Astra was
     # never a Read model, so neither is GPT-6.2 Astra.
     ("GLEAN_MODEL_OPENAI", "gpt-6-astra", "is not an active model flagged"),
