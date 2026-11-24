@@ -557,7 +557,12 @@ class Config:
     #                retired in turn is followed to its own replacement.
     #                Checked at boot (validate_model_successors): it leads
     #                to an active model of the same provider. Without it
-    #                the rule above applies.
+    #                the rule above applies. A server setting that names
+    #                the retired model (LLM_NAME, CHAT_MODEL_*,
+    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*) runs on the
+    #                replacement, with one warning line at boot
+    #                (replace_retired_settings); without a replacement it
+    #                is refused at boot.
     #   featured   — in the picker's short list (with the selected model);
     #                the rest sit behind "More models…". Set by hand.
     #   read       — a read (Community Archive picks) may run on it; the

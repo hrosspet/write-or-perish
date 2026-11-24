@@ -215,6 +215,95 @@ def test_a_retired_replacement_is_followed_to_its_own():
     assert "is not an active openai model" in str(e.value)
 
 
+# ── A server setting that names a retired model (#793 review) ────────────
+
+def _shipped(**settings):
+    from backend.config import Config
+    config = {
+        "DEFAULT_LLM_MODEL": "claude-opus-5.5",
+        "SUPPORTED_MODELS": Config.SUPPORTED_MODELS,
+        "READ_DEFAULT_MODEL": Config.READ_DEFAULT_MODEL,
+        "CHAT_MODEL_ANTHROPIC": Config.CHAT_MODEL_ANTHROPIC,
+        "CHAT_MODEL_OPENAI": Config.CHAT_MODEL_OPENAI,
+        "GLEAN_MODEL_ANTHROPIC": Config.GLEAN_MODEL_ANTHROPIC,
+        "GLEAN_MODEL_OPENAI": Config.GLEAN_MODEL_OPENAI,
+        "PROFILE_VERSION_MODEL_ANTHROPIC": Config.PROFILE_VERSION_MODEL_ANTHROPIC,
+        "PROFILE_VERSION_MODEL_OPENAI": Config.PROFILE_VERSION_MODEL_OPENAI,
+        "PROFILE_MERGE_MODEL_ANTHROPIC": Config.PROFILE_MERGE_MODEL_ANTHROPIC,
+        "PROFILE_MERGE_MODEL_OPENAI": Config.PROFILE_MERGE_MODEL_OPENAI,
+        "PROFILE_VERSION_MODEL_CROSS_PROVIDER":
+            Config.PROFILE_VERSION_MODEL_CROSS_PROVIDER,
+        "PROFILE_MERGE_MODEL_CROSS_PROVIDER":
+            Config.PROFILE_MERGE_MODEL_CROSS_PROVIDER,
+    }
+    config.update(settings)
+    return config
+
+
+@pytest.mark.parametrize("key, variable, retired, replacement", [
+    ("DEFAULT_LLM_MODEL", "LLM_NAME", "gpt-6-astra", "gpt-6.2-astra"),
+    ("DEFAULT_LLM_MODEL", "LLM_NAME", "gpt-6-sol", "gpt-6.2-sol"),
+    ("CHAT_MODEL_OPENAI", "CHAT_MODEL_OPENAI", "gpt-6-astra", "gpt-6.2-astra"),
+    ("CHAT_MODEL_OPENAI", "CHAT_MODEL_OPENAI", "gpt-6-sol", "gpt-6.2-sol"),
+    ("GLEAN_MODEL_OPENAI", "GLEAN_MODEL_OPENAI", "gpt-6-sol", "gpt-6.2-sol"),
+    # Glean's settings may name another provider's model.
+    ("GLEAN_MODEL_ANTHROPIC", "GLEAN_MODEL_ANTHROPIC", "gpt-6-sol",
+     "gpt-6.2-sol"),
+    ("PROFILE_VERSION_MODEL_OPENAI", "PROFILE_VERSION_MODEL_OPENAI",
+     "gpt-6-sol", "gpt-6.2-sol"),
+    ("PROFILE_MERGE_MODEL_OPENAI", "PROFILE_MERGE_MODEL_OPENAI",
+     "gpt-6-sol", "gpt-6.2-sol"),
+    ("PROFILE_VERSION_MODEL_CROSS_PROVIDER",
+     "PROFILE_VERSION_MODEL_CROSS_PROVIDER", "gpt-6-sol", "gpt-6.2-sol"),
+    ("PROFILE_MERGE_MODEL_CROSS_PROVIDER",
+     "PROFILE_MERGE_MODEL_CROSS_PROVIDER", "gpt-6-astra", "gpt-6.2-astra"),
+])
+def test_a_retired_setting_boots_on_its_replacement_with_a_warning(
+        key, variable, retired, replacement):
+    warned = []
+    config = _shipped(**{key: retired})
+    validate_default_model(config, warn=warned.append)
+    assert config[key] == replacement
+    assert warned == [
+        f"{variable}={retired!r} names a retired model; running on its "
+        f"replacement {replacement!r}. Set {variable}={replacement} in the "
+        f"environment to silence this warning."]
+
+
+@pytest.mark.parametrize("key, value, why", [
+    # Another provider's model for a provider's own setting.
+    ("CHAT_MODEL_ANTHROPIC", "gpt-6-astra", "is not an active anthropic"),
+    ("PROFILE_VERSION_MODEL_ANTHROPIC", "gpt-6-sol",
+     "is not an active anthropic model"),
+    # The replacement can't do what the setting needs: GPT-6 Astra was
+    # never a Read model, so neither is GPT-6.2 Astra.
+    ("GLEAN_MODEL_OPENAI", "gpt-6-astra", "is not an active model flagged"),
+    # A retired model without a replacement.
+    ("CHAT_MODEL_OPENAI", "gpt-5.5", "is not an active openai"),
+    ("DEFAULT_LLM_MODEL", "gpt-5.5", "is deprecated"),
+    # A typo.
+    ("DEFAULT_LLM_MODEL", "gpt-6-2-astra", "did you mean 'gpt-6.2-astra'"),
+    ("CHAT_MODEL_OPENAI", "gpt-6.3-astra", "is not an active openai"),
+])
+def test_a_setting_without_a_fitting_replacement_still_refuses_to_boot(
+        key, value, why):
+    warned = []
+    config = _shipped(**{key: value})
+    with pytest.raises(RuntimeError) as e:
+        validate_default_model(config, warn=warned.append)
+    assert why in str(e.value)
+    assert repr(value) in str(e.value)
+    assert warned == [] and config[key] == value
+
+
+def test_the_shipped_settings_need_no_replacement():
+    warned = []
+    config = _shipped()
+    before = dict(config)
+    validate_default_model(config, warn=warned.append)
+    assert warned == [] and config == before
+
+
 def test_a_replacement_on_an_active_model_refuses_to_boot():
     from backend import validate_model_successors
     with pytest.raises(RuntimeError) as e:

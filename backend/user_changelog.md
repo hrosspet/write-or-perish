@@ -36,7 +36,7 @@ GPT-6 Luna and GPT-5.6 Luna stay as they are.
 
 GPT-6.2 Astra is now available in Loore — pick it in the [Account page](/account#model)'s model selector. It's OpenAI's newest frontier model.
 
-It's also Loore's new default OpenAI model. If you use OpenAI's models and the model you picked is no longer offered, Loore now uses GPT-6.2 Astra in its place (until now, GPT-6 Astra).
+It's also Loore's new default OpenAI model. If you use OpenAI's models and the model you picked is no longer offered and has no newer version in Loore, Loore now uses GPT-6.2 Astra in its place (until now, GPT-6 Astra).
 
 It costs less to run than GPT-6 Astra: OpenAI charges 20% less for what it reads and writes, and 60% less for cached input (the earlier part of a conversation, sent again with each new message).
 
