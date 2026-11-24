@@ -88,8 +88,9 @@ def _cap(monkeypatch, value):
 
 
 class _TokenPerCharacter:
-    """Stand-in for o200k on text dense in tokens (Japanese is about 0.8
-    a character): a token per character."""
+    """Stand-in for o200k on text dense in tokens (dense Japanese and
+    Chinese lists measured 0.90 to 1.14 a character): a token per
+    character."""
 
     def encode(self, text, disallowed_special=()):
         return [0] * len(text or "")
@@ -270,8 +271,8 @@ def test_the_same_list_goes_to_sonnet_and_to_sol(app, monkeypatch):
 def test_without_the_encoding_the_list_is_fitted_by_the_estimate(
         app, monkeypatch):
     """tiktoken's o200k_base did not load in this process: each line is
-    estimated at ESTIMATED_TOKENS_PER_CHAR (the densest text measured,
-    rounded up), so the list errs short."""
+    estimated at ESTIMATED_TOKENS_PER_CHAR (1.2, above the densest text
+    measured), so the list errs short."""
     user = User.query.first()
     _dated_list(user, 10)
     monkeypatch.setattr(tokens, "_O200K", {"failed": True})
@@ -280,7 +281,31 @@ def test_without_the_encoding_the_list_is_fitted_by_the_estimate(
     line = _corpus_lines(rendered.prompt)[0]
     count, how = _digest._token_counter()
     assert how == "estimate"
-    assert count(line) == -(-len(line) * 8 // 10)
+    assert count(line) == -(-len(line) * 12 // 10)
+
+
+class _DensestMeasured:
+    """Stand-in for o200k on the densest lists measured (Japanese,
+    Chinese): 1.14 tokens a character."""
+
+    def encode(self, text, disallowed_special=()):
+        return [0] * -(-len(text or "") * 114 // 100)
+
+
+def test_the_estimate_keeps_the_densest_text_measured_under_the_cap(
+        app, monkeypatch):
+    """Review of #802: at 0.8 tokens a character, a dense Japanese list
+    filled to the cap by the estimate was about 9 % over it in real
+    tokens. At 1.2 the same list stays under."""
+    user = User.query.first()
+    _dated_list(user, 200, text="日本語の文章 {i} " + "あ" * 200)
+    monkeypatch.setattr(tokens, "_O200K", {"failed": True})
+    _cap(monkeypatch, 20_000)
+    rendered = _digest._render_digest_prompt(user.id)
+    assert rendered.cut and rendered.counted == "estimate"
+    real = (len(_DensestMeasured().encode(rendered.prompt))
+            + _digest.MESSAGE_FRAMING_TOKENS)
+    assert real <= 20_000
 
 
 def test_more_than_1500_items_are_listed_while_they_fit_the_cap(app):

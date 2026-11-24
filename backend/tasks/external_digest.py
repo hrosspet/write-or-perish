@@ -98,10 +98,12 @@ ITEM_SNIPPET_CHARS = 280
 # counts it for OpenAI.
 MESSAGE_FRAMING_TOKENS = 4
 # Heuristic: o200k tokens per character when the encoding cannot be
-# loaded in this process (tokens._o200k_encoding; it then never retries):
-# the densest text measured, Japanese, is 3.10 tokens per 4 characters
-# (0.775 a character), rounded up, so the estimate errs short.
-ESTIMATED_TOKENS_PER_CHAR = 0.8
+# loaded in this process (tokens._o200k_encoding; it then never retries).
+# Dense Japanese and Chinese lists measured 0.90 to 1.14 o200k tokens a
+# character (review of #802, 2026-11-24): at 0.8, a list filled to
+# 258,345 estimated tokens was 282,169 real ones, above Sol's 272,000
+# step. 1.2 is above the densest measured, so the estimate errs short.
+ESTIMATED_TOKENS_PER_CHAR = 1.2
 # Rows fetched from the database per round trip while the list is
 # rendered. The list is read newest-saved first and only until the cap
 # is reached, never loaded whole: a list of tens of thousands of saved
