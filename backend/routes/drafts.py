@@ -144,9 +144,33 @@ def _no_session_in_progress_clause():
 
 
 def _older_than_entry(draft, node):
-    """The edit draft was last saved before its entry changed (#761)."""
+    """The edit draft was written on an older version of its entry.
+
+    A draft that knows the entry's text its form was opened on
+    (Draft.base_content): when that is no longer the entry's text. This
+    holds also when the form kept typing after the entry changed elsewhere,
+    and after an edit Save was refused for a newer version: reopened, the
+    form shows the entry as it is now and offers the draft instead of
+    loading it, so its Save can't put the older text back. A draft saved
+    by a client that doesn't send the base: when it was last saved before
+    the entry changed (#761; any change to the entry counts)."""
+    base = draft.get_base_content()
+    if base is not None:
+        return base != (node.get_content() or "")
     return bool(draft.updated_at and node.updated_at
                 and draft.updated_at < node.updated_at)
+
+
+def _other_writing(draft, node, base):
+    """Whether typing an edit form sends with *base* (the entry's text the
+    form was opened on; None from a client that doesn't send it) belongs
+    in a row of its own rather than in *draft*, the newest edit draft.
+    With both bases known: when they differ (one of the two was written on
+    an older version). Otherwise: when *draft* is older than the entry."""
+    stored = draft.get_base_content()
+    if base is not None and stored is not None:
+        return stored != base
+    return _older_than_entry(draft, node)
 
 
 def _edit_drafts(node_id):
@@ -471,6 +495,11 @@ def save_draft():
     content = data.get("content", "")
     node_id = data.get("node_id")
     parent_id = data.get("parent_id")
+    # An edit form's base: the entry's text it was opened on (see
+    # Draft.base_content). Only for edits; anything but text is ignored.
+    base = data.get("base_content") if node_id else None
+    if not isinstance(base, str):
+        base = None
 
     # Validate node_id if provided - user must own the node OR be LLM
     # requester (parent node owner); any other node answers 404.
@@ -501,13 +530,15 @@ def save_draft():
     draft = _input_drafts(node_id, parent_id).filter(
         _no_session_in_progress_clause()).first()
 
-    if draft and node_id and _older_than_entry(draft, node):
-        # The entry changed after this edit draft was saved (#761), and the
-        # person now types in the entry's newer text. That typing gets a row
-        # of its own and the older edit is kept until they use or discard it
-        # (#766 review: neither text is thrown away without their say).
-        # At most one older edit is kept: this one, the most recent. Any
-        # earlier kept row was on offer while this one was typed.
+    if draft and node_id and _other_writing(draft, node, base):
+        # The newest edit draft was written on another text of the entry
+        # than this form's: an older version (#761: the entry changed
+        # after it was saved; or its base is no longer the entry's text),
+        # or this form is the one on the older text. This typing gets a row
+        # of its own and the other is kept until the person uses or
+        # discards it (#766 review: neither text is thrown away without
+        # their say). At most one other is kept: this one, the most recent.
+        # Any earlier kept row was on offer while this one was typed.
         for earlier in _edit_drafts(node_id).filter(Draft.id != draft.id):
             db.session.delete(earlier)
         draft = None
@@ -515,6 +546,10 @@ def save_draft():
     if draft:
         # Update existing draft
         draft.set_content(content)
+        if base is not None and draft.get_base_content() is None:
+            # A row saved before its form sent a base: the form that loaded
+            # it as current says what it is written on.
+            draft.set_base_content(base)
     else:
         # Create new draft
         draft = Draft(
@@ -523,6 +558,7 @@ def save_draft():
             parent_id=parent_id
         )
         draft.set_content(content)
+        draft.set_base_content(base)
         db.session.add(draft)
 
     db.session.commit()

@@ -45,6 +45,9 @@ from sqlalchemy import and_, or_
 
 from backend.extensions import db
 from backend.models import Draft, Node, UserArtifact
+from backend.utils.artifact_copies import (
+    HELD_STAMP_KEY, ArtifactCopies, edit_stamp,
+)
 
 TOOL_PENDING_LABEL = "tool_pending"
 # A call one request has claimed to decide (claim): no other request
@@ -99,12 +102,15 @@ class ApprovalHold:
         return bool(self.kinds)
 
     def hold(self, name, inp, node, user_id, previous_artifact_id=None,
-             proposal_draft_id=None, kind=None):
+             proposal_draft_id=None, kind=None, stamped=False,
+             base_edited_at=None):
         """Keep the call *name*(*inp*) of *node* for approval. Returns the
-        fields its tool_calls_meta entry takes."""
-        draft = Draft(user_id=user_id, parent_id=node.id,
-                      label=TOOL_PENDING_LABEL)
-        draft.set_content(json.dumps({
+        fields its tool_calls_meta entry takes. With *stamped*,
+        *base_edited_at* is the edit stamp of the version an
+        update_artifact call is based on, as the model read it
+        (utils/artifact_copies; None: never edited in place); approving
+        it saves nothing once that version was edited in place."""
+        payload = {
             "tool": name,
             "input": inp,
             "turn_node_id": self.turn_node_id,
@@ -112,7 +118,12 @@ class ApprovalHold:
             "previous_artifact_id": previous_artifact_id,
             "proposal_draft_id": proposal_draft_id,
             "kind": kind,
-        }))
+        }
+        if stamped:
+            payload[HELD_STAMP_KEY] = base_edited_at
+        draft = Draft(user_id=user_id, parent_id=node.id,
+                      label=TOOL_PENDING_LABEL)
+        draft.set_content(json.dumps(payload))
         db.session.add(draft)
         db.session.flush()
         fields = {"status": PENDING_STATUS, "pending_id": draft.id}
@@ -204,9 +215,12 @@ def _artifact_preview(payload, user_id):
         "current_version": version_number(latest) if latest else None,
         # The artifact changed since the call was made: approving it
         # saves nothing (the write's version check, which also keeps the
-        # title and description below as shown).
+        # title and description below as shown). A tick in place keeps the
+        # version: its edit stamp tells (utils/artifact_copies).
         "stale": ((latest.id if latest else None)
-                  != payload.get("previous_artifact_id")),
+                  != payload.get("previous_artifact_id")
+                  or (latest is not None and HELD_STAMP_KEY in payload
+                      and edit_stamp(latest) != payload[HELD_STAMP_KEY])),
     }
     # The write also sets the title and description the call names
     # (llm_completion._execute_tool_calls): shown when they change.
@@ -524,7 +538,8 @@ def decide(draft, user_id, approve):
             "client")
         result = _execute_tool_calls(
             [{"name": name, "input": inp}], node, _chain_above(node),
-            user_id, client=client)[0]
+            user_id, client=client,
+            copies=ArtifactCopies.from_hold(payload))[0]
         if result.get("status") != "success":
             return "failed", result
         outcome = "approved"

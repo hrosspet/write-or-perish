@@ -183,7 +183,19 @@ def artifact_viewed(kind):
 @artifacts_bp.route("/<kind>", methods=["PUT"])
 @login_required
 def update_artifact(kind):
-    """Create a new version of an artifact (creates the kind if new)."""
+    """Create a new version of an artifact (creates the kind if new).
+
+    ``base_content`` (optional): the text the edit form was opened on
+    ("" for an artifact with no version yet). When the latest version's
+    text is no longer that (a tick in place from another tab, a version
+    the AI wrote, a Save elsewhere), nothing is saved and the answer is
+    409 ``content_changed``; the form keeps the person's text and says
+    there is a newer version. A Save whose text is the one it was opened
+    on (only the description changed) saves the latest text with it.
+    Without it the content is saved as before (installed iPhone builds,
+    tabs opened before the change)."""
+    from backend.utils.content_base import (
+        base_content_of, content_changed_response)
     if not _KIND_RE.match(kind):
         return jsonify({"error": (
             "Invalid kind: use a short lowercase slug "
@@ -197,8 +209,27 @@ def update_artifact(kind):
     content = data.get("content")
     if content is None:
         return jsonify({"error": "Content is required"}), 400
+    base_content, bad_base = base_content_of(data)
+    if bad_base is not None:
+        return bad_base
 
     previous = UserArtifact.latest_for(current_user.id, kind)
+    if base_content is not None:
+        # Locked, then checked, as a tick (patch_artifact): a version added
+        # between the first read and the lock is caught by asking again.
+        if previous is not None:
+            previous = UserArtifact.query.filter_by(id=previous.id) \
+                .populate_existing().with_for_update().one()
+            newest = UserArtifact.latest_for(current_user.id, kind)
+            if newest is None or newest.id != previous.id:
+                db.session.rollback()
+                return content_changed_response()
+        stored = (previous.get_content() or "") if previous else ""
+        if content == base_content:
+            content = stored
+        elif stored != base_content:
+            db.session.rollback()
+            return content_changed_response()
     title = (data.get("title") or "").strip()
     if not title:
         title = (previous.title if previous

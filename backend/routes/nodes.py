@@ -1033,10 +1033,13 @@ def update_node(node_id):
     if new_content is None:
         return jsonify({"error": "Content required for update"}), 400
 
-    # A checklist tick or row "+" names the text the page showed (#795):
-    # saved only while that is still the entry's text, so a page left open
-    # never puts its older text over a newer edit. The row is locked first,
-    # so two such saves from two tabs can't both pass the check.
+    # A checklist tick or row "+" (#795) and the edit form's Save name the
+    # text the page or the form was opened on: saved only while that is
+    # still the entry's text, so a page left open never puts its older
+    # text over a newer edit. The row is locked first, so two such saves
+    # from two tabs can't both pass the check. A Save whose text is the
+    # one it was opened on (only privacy or AI usage changed) has no text
+    # of its own to save: the entry keeps its text, whatever it is now.
     from backend.utils.content_base import (
         base_content_of, content_changed_response)
     base_content, bad_base = base_content_of(data)
@@ -1045,7 +1048,10 @@ def update_node(node_id):
     if base_content is not None:
         node = Node.query.filter_by(id=node.id).populate_existing() \
             .with_for_update().one()
-        if node.get_content() != base_content:
+        stored = node.get_content()
+        if new_content == base_content:
+            new_content = stored if stored is not None else new_content
+        elif stored != base_content:
             db.session.rollback()
             return content_changed_response()
 
