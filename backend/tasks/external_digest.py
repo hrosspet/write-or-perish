@@ -345,10 +345,15 @@ def _render_digest_prompt(user_id):
                     len(lines), used, cut, counted)
 
 
+def _sentry():
+    """The Sentry SDK (one place, so tests replace it here only)."""
+    import sentry_sdk
+    return sentry_sdk
+
+
 def _sentry_active():
     try:
-        import sentry_sdk
-        return sentry_sdk.get_client().is_active()
+        return _sentry().get_client().is_active()
     except Exception:  # noqa: BLE001 — no Sentry, no report
         return False
 
@@ -364,7 +369,7 @@ def _report_cut(user_id, rendered, cap):
                    rendered.tokens, cap, rendered.listed,
                    rendered.total - rendered.listed)
     try:
-        import sentry_sdk
+        sentry_sdk = _sentry()
         with sentry_sdk.new_scope() as scope:
             scope.fingerprint = list(CUT_EVENT_FINGERPRINT)
             scope.set_extra("user_id", user_id)

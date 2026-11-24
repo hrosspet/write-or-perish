@@ -416,9 +416,8 @@ def test_the_list_is_ordered_by_when_it_was_saved(app, monkeypatch):
 
 @pytest.fixture
 def sentry(monkeypatch):
-    """Sentry set up, its events recorded: (message, level, fingerprint,
-    extras) each."""
-    import sentry_sdk
+    """Sentry set up for the digest module only (its _sentry), its events
+    recorded as (message, level); the last scope in state["scope"]."""
     events = []
     state = {"active": True}
 
@@ -432,10 +431,11 @@ def sentry(monkeypatch):
     def capture_message(message, level=None):
         events.append((message, level))
 
-    monkeypatch.setattr(sentry_sdk, "get_client", lambda: SimpleNamespace(
-        is_active=lambda: state["active"]))
-    monkeypatch.setattr(sentry_sdk, "new_scope", new_scope)
-    monkeypatch.setattr(sentry_sdk, "capture_message", capture_message)
+    fake = SimpleNamespace(
+        get_client=lambda: SimpleNamespace(
+            is_active=lambda: state["active"]),
+        new_scope=new_scope, capture_message=capture_message)
+    monkeypatch.setattr(_digest, "_sentry", lambda: fake)
 
     class Recorder:
         def __init__(self):
