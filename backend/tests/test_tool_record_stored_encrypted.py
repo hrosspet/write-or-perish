@@ -346,6 +346,72 @@ def test_checks_for_a_marker_or_a_tools_entry_decrypt_nothing(app, keys):
     assert (keys.wraps, keys.unwraps) == (0, 0)
 
 
+SAVED_SHARE = {"name": "propose_share", "apply_status": "completed",
+               "share_id": 3, "share_ids": [3], "saved_indexes": [0]}
+
+
+def _entry_node(user, record, privacy="public"):
+    node = Node(user_id=user.id, human_owner_id=user.id, node_type="user",
+                privacy_level=privacy)
+    node.set_content(":::share need\nA reading partner.\n:::")
+    node.tool_calls_meta = record
+    db.session.add(node)
+    db.session.commit()
+    return node
+
+
+def test_saved_share_state_is_kept_out_of_the_names_beside_the_record(
+        app, keys):
+    """An entry's saved-share state is returned to its owner only: the
+    names stored beside the record leave out an owner-only entry, another
+    reader's answer leaves it out with no decryption, the owner gets it."""
+    from backend.utils.tool_meta import tool_calls_meta_for
+    from backend.utils.tool_record import OWNER_ONLY_KEY, entry_names
+    owner, other = _user(), _user("bo")
+    saved = dict(SAVED_SHARE, **{OWNER_ONLY_KEY: True})
+    node = _entry_node(owner, json.dumps([saved]))
+    reply = _reply(owner, privacy="public", record=json.dumps(
+        [{"name": "_mode", "source_mode": "voice"}, saved]))
+    assert json.loads(_stored(node.id))["shown"] == []
+    assert json.loads(_stored(reply.id))["shown"] == [{"name": "_mode"}]
+    db.session.expire_all()
+    keys.forget()
+    node, reply = Node.query.get(node.id), Node.query.get(reply.id)
+    for viewer in (other.id, None):
+        assert tool_calls_meta_for(node, viewer) == []
+        assert tool_calls_meta_for(reply, viewer) == [{"name": "_mode"}]
+    assert "propose_share" not in entry_names(node)
+    assert (keys.wraps, keys.unwraps) == (0, 0)
+    assert tool_calls_meta_for(node, owner.id) == [saved]
+    assert tool_calls_meta_for(reply, owner.id)[1] == saved
+
+
+def test_saved_share_state_without_the_mark_on_an_entry_is_the_owners(
+        app, keys):
+    """A save before the owner-only mark left the state on the entry with
+    its name beside the record: another reader still does not get it,
+    and nothing is decrypted for them."""
+    from backend.utils.tool_meta import tool_calls_meta_for
+    owner, other = _user(), _user("bo")
+    node = _entry_node(owner, json.dumps([SAVED_SHARE]))
+    db.session.expire_all()
+    keys.forget()
+    node = Node.query.get(node.id)
+    assert tool_calls_meta_for(node, other.id) == []
+    assert (keys.wraps, keys.unwraps) == (0, 0)
+    assert tool_calls_meta_for(node, owner.id) == [SAVED_SHARE]
+
+
+def test_an_ai_proposals_own_entry_still_reaches_other_readers(app, keys):
+    from backend.utils.tool_meta import tool_calls_meta_for
+    owner, other = _user(), _user("bo")
+    reply = _reply(owner, privacy="public", record=json.dumps([
+        {"name": "propose_share", "status": "success",
+         "apply_status": "partial", "saved_indexes": [1]}]))
+    assert tool_calls_meta_for(reply, other.id) == [
+        {"name": "propose_share", "status": "success"}]
+
+
 def test_a_selected_column_reads_with_the_modules_reader(app):
     from backend.utils import tool_record
     user = _user()

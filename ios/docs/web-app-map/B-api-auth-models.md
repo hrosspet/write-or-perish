@@ -2088,7 +2088,8 @@ Share JSON (`_serialize`):
 - Called from: components/ProposalInline.js (the Save button on each `:::share` block in a node)
 - Request: `{ "node_id": int /* or "llm_node_id" */, "share_index"?: int /* 0-based block index; omit to save all unsaved blocks */ }`
 - Response 200: `{ "status": "completed" | "partial", "share": Share /* first saved by this call */, "shares": [Share], "saved_indexes": [int], "total": int }`
-- Errors: 400 `node_id is required` / `Invalid share_index` / `Already saved` / parse error text; 404 `Node not found` / `Origin node not found` / `No pending share found`.
+- Saves the blocks of the node sent, from its current text, for its owner only (the entry's author, or the user an AI reply was written for); no pending proposal needed (A.142).
+- Errors: 400 `node_id is required` / `Invalid share_index` / `Already saved` / parse error text; 404 `Node not found` (missing, deleted, not visible, or not the user's own) / `Not found` (sharing disabled).
 
 ##### `GET /api/share/public/<username>` (no auth)
 - Backend: routes/share.py:public_shares

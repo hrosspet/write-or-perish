@@ -17,7 +17,8 @@ Stored form, a JSON object:
 - ``sealed`` is the whole record (the JSON text the code wrote), encrypted.
   Reading gives that text back unchanged.
 - ``shown`` repeats, per entry, the two fields anyone who can see the
-  reply gets (utils/tool_meta.SHARED_TOOL_FIELDS: name and status). SQL
+  reply gets (utils/tool_meta.SHARED_TOOL_FIELDS: name and status),
+  except for entries marked ``OWNER_ONLY_KEY``, which it leaves out. SQL
   filters on entry names (``LIKE '%"_batch"%'`` and the like) keep
   matching the stored value, and a reader that needs names only
   (``shown_entries``) does not decrypt. ``exact`` says that ``shown`` is
@@ -55,6 +56,12 @@ FORMAT_VERSION = 1
 # encrypted part only.
 SHOWN_NAME_MAX = 64
 SHOWN_STATUS_MAX = 32
+
+# An entry with this key set to true is for the node's owner only (the
+# saved-share state Save to shares writes, utils/share): it is not
+# repeated in ``shown``, so ``shown_entries`` and ``entry_names`` leave
+# it out, and tool_meta.tool_calls_meta_for gives it to the owner only.
+OWNER_ONLY_KEY = "owner_only"
 
 
 def _stored_object(stored):
@@ -117,7 +124,8 @@ def read(stored):
 def _shown(text):
     """(each dict entry's name and status where they are short words, in
     order; whether that is every dict entry's name and status as they
-    are)."""
+    are). An entry marked OWNER_ONLY_KEY is left out: only the node's
+    owner gets it (tool_meta.tool_calls_meta_for)."""
     try:
         meta = json.loads(text)
     except (TypeError, ValueError):
@@ -126,7 +134,7 @@ def _shown(text):
         return [], False
     shown, exact = [], True
     for entry in meta:
-        if not isinstance(entry, dict):
+        if not isinstance(entry, dict) or entry.get(OWNER_ONLY_KEY) is True:
             continue
         out = {}
         for field, longest in (("name", SHOWN_NAME_MAX),
@@ -157,7 +165,8 @@ def entry_names(node):
     """The names of the entries of *node*'s record, without decrypting:
     for the checks that ask whether a reply carries a marker or a tool's
     entry, which run over whole threads where no text is read. *node*
-    is a Node, or a row of a query that selected the column."""
+    is a Node, or a row of a query that selected the column. Entries
+    marked OWNER_ONLY_KEY are not among them."""
     stored = getattr(node, "tool_calls_meta_stored", None)
     if not isinstance(stored, str):
         stored = getattr(node, "tool_calls_meta", None)
