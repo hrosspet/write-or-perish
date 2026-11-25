@@ -97,6 +97,22 @@ def is_valid_timezone(tz_name: Optional[str]) -> bool:
         return False
 
 
+def user_local_time(user, now=None) -> datetime:
+    """The time on *user*'s own clock right now, as an aware datetime
+    (``now``: an aware datetime, or a naive one in UTC). Falls back to
+    UTC for a missing or unrecognized zone."""
+    tz_name = (getattr(user, "timezone", None) or "UTC").strip() or "UTC"
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    if tz_name != "UTC" and ZoneInfo is not None:
+        try:
+            return now.astimezone(ZoneInfo(tz_name))
+        except (ZoneInfoNotFoundError, ValueError, KeyError):
+            pass
+    return now.astimezone(timezone.utc)
+
+
 def user_local_hour(user, now=None) -> int:
     """The hour (0-23) on *user*'s own clock right now.
 
@@ -104,16 +120,7 @@ def user_local_hour(user, now=None) -> int:
     own night, wherever they are (``User.timezone`` is the browser-captured
     IANA name). Falls back to UTC for a missing or unrecognized zone.
     """
-    tz_name = (getattr(user, "timezone", None) or "UTC").strip() or "UTC"
-    now = now or datetime.now(timezone.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=timezone.utc)
-    if tz_name != "UTC" and ZoneInfo is not None:
-        try:
-            return now.astimezone(ZoneInfo(tz_name)).hour
-        except (ZoneInfoNotFoundError, ValueError, KeyError):
-            pass
-    return now.astimezone(timezone.utc).hour
+    return user_local_time(user, now).hour
 
 
 # Matches the local_stamp format (and the [unknown time] fallback) at a

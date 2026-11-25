@@ -506,7 +506,7 @@ def _convert_messages_for_anthropic(messages):
     return system_param, anthropic_messages
 
 
-def batch_submit(requests_by_provider, api_keys, phase=None):
+def batch_submit(requests_by_provider, api_keys, phase=None, tag=None):
     """Submit batch requests grouped by provider.
 
     requests_by_provider: dict mapping provider -> list of
@@ -526,6 +526,13 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     (utils/soft_limit; the SDK does not send the request again), with the
     batches created before it as its ``submitted`` (a SubmittedBatches),
     so a caller can record those before it stops.
+
+    ``tag``, for a call with one request: a name to find the batch by
+    again when the answer to its create is lost (``listed_since``): an
+    OpenAI batch carries it in its metadata (BATCH_TAG_KEY) and its
+    uploaded input file is named ``tagged_upload_name(tag)``. An
+    Anthropic batch has no metadata: the caller puts the tag in the
+    request's custom_id. Without a tag, nothing changes.
     """
     import anthropic as anthropic_sdk
     import openai as openai_sdk
@@ -662,8 +669,10 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                                       + "\n")
 
                     with open(tmp_path, "rb") as f:
-                        uploaded = client.files.create(file=f,
-                                                       purpose="batch")
+                        uploaded = client.files.create(
+                            file=((tagged_upload_name(tag), f) if tag
+                                  else f),
+                            purpose="batch")
                     unused_upload = uploaded.id
                     os.unlink(tmp_path)
                     tmp_path = None
@@ -672,6 +681,8 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                         input_file_id=uploaded.id,
                         endpoint=endpoint,
                         completion_window="24h",
+                        **({"metadata": {BATCH_TAG_KEY: tag}} if tag
+                           else {}),
                     )
                     unused_upload = None
                 key = openai_batch_key(oai_model, endpoint)
@@ -847,6 +858,82 @@ def list_batches(wanted, api_keys, oldest=None):
                  f"{len(wanted_ids)} pending; {len(remaining)} not in the "
                  f"listing")
     return found
+
+
+# ── Finding a batch whose create was not answered (2026-11-25) ──────────
+# A caller that records a job before its create (the external digest's
+# "submitting" job) and loses the answer (the task's soft time limit, a
+# worker killed while it waited) finds an OpenAI batch again by the tag it
+# sent with it (``batch_submit(tag=...)``): the batch by its metadata, an
+# upload that no batch followed by its file name. An Anthropic batch has
+# no metadata to find it by.
+BATCH_TAG_KEY = "loore_tag"
+
+
+def tagged_upload_name(tag):
+    """The name of the input file uploaded for a tagged OpenAI batch."""
+    return f"{tag}.jsonl"
+
+
+def _created_before(item, oldest):
+    created = _created_utc(item)
+    return created is not None and created < oldest - LIST_STOP_SLACK
+
+
+def listed_since(family, api_keys, oldest):
+    """The batches of *family* ("anthropic" or "openai") the provider
+    lists, created since *oldest* (naive UTC) less LIST_STOP_SLACK: paged
+    until the pages run out, LIST_MAX_PAGES, or, while the batches come
+    newest first, a page past that time. Raises when the listing
+    fails."""
+    found, calls, previous, newest_first = [], 0, None, True
+    for data in _list_pages(family, api_keys):
+        calls += 1
+        for batch in data:
+            created = _created_utc(batch)
+            if created is not None:
+                if previous is not None and created > previous:
+                    newest_first = False
+                previous = created
+            if not _created_before(batch, oldest):
+                found.append(batch)
+        if calls >= LIST_MAX_PAGES or (
+                newest_first and previous is not None
+                and previous < oldest - LIST_STOP_SLACK):
+            break
+    return found
+
+
+def openai_uploads_since(api_keys, oldest):
+    """The input files (purpose "batch") uploaded to OpenAI since *oldest*
+    (naive UTC) less LIST_STOP_SLACK, newest first, at most LIST_MAX_PAGES
+    pages. Raises when the listing fails."""
+    from openai import OpenAI
+    client = OpenAI(api_key=api_keys["openai"])
+    found, after = [], None
+    for _ in range(LIST_MAX_PAGES):
+        page = client.files.list(purpose="batch", order="desc",
+                                 **({"after": after} if after else {}))
+        data = list(getattr(page, "data", None) or [])
+        found.extend(f for f in data if not _created_before(f, oldest))
+        if (not data or not getattr(page, "has_more", False)
+                or _created_before(data[-1], oldest)):
+            break
+        after = data[-1].id
+    return found
+
+
+def delete_openai_uploads(api_key, file_ids):
+    """Delete uploaded input files no batch was created from. Never raises
+    but the soft limit; returns how many are gone."""
+    try:
+        from openai import OpenAI
+        return delete_openai_files(OpenAI(api_key=api_key), file_ids)
+    except Exception as e:  # noqa: BLE001 - left for the next pass
+        soft_limit.reraise(e)
+        log.warning("Deleting OpenAI uploads failed (%s); left",
+                    type(e).__name__)
+        return 0
 
 
 def retrieve_batch(key, batch_id, api_keys):
