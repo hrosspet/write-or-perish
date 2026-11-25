@@ -11,9 +11,9 @@ at a time").
   a key-service outage or another error loses only the account being
   prepared, which stays due.
 - The job row is committed before the create: a create whose answer is
-  lost sends the account once that night, and the collector finds its
-  batch (OpenAI by metadata, an upload alone by its name, Anthropic by
-  the custom_id in its results), adopts it or gives the job up.
+  lost sends the account once that night. Once settled, the collector
+  finds an OpenAI batch by its metadata (adopted) or an upload alone by
+  its name (deleted); an Anthropic job is given up without a lookup.
 - Once a provider refuses a submission (its account, a full queue or a
   rate limit), its other accounts in the run are not read.
 - An account due at 4:00 and not reached is taken at 5 or 6 o'clock the
@@ -247,17 +247,17 @@ def _settle(monkeypatch):
     monkeypatch.setattr(_digest, "SUBMITTING_SETTLED_AFTER", timedelta(0))
 
 
-def test_a_create_stopped_while_it_waits_sends_the_account_once_and_its_batch_is_collected(  # noqa: E501
+def test_an_anthropic_create_stopped_while_it_waits_is_given_up_after_the_age(  # noqa: E501
         app, monkeypatch):
     """The soft limit strikes while Anthropic's create is under way, after
-    the request reached it: the account's job row was committed before
-    the create, so the 5 o'clock run does not send it again. Once the
-    run can no longer be alive, the collector finds the batch by the
-    request's custom_id in its results (Anthropic batches carry no
-    metadata), adopts it, registers it for deletion (#693), saves the
-    digest and deletes the batch. Through the real batch_submit."""
-    from backend.models import AnthropicBatchDeletion, UserArtifact
-    from backend.tests import anthropic_batch_fake as fake
+    the request reached it (the batch exists there; its id never
+    arrived). The account's job row was committed before the create, so
+    the 5 o'clock run does not send it again. Once no run that wrote the
+    row can be alive (SUBMITTING_SETTLED_AFTER), the collector gives it
+    up without reading anything at Anthropic (Needs Peter on #806): the
+    account is due on its next night, not the same night. Through the
+    real batch_submit."""
+    from backend.models import AnthropicBatchDeletion
     now = datetime.utcnow()
     (user,) = _accounts(1)
     batches = _anthropic_answer_lost(monkeypatch)
@@ -268,63 +268,28 @@ def test_a_create_stopped_while_it_waits_sends_the_account_once_and_its_batch_is
     assert (job.status, job.batch_id) == (_digest.SUBMITTING, "")
     (custom_id,) = batches.calls_of("create")[0]
     assert job.items[0]["custom_id"] == custom_id
-    assert AnthropicBatchDeletion.query.count() == 0
 
-    # (a) Not sent again that night; nothing done while a run may live.
+    # Not sent again that night; nothing done while a run may live.
     assert _digest._sweep(now + HOUR) == {"status": "ok", "submitted": 0}
     assert _digest._collect_digest_batches() == {"collected": 0,
                                                  "abandoned": 0}
-    assert len(batches.calls_of("create")) == 1
-    assert batches.calls_of("list") == []
-
-    # (b) Settled, still running: it waits, unread.
-    _settle(monkeypatch)
-    batch_id = next(iter(batches.created))
-    _digest._collect_digest_batches()
     _db.session.expire_all()
     assert ExternalDigestBatchJob.query.one().status == _digest.SUBMITTING
-    assert batches.calls_of("results") == []
 
-    # Ended: found by its custom_id, adopted, collected, deleted.
-    batches.batches[batch_id] = "ended"
-    batches.results_by_batch[batch_id] = [
-        fake.succeeded(custom_id, "# Topics\n- found again")]
-    assert _digest._collect_digest_batches() == {"collected": 1,
-                                                 "abandoned": 0}
-    _db.session.expire_all()
-    job = ExternalDigestBatchJob.query.one()
-    assert (job.status, job.batch_id) == ("collected", batch_id)
-    assert AnthropicBatchDeletion.query.filter_by(
-        batch_id=batch_id).one().source == "external_digest_batch_job"
-    assert UserArtifact.latest_for(
-        user.id, _digest.DIGEST_KIND).get_content() == "# Topics\n- found again"
-    assert batch_id in batches.calls_of("delete")
-
-
-def test_a_create_that_never_reached_anthropic_is_given_up(
-        app, monkeypatch):
-    """Nothing at the provider: once settled, the job is given up and the
-    account is due again on its next night, not before."""
-    now = datetime.utcnow()
-    (user,) = _accounts(1)
-    batches = _anthropic_answer_lost(monkeypatch, reaches=False)
-    # A one-request batch this database has not registered, ended, for
-    # the same account id without this request's token (another Loore
-    # instance under the same provider account): read, not adopted.
-    from backend.tests import anthropic_batch_fake as fake
-    batches.add("msgbatch_other", status="ended",
-                results=[fake.succeeded(f"external-digest-{user.id}")])
-    batches.created["msgbatch_other"] = now
-
-    with pytest.raises(SoftTimeLimitExceeded):
-        _digest._sweep(now)
+    # Settled: given up, with no list and no results read at Anthropic.
     _settle(monkeypatch)
     assert _digest._collect_digest_batches() == {"collected": 0,
                                                  "abandoned": 0}
     _db.session.expire_all()
     job = ExternalDigestBatchJob.query.one()
     assert (job.status, job.batch_id) == ("abandoned", "")
-    assert _digest._sweep(now + HOUR)["submitted"] == 0
+    assert batches.calls_of("list") == batches.calls_of("results") == []
+    assert AnthropicBatchDeletion.query.count() == 0
+    assert len(batches.calls_of("create")) == 1
+
+    # Not the same night (6 o'clock); the next night at 4.
+    assert user.id not in [u.id for u in _digest._due_accounts(
+        now + 2 * HOUR)]
     assert user.id in [u.id for u in _digest._due_accounts(
         now + 24 * HOUR)]
 
@@ -406,7 +371,18 @@ def test_an_openai_create_stopped_while_it_waits_is_found_or_cleaned_up(
                                               "openai:gpt-6.2-sol")
     assert state.creates == [{"loore_tag": custom_id}]
     assert [u.filename for u in state.uploads] == [f"{custom_id}.jsonl"]
+    (own_upload,) = state.uploads
     assert _digest._sweep(now + HOUR) == {"status": "ok", "submitted": 0}
+    # Another Loore instance under the same OpenAI account, same account
+    # id, without this request's token: neither adopted nor deleted.
+    import time
+    other_tag = f"external-digest-{user.id}"
+    state.batches.append(SimpleNamespace(
+        id="batch_other", metadata={"loore_tag": other_tag},
+        status="validating", created_at=int(time.time())))
+    state.uploads.append(SimpleNamespace(
+        id="file-other", filename=f"{other_tag}.jsonl", purpose="batch",
+        created_at=int(time.time())))
 
     _settle(monkeypatch)
     monkeypatch.setattr(_digest, "batch_check_and_collect",
@@ -419,7 +395,7 @@ def test_an_openai_create_stopped_while_it_waits_is_found_or_cleaned_up(
         assert state.deleted == []   # the batch's own: deleted at collect
     else:
         assert (job.status, job.batch_id) == ("abandoned", "")
-        assert state.deleted == ["file-0"]
+        assert state.deleted == [own_upload.id]
     assert len(state.creates) == 1
 
 

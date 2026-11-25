@@ -42,8 +42,8 @@ from backend.celery_app import celery, flask_app
 from backend.config import Config
 from backend.extensions import db
 from backend.models import (
-    AnthropicBatchDeletion, APICostLog, BYLINE_SOURCES,
-    ExternalDigestBatchJob, ExternalItem, User, UserArtifact,
+    APICostLog, BYLINE_SOURCES, ExternalDigestBatchJob, ExternalItem, User,
+    UserArtifact,
 )
 from backend.llm_providers import (
     LLMProvider, ProviderAccountError, is_refused, policy_block_code)
@@ -58,11 +58,10 @@ from backend.utils.privacy import account_allows_ai
 from backend.utils.profile_providers import agreed_to_both, profile_provider
 from backend.utils.approval import background_work_allowed, not_active
 from backend.utils.llm_batch import (
-    BATCH_JOB_MAX_AGE, BATCH_TAG_KEY, anthropic_custom_ids,
-    apply_batch_key_override, batch_check_and_collect, batch_ended,
-    batch_submit, blocked_items, delete_openai_uploads, drop_openai_batch,
-    list_batches, listed_since, openai_batch_key, openai_uploads_since,
-    request_total, tagged_upload_name,
+    BATCH_JOB_MAX_AGE, BATCH_TAG_KEY, apply_batch_key_override,
+    batch_check_and_collect, batch_ended, batch_submit, blocked_items,
+    delete_openai_uploads, drop_openai_batch, list_batches, listed_since,
+    openai_batch_key, openai_uploads_since, tagged_upload_name,
 )
 from backend.utils import anthropic_batch_deletion
 from backend.utils.timefmt import user_local_time
@@ -553,11 +552,13 @@ SUBMITTING = "submitting"
 # Heuristic (2026-11-25): a SUBMITTING row this old was left by a run
 # that can no longer be alive (the task's hard time limit is one hour),
 # so its create has either reached the provider or not: from then on the
-# collector looks for the batch (_resolve_submitting).
+# collector settles it (_resolve_submitting).
 SUBMITTING_SETTLED_AFTER = timedelta(hours=1)
-# The random part of a request's custom_id (_custom_id): 4 bytes, 8 hex
-# characters, against another night's batch of the same account and
-# another Loore instance's under the same provider account.
+# The random part of a request's custom_id (_custom_id), which an OpenAI
+# batch carries as its tag: 4 bytes, 8 hex characters, so the lookup of
+# a batch whose create was not answered matches no other night's batch
+# of the same account and none another Loore instance sent under the
+# same provider account (nor deletes another instance's upload).
 CUSTOM_ID_TOKEN_BYTES = 4
 
 
@@ -796,9 +797,9 @@ def _submit_one(provider, request, meta, keys):
     or failed, logged by batch_submit) removes it, and the account stays
     due. When the create raises (the task's soft time limit, a killed
     worker), whether it reached the provider is not known: the row stays
-    SUBMITTING and the collector finds its batch, or gives it up
-    (``_resolve_submitting``). A soft limit is raised after a batch it
-    reports as created is recorded."""
+    SUBMITTING and the collector settles it (``_resolve_submitting``).
+    A soft limit is raised after a batch it reports as created is
+    recorded."""
     key = (provider if provider == "anthropic"
            else openai_batch_key(request["api_model"]))
     job = ExternalDigestBatchJob(provider_key=key, batch_id="",
@@ -962,37 +963,14 @@ def _resolve_openai(jobs, keys, now):
 
 
 def _resolve_anthropic(jobs, keys, now):
-    """An Anthropic batch has no metadata: a one-request batch this
-    database has not registered (#693 registers every batch Loore
-    records) is read once it has ended, and the one whose request
-    carries the job's tag as its custom_id is adopted. While such a
-    batch is still running the job waits; with none, or after
-    BATCH_JOB_MAX_AGE (the provider ends every batch within 24 h), it is
-    given up."""
-    oldest = min(job.submitted_at for job in jobs)
-    by_tag = {_tag(job): job for job in jobs}
-    listed = [batch for batch in listed_since("anthropic", keys, oldest)
-              if request_total(batch) == 1]
-    known = {batch_id for (batch_id,) in db.session.query(
-        AnthropicBatchDeletion.batch_id).filter(
-        AnthropicBatchDeletion.batch_id.in_([b.id for b in listed]))} \
-        if listed else set()
-    found, running = {}, False
-    for batch in listed:
-        if batch.id in known:
-            continue
-        if getattr(batch, "processing_status", None) != "ended":
-            running = True
-            continue
-        for tag in anthropic_custom_ids(keys, batch.id) & set(by_tag):
-            found[tag] = batch.id
-        if len(found) == len(by_tag):
-            break
-    for tag, job in by_tag.items():
-        if tag in found:
-            _adopt(job, "anthropic", found[tag])
-        elif not running or now - job.submitted_at > BATCH_JOB_MAX_AGE:
-            _give_up(job, now, "no batch at the provider")
+    """An Anthropic batch has no metadata, so a batch whose create was not
+    answered cannot be told from others without reading their results:
+    Loore does not look for it (Needs Peter on #806). The job is given
+    up; its account is due again on its next night. A batch the create
+    did make is billed once, never read, and stays at the provider for
+    its own retention."""
+    for job in jobs:
+        _give_up(job, now, "Anthropic is not searched")
 
 
 def _settled_submitting(now):
@@ -1005,11 +983,12 @@ def _settled_submitting(now):
 
 
 def _resolve_submitting(jobs, keys, now):
-    """Find the batches of jobs a run left SUBMITTING (its create was
-    under way when the task's soft time limit struck or the worker was
-    killed), per provider, by the tag the create sent: adopted, the
-    collector saves the digest and deletes the batch as for any other.
-    A listing that fails is tried again on the next pass."""
+    """Settle the jobs a run left SUBMITTING (its create was under way
+    when the task's soft time limit struck or the worker was killed), per
+    provider. OpenAI: the batch found by the tag the create sent is
+    adopted (the collector saves the digest and deletes the batch as for
+    any other), an upload no batch followed is deleted. Anthropic: given
+    up. A listing that fails is tried again on the next pass."""
     by_family = {}
     for job in jobs:
         family = "anthropic" if job.provider_key == "anthropic" else "openai"

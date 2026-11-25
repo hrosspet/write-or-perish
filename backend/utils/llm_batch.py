@@ -863,10 +863,10 @@ def list_batches(wanted, api_keys, oldest=None):
 # ── Finding a batch whose create was not answered (2026-11-25) ──────────
 # A caller that records a job before its create (the external digest's
 # "submitting" job) and loses the answer (the task's soft time limit, a
-# worker killed while it waited) finds the batch again by the tag it sent
-# with it (``batch_submit(tag=...)``): an OpenAI batch by its metadata, an
-# upload that no batch followed by its file name, an Anthropic batch by
-# the custom_id in its results, readable once it has ended.
+# worker killed while it waited) finds an OpenAI batch again by the tag it
+# sent with it (``batch_submit(tag=...)``): the batch by its metadata, an
+# upload that no batch followed by its file name. An Anthropic batch has
+# no metadata to find it by.
 BATCH_TAG_KEY = "loore_tag"
 
 
@@ -902,22 +902,6 @@ def listed_since(family, api_keys, oldest):
                 and previous < oldest - LIST_STOP_SLACK):
             break
     return found
-
-
-def request_total(batch):
-    """The number of requests an Anthropic batch carries."""
-    counts = getattr(batch, "request_counts", None)
-    return sum(getattr(counts, name, 0) or 0 for name in (
-        "processing", "succeeded", "errored", "canceled", "expired"))
-
-
-def anthropic_custom_ids(api_keys, batch_id):
-    """The custom_ids of an ended Anthropic batch's results. Raises when
-    they cannot be read."""
-    from anthropic import Anthropic
-    client = Anthropic(api_key=api_keys["anthropic"])
-    return {entry.custom_id
-            for entry in client.messages.batches.results(batch_id)}
 
 
 def openai_uploads_since(api_keys, oldest):
