@@ -67,8 +67,10 @@ def _make_app(share_v1=True):
 
     from backend.routes.share import share_bp
     from backend.routes.nodes import nodes_bp
+    from backend.routes.commons import commons_bp
     app.register_blueprint(share_bp, url_prefix="/api/share")
     app.register_blueprint(nodes_bp, url_prefix="/api/nodes")
+    app.register_blueprint(commons_bp, url_prefix="/api/commons")
     return app
 
 
@@ -490,3 +492,92 @@ def test_save_is_off_while_share_v1_is_off(app):
         assert ShareDraft.query.count() == 0
     finally:
         app.config["SHARE_V1"] = True
+
+
+# ── Who gets the saved-share state ────────────────────────────────────────
+
+def _meta_as(app, username, node_id, path=""):
+    """The tool record GET /api/nodes/<id><path> gives *username*."""
+    resp = _client_for(app, username).get(f"/api/nodes/{node_id}{path}")
+    assert resp.status_code == 200, resp.get_json()
+    return resp.get_json().get("tool_calls_meta")
+
+
+def _names(meta):
+    return [m.get("name") for m in meta or []]
+
+
+def test_saved_share_state_of_a_public_entry_goes_to_its_owner_only(app):
+    """An entry's saved-share state is returned to its owner only: another
+    signed-in user and an anonymous reader of the public entry get it as
+    if no share had been saved, before and after the owner's save."""
+    node = _entry("owner", OWN_BLOCK, privacy="public")
+    assert _meta_as(app, "other", node.id) is None
+
+    assert _save(_client_for(app, "owner"), node.id, 0).status_code == 200
+
+    assert _meta_as(app, "other", node.id) is None
+    g.pop("_login_user", None)
+    anon = app.test_client().get(f"/api/commons/node/{node.id}")
+    assert anon.status_code == 200
+    assert "propose_share" not in anon.get_data(as_text=True)
+    assert "saved_indexes" not in anon.get_data(as_text=True)
+    owners = _meta_as(app, "owner", node.id)
+    assert _names(owners) == ["propose_share"]
+    assert owners[0]["saved_indexes"] == [0]
+
+    # An edit keeps it the owner's.
+    resp = _client_for(app, "owner").put(f"/api/nodes/{node.id}", json={
+        "content": "Lead-in.\n\n" + OWN_BLOCK})
+    assert resp.status_code == 200
+    assert _meta_as(app, "other", node.id) is None
+    assert _meta_as(app, "owner", node.id)[0]["saved_indexes"] == [0]
+
+
+def test_saved_share_state_of_a_public_ai_reply_goes_to_its_owner_only(app):
+    """A public AI reply with no share proposal of its own, saved from by
+    the user it was written for: other readers get its record as before
+    the save, on the thread page and on the reply's status."""
+    root = _entry("owner", "A public question.", privacy="public")
+    reply = _ai_reply("owner", "An answer.\n\n" + OWN_BLOCK, root,
+                      privacy="public")
+    reply.tool_calls_meta = json.dumps([{"name": "_mode",
+                                         "source_mode": "text"}])
+    _db.session.commit()
+    before = _meta_as(app, "other", reply.id)
+
+    assert _save(_client_for(app, "owner"), reply.id, 0).status_code == 200
+
+    assert _meta_as(app, "other", reply.id) == before == [{"name": "_mode"}]
+    status = _meta_as(app, "other", reply.id, "/llm-status")
+    assert "propose_share" not in _names(status)
+    assert "propose_share" in _names(_meta_as(app, "owner", reply.id))
+
+
+def test_an_ai_proposal_reads_the_same_to_other_readers_after_the_save(app):
+    """The AI's own proposal entry (name and status) is shown to every
+    reader of the reply, as before; the save adds nothing they see."""
+    root = _entry("owner", "A public question.", privacy="public")
+    proposal = _ai_reply("owner", AI_PROPOSAL, root, proposes_share=True,
+                         privacy="public")
+    before = _meta_as(app, "other", proposal.id)
+    assert before == [{"name": "propose_share", "status": "success"}]
+
+    assert _save(_client_for(app, "owner"), proposal.id, 0).status_code == 200
+
+    assert _meta_as(app, "other", proposal.id) == before
+    owners = _meta_as(app, "owner", proposal.id)
+    assert owners[0]["apply_status"] == "completed"
+    assert owners[0]["saved_indexes"] == [0]
+
+
+def test_saved_share_state_written_earlier_on_an_entry_is_the_owners(app):
+    """An entry saved from before this change holds the state with no
+    owner-only mark: other readers still do not get it."""
+    node = _entry("owner", OWN_BLOCK, privacy="public")
+    node.tool_calls_meta = json.dumps([{
+        "name": "propose_share", "apply_status": "completed",
+        "share_id": 1, "share_ids": [1], "saved_indexes": [0]}])
+    _db.session.commit()
+    assert _meta_as(app, "other", node.id) is None
+    assert _names(_meta_as(app, "owner", node.id)) == ["propose_share"]

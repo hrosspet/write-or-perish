@@ -15,7 +15,7 @@ from backend.models import Draft, Node, ShareDraft
 from backend.extensions import db
 from backend.utils.share import (
     SHARE_PENDING_LABEL, may_save_shares_from, save_share_drafts_from_node,
-    saved_positions,
+    saved_positions, saved_state_updates,
 )
 from backend.utils.tool_meta import (
     get_tool_meta_entry, parse_share, update_tool_meta,
@@ -363,12 +363,14 @@ def save_proposal():
     if draft and all_saved:
         db.session.delete(draft)
     new_ids = [s.id for _, s in saved]
-    update_tool_meta(node, "propose_share", {
+    # The saved state is the owner's: an entry's saved-share state is
+    # returned to its owner only (utils/share.saved_state_updates).
+    update_tool_meta(node, "propose_share", saved_state_updates(node, entry, {
         "apply_status": "completed" if all_saved else "partial",
         "share_id": ((entry or {}).get("share_id")) or new_ids[0],
         "share_ids": (((entry or {}).get("share_ids")) or []) + new_ids,
         "saved_indexes": saved_indexes,
-    }, append_if_missing=True)
+    }), append_if_missing=True)
     db.session.commit()
 
     return jsonify({

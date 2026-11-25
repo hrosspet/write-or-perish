@@ -18,8 +18,9 @@ from collections import Counter
 from backend.models import Draft, ShareDraft
 from backend.extensions import db
 from backend.utils.tool_meta import (
-    get_tool_meta_entry, parse_share, update_tool_meta,
+    get_tool_meta_entry, parse_share, share_owner_id, update_tool_meta,
 )
+from backend.utils.tool_record import OWNER_ONLY_KEY
 
 SHARE_PENDING_LABEL = "share_pending"
 
@@ -38,10 +39,18 @@ def may_save_shares_from(node, user_id):
     that")."""
     if node is None or node.deleted_at is not None:
         return False
-    if node.node_type == "llm":
-        from backend.utils.proposals import node_is_users
-        return node_is_users(node, user_id)
-    return node.user_id == user_id
+    return share_owner_id(node) == user_id
+
+
+def saved_state_updates(node, entry, updates):
+    """*updates* for the node's propose_share entry after a save, marked
+    for the owner only when the entry holds nothing but the saved state:
+    it is new (an entry, or an AI reply that proposed no share), or the
+    node is not an AI reply. An AI proposal's own entry stays as the
+    reply task wrote it, name and status for every viewer."""
+    if entry is None or node.node_type != "llm":
+        return {**updates, OWNER_ONLY_KEY: True}
+    return updates
 
 
 def saved_positions(entry, total):
@@ -78,16 +87,16 @@ def sync_share_state_after_edit(node, old_content, new_content):
     An AI proposal's pending Draft goes once no block is left to save
     (all removed, or all saved), so a spoken "yes, save that" cannot act
     on text that is gone."""
-    from backend.utils.tool_record import entry_names
-    has_entry = "propose_share" in entry_names(node)
+    # The saved state is marked for the owner only and so is not among the
+    # names stored beside the record: a node with a record is read.
     pending = Draft.query.filter_by(
         parent_id=node.id, label=SHARE_PENDING_LABEL).all()
-    if not has_entry and not pending:
+    if not node.tool_calls_meta_stored and not pending:
         return
 
     new_blocks = parse_share(new_content or "").get("shares") or []
     saved_now = []
-    entry = get_tool_meta_entry(node, "propose_share") if has_entry else None
+    entry = get_tool_meta_entry(node, "propose_share")
     if entry is not None:
         saved_now = _saved_after_edit(entry, old_content, new_blocks)
         status = entry.get("apply_status")
@@ -99,10 +108,11 @@ def sync_share_state_after_edit(node, old_content, new_content):
             status = "pending_approval"
         if (saved_now != (entry.get("saved_indexes") or [])
                 or status != entry.get("apply_status")):
-            update_tool_meta(node, "propose_share", {
-                "apply_status": status,
-                "saved_indexes": saved_now,
-            })
+            update_tool_meta(node, "propose_share", saved_state_updates(
+                node, entry, {
+                    "apply_status": status,
+                    "saved_indexes": saved_now,
+                }))
 
     if pending and len(saved_now) >= len(new_blocks):
         for draft in pending:
