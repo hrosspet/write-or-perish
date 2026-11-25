@@ -114,9 +114,14 @@ class _FakeSelf:
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
     saved_flask_app = _digest.flask_app
     _digest.flask_app = _app
+    # The collector's listing of batch statuses (llm_batch.list_batches)
+    # shows nothing: each pending batch is read on its own, through the
+    # stand-ins each test installs. A test of the listing replaces it.
+    monkeypatch.setattr(_digest, "list_batches",
+                        lambda wanted, keys, oldest=None: {})
     with _app.app_context():
         _db.create_all()
         # In use: an account nobody used for a month is paused (#647).
@@ -341,9 +346,13 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
     result = _digest.sweep_external_digests()
     assert result == {"status": "ok", "submitted": 2}
 
-    # One submit call, grouped by provider, one request per user.
-    assert len(submitted) == 1
-    by_provider = submitted[0]
+    # One request per user, each its own batch (Peter, 2026-11-25: "make
+    # it prepare and send the batch request one at a time").
+    assert len(submitted) == 2
+    assert all(len(reqs) == 1 for call in submitted
+               for reqs in call.values())
+    by_provider = {provider: reqs for call in submitted
+                   for provider, reqs in call.items()}
     assert [r["custom_id"] for r in by_provider["anthropic"]] == [
         f"external-digest-{night_user.id}"]
     assert [r["custom_id"] for r in by_provider["openai"]] == [
@@ -368,7 +377,7 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
     # now in a pending batch.
     assert _digest.sweep_external_digests() == {"status": "ok",
                                                 "submitted": 0}
-    assert len(submitted) == 1
+    assert len(submitted) == 2
 
 
 def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
@@ -1040,8 +1049,12 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
     assert len(submitted) == 1 and APICostLog.query.count() == 1
     assert stops == []
 
+    # A later night (the sweep takes an account once a night, A.141):
+    # the batch went out the night before.
     APICostLog.query.update({"created_at": datetime.utcnow()
                              - timedelta(hours=1, minutes=1)})
+    ExternalDigestBatchJob.query.update({"submitted_at": datetime.utcnow()
+                                         - timedelta(days=1)})
     _db.session.commit()
     assert refuse_round() == 1                   # the one more try
     assert len(stops) == 1                       # second refusal: stopped
@@ -1049,6 +1062,8 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
 
     APICostLog.query.update({"created_at": datetime.utcnow()
                              - timedelta(days=2)})
+    ExternalDigestBatchJob.query.update({"submitted_at": datetime.utcnow()
+                                         - timedelta(days=2)})
     _db.session.commit()
     for _ in range(3):
         assert _digest.sweep_external_digests()["submitted"] == 0
@@ -1085,8 +1100,11 @@ def test_policy_blocked_digest_is_never_resubmitted_by_the_sweep(
     assert row.request_ref == "policy_block:bio_policy"
     assert row.cost_microdollars == 0
     assert [r[:2] for r in reports] == [(user.id, "bio_policy")]
+    # Later nights: the block, not the once-a-night rule, holds it back.
     APICostLog.query.update({"created_at": datetime.utcnow()
                              - timedelta(days=3)})
+    ExternalDigestBatchJob.query.update({"submitted_at": datetime.utcnow()
+                                         - timedelta(days=3)})
     _db.session.commit()
     for _ in range(3):
         assert _digest.sweep_external_digests()["submitted"] == 0

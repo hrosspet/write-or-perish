@@ -132,11 +132,14 @@ def test_each_model_on_both_paths(app, monkeypatch):
 
     submitted = dn._stub_batch_submit(monkeypatch)
     assert _digest.sweep_external_digests()["submitted"] == 2
-    assert [r["user_id"] for r in submitted[0]["anthropic"]] == [
+    # One batch per account (2026-11-25).
+    by_provider = {provider: reqs for call in submitted
+                   for provider, reqs in call.items()}
+    assert [r["user_id"] for r in by_provider["anthropic"]] == [
         anthropic_user.id]
-    assert [r["model_id"] for r in submitted[0]["anthropic"]] == [SONNET]
+    assert [r["model_id"] for r in by_provider["anthropic"]] == [SONNET]
     assert [(r["user_id"], r["api_model"])
-            for r in submitted[0]["openai"]] == [(both_user.id, SOL)]
+            for r in by_provider["openai"]] == [(both_user.id, SOL)]
 
 
 @pytest.mark.parametrize("setting", [
@@ -263,7 +266,7 @@ def test_the_same_list_goes_to_sonnet_and_to_sol(app, monkeypatch):
 
     assert _digest.sweep_external_digests()["submitted"] == 2
     prompts = {provider: reqs[0]["messages"][0]["content"]
-               for provider, reqs in submitted[0].items()}
+               for call in submitted for provider, reqs in call.items()}
     assert len(_corpus_lines(prompts["anthropic"])) == 12
     assert prompts["anthropic"] == prompts["openai"]
 
