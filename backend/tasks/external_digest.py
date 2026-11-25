@@ -22,15 +22,18 @@ The list is capped in OpenAI tokens under GPT-6.2 Sol's price step, for
 both models (DIGEST_MAX_PROMPT_TOKENS), and the first time an account's
 list is cut there, one warning goes to Sentry.
 
-Nothing waits on a digest, so the nightly sweep submits every stale
-user's rebuild as ONE provider batch (~50% cheaper, <=24h SLA) and a
-beat collector saves the results — see sweep_external_digests /
+Nothing waits on a digest, so the nightly sweep submits the stale
+users' rebuilds as provider batches (~50% cheaper, <=24h SLA), one
+batch per account, each sent as soon as it is ready, and a beat
+collector saves the results — see sweep_external_digests /
 collect_external_digest_batches. The synchronous rebuild_external_digest
 task stays as the direct path (a future "rebuild now" button).
 """
 import math
+import secrets
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from itertools import islice
 
 from celery.utils.log import get_task_logger
 from sqlalchemy import func, select
@@ -46,19 +49,22 @@ from backend.llm_providers import (
     LLMProvider, ProviderAccountError, is_refused, policy_block_code)
 from backend.utils.api_keys import get_api_keys_for_usage
 from backend.utils.cost import llm_cost_log_fields
-from backend.utils.encryption import key_service_unavailable
+from backend.utils.encryption import (
+    DEK_PREFETCH_CONCURRENCY, key_service_unavailable, prefetch_deks)
 from backend.utils.error_privacy import describe_exception
-from backend.utils import refusal_backoff, soft_limit
+from backend.utils import refusal_backoff, run_locks, soft_limit
 from backend.utils.refusal_backoff import REFUSED_REF
 from backend.utils.privacy import account_allows_ai
 from backend.utils.profile_providers import agreed_to_both, profile_provider
 from backend.utils.approval import background_work_allowed, not_active
 from backend.utils.llm_batch import (
-    BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_submit, blocked_items, drop_openai_batch,
+    BATCH_JOB_MAX_AGE, BATCH_TAG_KEY, apply_batch_key_override,
+    batch_check_and_collect, batch_ended, batch_submit, blocked_items,
+    delete_openai_uploads, drop_openai_batch, list_batches, listed_since,
+    openai_batch_key, openai_uploads_since, tagged_upload_name,
 )
 from backend.utils import anthropic_batch_deletion
-from backend.utils.timefmt import user_local_hour
+from backend.utils.timefmt import user_local_time
 
 from backend.utils.activity import in_use_user_ids
 from backend.utils.hidden_rows import account_on_hold, corpus_changed
@@ -77,6 +83,15 @@ DIGEST_DESCRIPTION = (
 # hour after the X bookmark sync (NIGHTLY_SYNC_LOCAL_HOUR = 3), so a
 # night's new bookmarks are stored before the digest reads the corpus.
 NIGHTLY_DIGEST_LOCAL_HOUR = 4
+# Heuristic (2026-11-25): the last hour of the user's night in which an
+# account that was due at NIGHTLY_DIGEST_LOCAL_HOUR:00 and has had no
+# digest request sent since is still taken: two more hourly runs, at 5
+# and 6 o'clock. An account a run did not reach (the task's soft time
+# limit, a key-service outage, a crash, a run that did not happen) is
+# then taken the same night instead of a day later. An account whose
+# list changed only after 4:00 waits for its next 4 o'clock, as before,
+# so a normal account's digest is made when it was.
+NIGHTLY_DIGEST_LAST_LOCAL_HOUR = 6
 # Output cap for a digest request. Real digests run ~2k tokens; this is
 # headroom, matching the direct path's provider default.
 DIGEST_MAX_TOKENS = 10000
@@ -110,6 +125,20 @@ ESTIMATED_TOKENS_PER_CHAR = 1.2
 # tweets would not fit the worker's memory. Memory only: it changes
 # nothing in the prompt.
 RENDER_ROWS_PER_FETCH = 500
+# Heuristic (2026-11-25): rows whose data keys are unwrapped together
+# (encryption.prefetch_deks, DEK_PREFETCH_CONCURRENCY = 8 calls in
+# flight) before their texts are read, instead of one key-service call
+# after another: a list at the cap renders in about an eighth of the
+# time. The first group is one round of the pool, so a key-service
+# outage ends the run after one round of retries (about 30 s), not
+# eight. Then the next group is the rows still expected to fit (by the
+# tokens a listed line took on average) plus the one that will not, at
+# least one round of the pool and at most this many. Past the cap no
+# text is read, and the keys of at most KEY_GROUP_ROWS - 1 rows are
+# unwrapped without their text being read (seven or fewer while the
+# lines are of even length); those keys stay only in this process's key
+# cache, as on every other prefetch path.
+KEY_GROUP_ROWS = 64
 # The Sentry issue every account's first cut at the cap is grouped into.
 CUT_EVENT_MESSAGE = "Saved References Digest: a list is cut at the token cap"
 CUT_EVENT_FINGERPRINT = ["external-digest-list-cut-at-cap"]
@@ -295,6 +324,16 @@ def _line(item):
     return f"- {author} ({stamp}): {snippet}"
 
 
+def _key_group_size(room, listed, listed_tokens):
+    """How many rows' keys to unwrap together next (KEY_GROUP_ROWS):
+    *room* is the tokens left under the cap, *listed* the lines listed so
+    far and *listed_tokens* their tokens."""
+    if not listed:
+        return DEK_PREFETCH_CONCURRENCY
+    expected = math.ceil(room * listed / listed_tokens) + 1
+    return max(DEK_PREFETCH_CONCURRENCY, min(KEY_GROUP_ROWS, expected))
+
+
 def _render_digest_prompt(user_id):
     """The digest prompt over the user's current list (a Rendered), or
     None when they have no saved references.
@@ -302,10 +341,11 @@ def _render_digest_prompt(user_id):
     Lines are added newest-saved first (``_newest_first``) while the
     request stays within DIGEST_MAX_PROMPT_TOKENS, each counted with one
     token for its line break; the rest is left out and counted in the
-    header. Rows are fetched RENDER_ROWS_PER_FETCH at a time and
-    decrypted one by one, so a rebuild decrypts the lines it lists and
-    the one that did not fit, nothing further — the one place that reads
-    the corpus."""
+    header. Rows are fetched RENDER_ROWS_PER_FETCH at a time; their keys
+    are unwrapped in groups (KEY_GROUP_ROWS) and their texts decrypted
+    one by one, so a rebuild decrypts the lines it lists and the one
+    that did not fit, nothing further — the one place that reads the
+    corpus."""
     total = ExternalItem.query.filter(
         ExternalItem.user_id == user_id, ExternalItem.saved()).count()
     if not total:
@@ -313,7 +353,7 @@ def _render_digest_prompt(user_id):
 
     count, counted = _token_counter()
     cap = int(_setting("DIGEST_MAX_PROMPT_TOKENS"))
-    used = _fixed_prompt_tokens(count, total)
+    fixed = used = _fixed_prompt_tokens(count, total)
     lines = []
     cut = False
     rows = db.session.execute(
@@ -322,16 +362,23 @@ def _render_digest_prompt(user_id):
         .order_by(*_newest_first())
         .execution_options(yield_per=RENDER_ROWS_PER_FETCH))
     try:
-        for item in rows.scalars():
-            line = _line(item)
-            if line is None:
-                continue
-            size = count(line) + 1   # the line and its line break
-            if used + size > cap:
-                cut = True
+        stream = iter(rows.scalars())
+        while not cut:
+            group = list(islice(stream, _key_group_size(
+                cap - used, len(lines), used - fixed)))
+            if not group:
                 break
-            lines.append(line)
-            used += size
+            prefetch_deks(item.content for item in group)
+            for item in group:
+                line = _line(item)
+                if line is None:
+                    continue
+                size = count(line) + 1   # the line and its line break
+                if used + size > cap:
+                    cut = True
+                    break
+                lines.append(line)
+                used += size
     finally:
         # Closed here, before any commit: on Postgres the rows stream
         # through a server-side cursor that a commit would invalidate.
@@ -481,7 +528,39 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
     return artifact
 
 
-# ── Nightly path: one provider batch for every stale user ───────────────
+# ── Nightly path: one provider batch per account, sent as it is ready ───
+#
+# Peter, 2026-11-25: "make it prepare and send the batch request one at a
+# time". Each account's request is submitted as its own batch, and its
+# job row committed, before the next account is rendered, so a run that
+# stops (the task's soft time limit, a key-service outage, a crash) loses
+# only the account it was preparing; that account stays due and the next
+# hourly run of the same night takes it (NIGHTLY_DIGEST_LAST_LOCAL_HOUR).
+
+# One sweep at a time: sweeps queued while the server was frozen run
+# side by side afterwards (2026-11-07), and two runs that took the same
+# account would each send its digest. Heuristic: the key lives the
+# task's hard time limit (one hour), longer than any run can live, so a
+# run that dies holds it at most until the next hourly run.
+SWEEP_LOCK_KEY = "loore:external_digest:sweep"
+SWEEP_LOCK_TTL = 60 * 60
+# A job row is committed in this status before its batch is created, so
+# the account counts as taken that night whatever happens to the create
+# (review of #806). A create the provider answered makes it "pending";
+# one that created nothing removes it.
+SUBMITTING = "submitting"
+# Heuristic (2026-11-25): a SUBMITTING row this old was left by a run
+# that can no longer be alive (the task's hard time limit is one hour),
+# so its create has either reached the provider or not: from then on the
+# collector settles it (_resolve_submitting).
+SUBMITTING_SETTLED_AFTER = timedelta(hours=1)
+# The random part of a request's custom_id (_custom_id), which an OpenAI
+# batch carries as its tag: 4 bytes, 8 hex characters, so the lookup of
+# a batch whose create was not answered matches no other night's batch
+# of the same account and none another Loore instance sent under the
+# same provider account (nor deletes another instance's upload).
+CUSTOM_ID_TOKEN_BYTES = 4
+
 
 def _batch_keys():
     return apply_batch_key_override(
@@ -494,7 +573,10 @@ def _users_in_pending_batches():
     return {item["user_id"] for job in pending for item in job.items}
 
 
-def _stale_user_ids():
+def _staleness():
+    """(newest saved reference, last digest) by user: the newest
+    ``fetched_at`` of each user's saved references, and the build time
+    of each user's last digest."""
     newest_by_user = dict(
         db.session.query(
             ExternalItem.user_id, func.max(ExternalItem.fetched_at)
@@ -507,6 +589,11 @@ def _stale_user_ids():
         ).filter(UserArtifact.kind == DIGEST_KIND)
         .group_by(UserArtifact.user_id).all()
     )
+    return newest_by_user, built_by_user
+
+
+def _stale_user_ids(staleness=None):
+    newest_by_user, built_by_user = staleness or _staleness()
     return [
         user_id for user_id, newest in newest_by_user.items()
         if newest is not None
@@ -515,114 +602,82 @@ def _stale_user_ids():
     ]
 
 
-def _submit_digest_batch(users):
-    """Render one request per user, submit per provider, persist the
-    jobs. Returns the number of users submitted."""
-    supported = flask_app.config.get("SUPPORTED_MODELS", {})
-    requests_by_provider = {}
-    meta_by_custom_id = {}
-    for user in users:
-        # Before the corpus is read: nothing is decrypted for an account
-        # whose digest model is not set up. It stays due; no other
-        # provider's model and no other model is tried.
-        model_id = _digest_model_id(user)
-        model_cfg = supported.get(model_id)
-        if model_cfg is None:
-            logger.warning("Digest for user %s skipped: no digest model "
-                           "of its provider is configured", user.id)
+def _night_start(user, now):
+    """NIGHTLY_DIGEST_LOCAL_HOUR:00 of the user's current night (naive
+    UTC) while their clock reads that hour up to
+    NIGHTLY_DIGEST_LAST_LOCAL_HOUR, else None."""
+    local = user_local_time(user, now)
+    if not (NIGHTLY_DIGEST_LOCAL_HOUR <= local.hour
+            <= NIGHTLY_DIGEST_LAST_LOCAL_HOUR):
+        return None
+    start = local.replace(hour=NIGHTLY_DIGEST_LOCAL_HOUR, minute=0,
+                          second=0, microsecond=0)
+    return start.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _sent_since(cutoff):
+    """The latest time a digest request of each user was submitted since
+    *cutoff*, whatever became of it (pending, collected, abandoned)."""
+    latest = {}
+    jobs = ExternalDigestBatchJob.query.filter(
+        ExternalDigestBatchJob.submitted_at >= cutoff).all()
+    for job in jobs:
+        for item in job.items:
+            uid = item["user_id"]
+            if latest.get(uid) is None or latest[uid] < job.submitted_at:
+                latest[uid] = job.submitted_at
+    return latest
+
+
+def _changed_by(user_id, built, at):
+    """Whether the user had saved a reference newer than their digest
+    (built at *built*, or never) by *at*: the account was due then."""
+    query = db.session.query(ExternalItem.id).filter(
+        ExternalItem.user_id == user_id, ExternalItem.saved(),
+        ExternalItem.fetched_at <= at)
+    if built is not None:
+        query = query.filter(ExternalItem.fetched_at > built)
+    return query.first() is not None
+
+
+def _due_accounts(now):
+    """The accounts the sweep at *now* (naive UTC) takes, in the order
+    it takes them.
+
+    Due: a saved reference newer than the last digest and no batch of
+    the account pending, as before, while the account's clock reads
+    NIGHTLY_DIGEST_LOCAL_HOUR (4) — or a later hour up to
+    NIGHTLY_DIGEST_LAST_LOCAL_HOUR (6) when its list had already changed
+    at 4:00. Once a night: an account a digest request was submitted for
+    since 4:00 is not taken again that night, whatever became of the
+    request (#470's backoff and a failed batch wait for the next night,
+    as before).
+
+    Order, those that waited longest first: the account whose 4:00
+    passed earliest (one the previous runs did not reach), then the one
+    whose last digest is oldest (never built first), then the id. An
+    account left over on one night is first among its hour the next
+    night, so a long list cannot keep the same accounts waiting."""
+    staleness = _staleness()
+    newest_by_user, built_by_user = staleness
+    stale_ids = (set(_stale_user_ids(staleness))
+                 - _users_in_pending_batches())
+    if not stale_ids:
+        return []
+    in_use = in_use_user_ids(stale_ids, flask_app.config, now=now)
+    sent = _sent_since(now - timedelta(
+        hours=NIGHTLY_DIGEST_LAST_LOCAL_HOUR - NIGHTLY_DIGEST_LOCAL_HOUR + 1))
+    due = []
+    for user in User.query.filter(User.id.in_(stale_ids)).all():
+        started = _night_start(user, now)
+        if started is None:
             continue
-        # Stamped BEFORE the corpus is read (see _save_digest).
-        corpus_at = datetime.utcnow()
-        try:
-            rendered = _render_digest_prompt(user.id)
-        except Exception as e:  # noqa: BLE001 — one account's render
-            # One account whose references cannot be read is left out of
-            # this run, not every account due in it. Nothing is written
-            # for it, so it is due again in its next night. A key-service
-            # outage ends the run as before (every account would wait out
-            # its own retries).
-            soft_limit.reraise(e)
-            if key_service_unavailable(e):
-                raise
-            db.session.rollback()
-            logger.warning("Digest for user %s skipped: its references "
-                           "could not be read (%s)", user.id,
-                           describe_exception(e))
-            continue
-        if rendered is None:
-            continue
-        _note_cut(user, rendered)
-        prompt_text, total = rendered.prompt, rendered.total
-        custom_id = f"external-digest-{user.id}"
-        requests_by_provider.setdefault(model_cfg["provider"], []).append({
-            "custom_id": custom_id,
-            "model_id": model_id,
-            "api_model": model_cfg["api_model"],
-            "messages": [{"role": "user", "content": prompt_text}],
-            "max_tokens": DIGEST_MAX_TOKENS,
-            # The user the request is for: its OpenAI safety identifier.
-            "user_id": user.id,
-            # One request per user, never followed by one with the same
-            # prefix: no prompt cache write (#803).
-            "one_shot": True,
-        })
-        meta_by_custom_id[custom_id] = {
-            "custom_id": custom_id,
-            "user_id": user.id,
-            "model_id": model_id,
-            "corpus_at": corpus_at.isoformat(),
-            "total_items": total,
-        }
-    if not requests_by_provider:
-        return 0
-
-    batch_ids = batch_submit(requests_by_provider, _batch_keys(), "digest")
-    submitted = 0
-    for provider_key, batch_id in batch_ids.items():
-        # batch_submit keys OpenAI jobs "openai:<api_model>"; route each
-        # request's metadata to the job that carries it.
-        provider, _, api_model = provider_key.partition(":")
-        items = [
-            meta_by_custom_id[req["custom_id"]]
-            for req in requests_by_provider.get(provider, [])
-            if not api_model or req["api_model"] == api_model
-        ]
-        db.session.add(ExternalDigestBatchJob(
-            provider_key=provider_key, batch_id=batch_id, items=items))
-        # Deleted at Anthropic once the job is no longer pending (#693).
-        anthropic_batch_deletion.register(
-            provider_key, batch_id, ExternalDigestBatchJob.__tablename__)
-        submitted += len(items)
-    db.session.commit()
-    # batch_submit logs (not raises) a provider's failure; those users
-    # stay stale and the next sweep tries again.
-    return submitted
-
-
-@celery.task(name='backend.tasks.external_digest.sweep_external_digests')
-def sweep_external_digests():
-    """Hourly beat gate: submit a digest rebuild for each user whose
-    references changed since their last digest — at most once a night,
-    in their own night, and never while a batch of theirs is pending.
-
-    This is the ONLY scheduled dispatcher. Saving a reference (clipper,
-    import, bookmark sync) deliberately does not rebuild — a burst of
-    clips would otherwise pay for one whole-corpus LLM call each.
-
-    Accounts nobody uses (#647): no digest while the owner has not used
-    Loore for UNUSED_ACCOUNT_PAUSE_DAYS (utils/activity.in_use_user_ids).
-    The digest stays stale meanwhile, so it is rebuilt once, from the whole
-    corpus, in the owner's first night after they are back.
-    """
-    with flask_app.app_context():
-        stale_ids = set(_stale_user_ids()) - _users_in_pending_batches()
-        if not stale_ids:
-            return {"status": "ok", "submitted": 0}
-        in_use = in_use_user_ids(stale_ids, flask_app.config)
-        due = [
-            user for user in User.query.filter(User.id.in_(stale_ids)).all()
-            if user_local_hour(user) == NIGHTLY_DIGEST_LOCAL_HOUR
-            and user.id in in_use   # #647: paused while nobody uses it
+        if sent.get(user.id) is not None and sent[user.id] >= started:
+            continue   # taken tonight already
+        built = built_by_user.get(user.id)
+        late = now >= started + timedelta(hours=1)
+        if not (
+            user.id in in_use   # #647: paused while nobody uses it
             and account_allows_ai(user)   # #346
             # Payments on: no background model call for an account
             # without the paid set (#438), one the admin blocked (#697)
@@ -635,39 +690,379 @@ def sweep_external_digests():
             and not account_on_hold(user.id)
             # After a refused or cut-off digest: wait an hour, then one
             # more try, then stop until a digest is saved (#368/#470).
-            and not refusal_backoff.digest_in_backoff(user.id)
-        ]
-        if not due:
-            return {"status": "ok", "submitted": 0}
-        submitted = _submit_digest_batch(due)
-        if submitted:
-            logger.info(
-                "Nightly external-digest batch submitted for %d users",
-                submitted)
-        return {"status": "ok", "submitted": submitted}
+            and not refusal_backoff.digest_in_backoff(user.id, now=now)
+        ):
+            continue
+        # After 4 o'clock: only an account that was due at 4:00. One
+        # whose list changed only since then waits for its next night.
+        if late and newest_by_user[user.id] > started \
+                and not _changed_by(user.id, built, started):
+            continue
+        due.append((started, built or datetime.min, user.id, user))
+    due.sort(key=lambda entry: entry[:3])
+    return [entry[3] for entry in due]
+
+
+def _custom_id(user_id):
+    """The request's custom_id: the account and a token of its own, so a
+    batch whose create was not answered is found again by it, and by
+    nothing else (``_resolve_submitting``): not by a batch of another
+    night, nor by one another Loore instance sent under the same
+    provider account."""
+    token = secrets.token_hex(CUSTOM_ID_TOKEN_BYTES)
+    return f"external-digest-{user_id}-{token}"
+
+
+def _prepare(user, supported, refused=()):
+    """The user's digest request as (provider, request, metadata), or
+    None when nothing is sent for them in this run. *refused*: providers
+    that refused a submission earlier in this run; an account of one is
+    not read. Raises the task's soft time limit and a key-service
+    outage."""
+    # Before the corpus is read: nothing is decrypted for an account
+    # whose digest model is not set up. It stays due; no other
+    # provider's model and no other model is tried.
+    model_id = _digest_model_id(user)
+    model_cfg = supported.get(model_id)
+    if model_cfg is None:
+        logger.warning("Digest for user %s skipped: no digest model "
+                       "of its provider is configured", user.id)
+        return None
+    if model_cfg["provider"] in refused:
+        return None   # stays due for the next hourly run
+    # Stamped BEFORE the corpus is read (see _save_digest).
+    corpus_at = datetime.utcnow()
+    try:
+        rendered = _render_digest_prompt(user.id)
+    except Exception as e:  # noqa: BLE001 — one account's render
+        # One account whose references cannot be read is left out of
+        # this run, not every account due in it. Nothing is written for
+        # it, so it is due again. A key-service outage ends the run as
+        # before (every account would wait out its own retries); the
+        # accounts before it are already submitted.
+        soft_limit.reraise(e)
+        if key_service_unavailable(e):
+            raise
+        db.session.rollback()
+        logger.warning("Digest for user %s skipped: its references "
+                       "could not be read (%s)", user.id,
+                       describe_exception(e))
+        return None
+    if rendered is None:
+        return None
+    _note_cut(user, rendered)
+    custom_id = _custom_id(user.id)
+    request = {
+        "custom_id": custom_id,
+        "model_id": model_id,
+        "api_model": model_cfg["api_model"],
+        "messages": [{"role": "user", "content": rendered.prompt}],
+        "max_tokens": DIGEST_MAX_TOKENS,
+        # The user the request is for: its OpenAI safety identifier.
+        "user_id": user.id,
+        # One request per user, never followed by one with the same
+        # prefix: no prompt cache write (#803).
+        "one_shot": True,
+    }
+    meta = {
+        "custom_id": custom_id,
+        "user_id": user.id,
+        "model_id": model_id,
+        "corpus_at": corpus_at.isoformat(),
+        "total_items": rendered.total,
+    }
+    return model_cfg["provider"], request, meta
+
+
+def _adopt(job, provider_key, batch_id):
+    """The job's batch is known: pending, registered for deletion at
+    Anthropic (#693) in the same commit."""
+    job.provider_key = provider_key
+    job.batch_id = batch_id
+    job.status = "pending"
+    anthropic_batch_deletion.register(
+        provider_key, batch_id, ExternalDigestBatchJob.__tablename__)
+    db.session.commit()
+
+
+def _submit_one(provider, request, meta, keys):
+    """Submit one account's request as its own batch. Returns (submitted,
+    refused): 1 or 0, and whether the provider refused the submission
+    for its account or a full queue or rate limit
+    (SubmittedBatches.account_refused / queue_full).
+
+    The job row is committed as SUBMITTING before the create, so the
+    account is taken once that night whatever happens next. A batch
+    created makes it pending; a submission that created nothing (refused
+    or failed, logged by batch_submit) removes it, and the account stays
+    due. When the create raises (the task's soft time limit, a killed
+    worker), whether it reached the provider is not known: the row stays
+    SUBMITTING and the collector settles it (``_resolve_submitting``).
+    A soft limit is raised after a batch it reports as created is
+    recorded."""
+    key = (provider if provider == "anthropic"
+           else openai_batch_key(request["api_model"]))
+    job = ExternalDigestBatchJob(provider_key=key, batch_id="",
+                                 status=SUBMITTING, items=[meta])
+    db.session.add(job)
+    db.session.commit()
+    try:
+        batch_ids = batch_submit({provider: [request]}, keys, "digest",
+                                 tag=request["custom_id"])
+    except Exception as e:
+        found = soft_limit.found_in(e)
+        created = (getattr(found, "submitted", None) or {}) if found else {}
+        for provider_key, batch_id in created.items():
+            _adopt(job, provider_key, batch_id)
+        if found is not None:
+            raise found
+        raise
+    for provider_key, batch_id in batch_ids.items():
+        _adopt(job, provider_key, batch_id)
+        return 1, False
+    db.session.delete(job)
+    db.session.commit()
+    refusals = (set(getattr(batch_ids, "account_refused", None) or ())
+                | set(getattr(batch_ids, "queue_full", None) or ()))
+    return 0, key in refusals
+
+
+def _submit_digest_batch(users):
+    """Prepare and submit one account at a time, in the given order: its
+    request is rendered, sent as its own batch and its job row committed
+    before the next account starts. Returns the number of accounts
+    submitted.
+
+    Once a provider refuses a submission for its account (spend limit,
+    billing, key) or a full queue or rate limit, its remaining accounts
+    are not read in this run: they stay due for the next hourly run. One
+    account whose list cannot be read, or whose submission fails for
+    another reason, stops nothing.
+
+    When the task's soft time limit, a key-service outage or another
+    error ends the run, every account before it is already submitted;
+    the one being prepared stays due (or, if its create was under way,
+    is resolved by the collector), as do the accounts after it, and the
+    next hourly run of the same night takes them. The error is raised:
+    the run stops, and shows."""
+    supported = flask_app.config.get("SUPPORTED_MODELS", {})
+    keys = _batch_keys()
+    submitted = 0
+    refused = set()
+    for done, user in enumerate(users):
+        try:
+            prepared = _prepare(user, supported, refused)
+            if prepared is None:
+                continue
+            sent, refusal = _submit_one(*prepared, keys)
+            submitted += sent
+            if refusal:
+                # Every provider-wide limit or account failure: a
+                # spend limit, billing and the key are the provider
+                # account's; OpenAI's batch creates per hour are the
+                # organisation's, and its queue limit is per model, the
+                # one model the digest sends every OpenAI account to.
+                refused.add(prepared[0])
+                logger.warning(
+                    "Digest sweep: %s refused a submission; its other "
+                    "accounts wait for the next hourly run", prepared[0])
+        except Exception as e:
+            try:
+                db.session.rollback()
+            except Exception:  # noqa: BLE001 — a connection left mid-query
+                db.session.remove()
+            logger.warning(
+                "Digest sweep stopped by %s after %d of %d accounts (%d "
+                "submitted); the rest stay due for the next hourly run",
+                type(e).__name__, done, len(users), submitted)
+            raise
+    return submitted
+
+
+@celery.task(name='backend.tasks.external_digest.sweep_external_digests')
+def sweep_external_digests():
+    """Hourly beat gate: submit a digest rebuild for each user whose
+    references changed since their last digest — at most once a night,
+    in their own night, and never while a batch of theirs is pending
+    (``_due_accounts``).
+
+    This is the ONLY scheduled dispatcher. Saving a reference (clipper,
+    import, bookmark sync) deliberately does not rebuild — a burst of
+    clips would otherwise pay for one whole-corpus LLM call each.
+
+    Accounts nobody uses (#647): no digest while the owner has not used
+    Loore for UNUSED_ACCOUNT_PAUSE_DAYS (utils/activity.in_use_user_ids).
+    The digest stays stale meanwhile, so it is rebuilt once, from the whole
+    corpus, in the owner's first night after they are back.
+    """
+    with flask_app.app_context():
+        with run_locks.single_run(SWEEP_LOCK_KEY, SWEEP_LOCK_TTL) as ok:
+            if not ok:
+                logger.info("Digest sweep skipped: another sweep is "
+                            "running")
+                return {"status": "skipped", "reason": "running"}
+            return _sweep(datetime.utcnow())
+
+
+def _sweep(now):
+    """The sweep at *now* (naive UTC), inside an app context."""
+    due = _due_accounts(now)
+    if not due:
+        return {"status": "ok", "submitted": 0}
+    submitted = _submit_digest_batch(due)
+    if submitted:
+        logger.info(
+            "Nightly external-digest batches submitted for %d users",
+            submitted)
+    return {"status": "ok", "submitted": submitted}
+
+
+def _tag(job):
+    """The custom_id a SUBMITTING job's request carried: its batch's
+    tag (``batch_submit(tag=...)``)."""
+    return (job.items or [{}])[0].get("custom_id")
+
+
+def _give_up(job, now, why):
+    job.status = "abandoned"
+    job.collected_at = now
+    db.session.commit()
+    logger.warning("External-digest job %s left mid-create given up (%s); "
+                   "its account is due again on its next night", job.id, why)
+
+
+def _resolve_openai(jobs, keys, now):
+    """OpenAI shows a batch in its listing as soon as it exists: the one
+    whose metadata carries the job's tag is adopted. Without one, an
+    upload named after the tag (the stop fell between the upload and
+    the create) is deleted, and the job given up."""
+    oldest = min(job.submitted_at for job in jobs)
+    by_tag = {_tag(job): job for job in jobs}
+    batches = {}
+    for batch in listed_since("openai", keys, oldest):
+        tag = (getattr(batch, "metadata", None) or {}).get(BATCH_TAG_KEY)
+        if tag in by_tag:
+            batches[tag] = batch.id
+    uploads = {}
+    names = {tagged_upload_name(tag): tag for tag in by_tag
+             if tag not in batches}
+    if names:
+        for upload in openai_uploads_since(keys, oldest):
+            tag = names.get(getattr(upload, "filename", None))
+            if tag is not None:
+                uploads.setdefault(tag, []).append(upload.id)
+    for tag, job in by_tag.items():
+        if tag in batches:
+            _adopt(job, job.provider_key, batches[tag])
+            continue
+        files = uploads.get(tag) or []
+        if files and delete_openai_uploads(keys.get("openai"),
+                                           files) < len(files):
+            continue   # the next pass tries the delete again
+        _give_up(job, now, "no batch at the provider")
+
+
+def _resolve_anthropic(jobs, keys, now):
+    """An Anthropic batch has no metadata, so a batch whose create was not
+    answered cannot be told from others without reading their results:
+    Loore does not look for it (Needs Peter on #806). The job is given
+    up; its account is due again on its next night. A batch the create
+    did make is billed once, never read, and stays at the provider for
+    its own retention."""
+    for job in jobs:
+        _give_up(job, now, "Anthropic is not searched")
+
+
+def _settled_submitting(now):
+    """Jobs left SUBMITTING by a run that can no longer be alive."""
+    return ExternalDigestBatchJob.query.filter(
+        ExternalDigestBatchJob.status == SUBMITTING,
+        ExternalDigestBatchJob.submitted_at
+        <= now - SUBMITTING_SETTLED_AFTER).order_by(
+        ExternalDigestBatchJob.id).all()
+
+
+def _resolve_submitting(jobs, keys, now):
+    """Settle the jobs a run left SUBMITTING (its create was under way
+    when the task's soft time limit struck or the worker was killed), per
+    provider. OpenAI: the batch found by the tag the create sent is
+    adopted (the collector saves the digest and deletes the batch as for
+    any other), an upload no batch followed is deleted. Anthropic: given
+    up. A listing that fails is tried again on the next pass."""
+    by_family = {}
+    for job in jobs:
+        family = "anthropic" if job.provider_key == "anthropic" else "openai"
+        by_family.setdefault(family, []).append(job)
+    for family, family_jobs in by_family.items():
+        resolve = (_resolve_anthropic if family == "anthropic"
+                   else _resolve_openai)
+        try:
+            resolve(family_jobs, keys, now)
+        except Exception as e:  # noqa: BLE001 — tried again next pass
+            soft_limit.reraise(e)
+            db.session.rollback()
+            logger.warning("External-digest jobs left mid-create: the %s "
+                           "lookup failed (%s); tried again on the next "
+                           "pass", family, type(e).__name__)
+            # Problems show: a provider unreadable for longer than any
+            # batch can live is given up on, and reported.
+            for job in family_jobs:
+                if now - job.submitted_at > BATCH_JOB_MAX_AGE:
+                    logger.error("External-digest job %s left mid-create: "
+                                 "%s could not be read for %s", job.id,
+                                 family, BATCH_JOB_MAX_AGE)
+                    _give_up(job, now, "its provider could not be read")
+
+
+def _job_outcome(job, listed, keys):
+    """(results, still_pending) of one pending job. A batch the listing
+    shows as still running costs no call of its own; an ended one is
+    read from the listing's object (its results still fetched); one the
+    listing does not show is retrieved on its own, as before."""
+    batch = listed.get(job.batch_id)
+    if batch is not None and not batch_ended(job.provider_key, batch):
+        return {}, {job.provider_key: job.batch_id}
+    known = {"known": {job.batch_id: batch}} if batch is not None else {}
+    try:
+        results, still_pending, _ = batch_check_and_collect(
+            {job.provider_key: job.batch_id}, keys, **known)
+        return results, still_pending
+    except Exception:
+        logger.exception("Collect failed for external-digest batch %s",
+                         job.batch_id)
+        # Unreadable, not merely unfinished — the case the age
+        # backstop exists for, so it must apply here too.
+        return {}, {job.provider_key: job.batch_id}
 
 
 def _collect_digest_batches():
     """Core of the collector (plain function so tests can call it
     without the Celery machinery)."""
+    now = datetime.utcnow()
     jobs = ExternalDigestBatchJob.query.filter_by(status="pending").all()
-    if not jobs:
+    settled = _settled_submitting(now)
+    if not jobs and not settled:
         return {"collected": 0, "abandoned": 0}
 
     keys = _batch_keys()
-    now = datetime.utcnow()
+    if settled:
+        # Adopted ones are collected with the others below.
+        _resolve_submitting(settled, keys, now)
+        jobs = ExternalDigestBatchJob.query.filter_by(
+            status="pending").all()
+        if not jobs:
+            return {"collected": 0, "abandoned": 0}
+    # Every pending job's status from the providers' list endpoints, many
+    # per call (Peter, 2026-11-03: "I just don't want to spam them with
+    # querying for results thousands of times per minute"): with one
+    # batch per account (2026-11-25) a night has as many digest batches
+    # as accounts.
+    listed = list_batches(
+        [(job.provider_key, job.batch_id) for job in jobs], keys,
+        oldest=min(job.submitted_at for job in jobs))
     collected = abandoned = 0
     for job in jobs:
-        try:
-            results, still_pending, _ = batch_check_and_collect(
-                {job.provider_key: job.batch_id}, keys)
-        except Exception:
-            logger.exception("Collect failed for external-digest batch %s",
-                             job.batch_id)
-            # Unreadable, not merely unfinished — the case the age
-            # backstop exists for, so it must apply here too.
-            still_pending = {job.provider_key: job.batch_id}
-            results = {}
+        results, still_pending = _job_outcome(job, listed, keys)
         if still_pending:
             if now - job.submitted_at > BATCH_JOB_MAX_AGE:
                 logger.error(

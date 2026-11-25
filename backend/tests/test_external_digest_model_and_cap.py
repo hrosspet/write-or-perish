@@ -132,11 +132,14 @@ def test_each_model_on_both_paths(app, monkeypatch):
 
     submitted = dn._stub_batch_submit(monkeypatch)
     assert _digest.sweep_external_digests()["submitted"] == 2
-    assert [r["user_id"] for r in submitted[0]["anthropic"]] == [
+    # One batch per account (2026-11-25).
+    by_provider = {provider: reqs for call in submitted
+                   for provider, reqs in call.items()}
+    assert [r["user_id"] for r in by_provider["anthropic"]] == [
         anthropic_user.id]
-    assert [r["model_id"] for r in submitted[0]["anthropic"]] == [SONNET]
+    assert [r["model_id"] for r in by_provider["anthropic"]] == [SONNET]
     assert [(r["user_id"], r["api_model"])
-            for r in submitted[0]["openai"]] == [(both_user.id, SOL)]
+            for r in by_provider["openai"]] == [(both_user.id, SOL)]
 
 
 @pytest.mark.parametrize("setting", [
@@ -263,7 +266,7 @@ def test_the_same_list_goes_to_sonnet_and_to_sol(app, monkeypatch):
 
     assert _digest.sweep_external_digests()["submitted"] == 2
     prompts = {provider: reqs[0]["messages"][0]["content"]
-               for provider, reqs in submitted[0].items()}
+               for call in submitted for provider, reqs in call.items()}
     assert len(_corpus_lines(prompts["anthropic"])) == 12
     assert prompts["anthropic"] == prompts["openai"]
 
@@ -570,7 +573,7 @@ def test_an_openai_digest_is_priced_at_sols_batch_prices(
 
     dn._fake_openai_batch(
         monkeypatch, {"file-out": [{
-            "custom_id": f"external-digest-{user.id}", "response": {
+            "custom_id": dn._sent_custom_id(user.id), "response": {
                 "status_code": 200, "body": {
                     "choices": [{"message": {"content": "# Topics\n- x"},
                                  "finish_reason": "stop"}],
@@ -593,8 +596,9 @@ def test_an_anthropic_digest_is_priced_at_sonnets_batch_prices(
     _db.session.commit()
     dn._stub_batch_submit(monkeypatch)
     assert _digest.sweep_external_digests()["submitted"] == 1
+    custom_id = dn._sent_custom_id(user.id)
     monkeypatch.setattr(_digest, "batch_check_and_collect", lambda ids, k: (
-        {f"external-digest-{user.id}": {
+        {custom_id: {
             "content": "# Topics\n- x", "input_tokens": 1000,
             "output_tokens": 100}}, {}, {}))
     _digest._collect_digest_batches()
