@@ -56,6 +56,20 @@ export function parseShareBlocks(text) {
   return [];
 }
 
+// One key per block of parseShareBlocks: its type and text, and which
+// copy it is when the same block appears more than once. The card keeps
+// a block's Save state under it, so an edit that changes a block's text
+// drops the "Saved" it had, and one that moves a block keeps it (as the
+// server's saved_indexes do after an edit).
+export function shareBlockKeys(shares) {
+  const seen = {};
+  return shares.map(({ content, type }) => {
+    const base = `${type}\u0000${content}`;
+    seen[base] = (seen[base] || 0) + 1;
+    return `${base}\u0000${seen[base]}`;
+  });
+}
+
 export function parseTodoItems(text) {
   return text.split('\n')
     .map(l => l.replace(/^[-*]\s*/, '').replace(/^\[[ xX]\]\s*/, '').trim())
@@ -713,11 +727,13 @@ export default function ProposalInline({
     }
     const shareEntry = toolCallsMeta.find(tc => tc.name === 'propose_share');
     const applyShareCall = toolCallsMeta.find(tc => tc.name === 'apply_share');
+    // Read afresh each time: after an edit of the node the server says
+    // again which blocks are saved, and a changed block is not.
     if ((shareEntry && shareEntry.apply_status === 'completed')
-        || (applyShareCall && applyShareCall.status === 'success')) {
+        || (!shareEntry && applyShareCall && applyShareCall.status === 'success')) {
       setMetaSavedShares('all');
-    } else if (shareEntry?.saved_indexes?.length) {
-      setMetaSavedShares(shareEntry.saved_indexes);
+    } else {
+      setMetaSavedShares(shareEntry?.saved_indexes?.length ? shareEntry.saved_indexes : null);
     }
   }, [toolCallsMeta]);
 
@@ -839,13 +855,15 @@ export default function ProposalInline({
     }
   }, [nodeId, onApplied]);
 
-  const handleSaveShare = useCallback(async (idx) => {
+  // idx: the block's position, which the server takes; key: its
+  // shareBlockKeys entry, which this session's state is kept under.
+  const handleSaveShare = useCallback(async (idx, key) => {
     if (!nodeId) return;
-    setShareStates(s => ({ ...s, [idx]: 'started' }));
+    setShareStates(s => ({ ...s, [key]: 'started' }));
     try {
       const res = await api.post('/share/save-proposal',
         { node_id: nodeId, share_index: idx });
-      setShareStates(s => ({ ...s, [idx]: 'completed' }));
+      setShareStates(s => ({ ...s, [key]: 'completed' }));
       onApplied?.('propose_share', {
         apply_status: res.data?.status === 'completed' ? 'completed' : 'partial',
         share_id: res.data?.share?.id,
@@ -853,13 +871,15 @@ export default function ProposalInline({
       });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Saving the share failed';
-      setShareStates(s => ({ ...s, [idx]: 'error' }));
-      setShareErrors(e => ({ ...e, [idx]: msg }));
+      setShareStates(s => ({ ...s, [key]: 'error' }));
+      setShareErrors(e => ({ ...e, [key]: msg }));
     }
   }, [nodeId, onApplied]);
 
-  // A block is saved if this session saved it, or the server meta says so.
-  const shareStateFor = (idx) => shareStates[idx]
+  // A block is saved if this session saved that block (its text and
+  // type, wherever an edit moved it), or the server meta says so.
+  const shareKeys = shareBlockKeys(shares);
+  const shareStateFor = (idx) => shareStates[shareKeys[idx]]
     || ((metaSavedShares === 'all'
       || (Array.isArray(metaSavedShares) && metaSavedShares.includes(idx)))
       ? 'completed' : null);
@@ -1126,7 +1146,7 @@ export default function ProposalInline({
             {canAct && (
             <div style={styles.issueButtonWrapper}>
               {!state && (
-                <button onClick={() => handleSaveShare(idx)} style={styles.button}>
+                <button onClick={() => handleSaveShare(idx, shareKeys[idx])} style={styles.button}>
                   {styles.roomy ? 'Save to your shares' : 'Save to shares'}
                 </button>
               )}
@@ -1146,7 +1166,7 @@ export default function ProposalInline({
               )}
               {state === 'error' && (
                 <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
-                  {shareErrors[idx] || 'Saving the share failed'}
+                  {shareErrors[shareKeys[idx]] || 'Saving the share failed'}
                 </StatusTag>
               )}
             </div>

@@ -8,7 +8,10 @@ the matching propose_* entry into the reply's tool_calls_meta.
 
 Accepting one, by the card's button, by the voice and text tools, or by a
 todo merge that is started, applied again or retried, acts only on the
-user's own live proposal (is_own_live_proposal).
+user's own live proposal (is_own_live_proposal). The share card's Save
+button is the exception: it saves the :::share blocks of any live node of
+the user's own, with or without a proposal (utils/share
+.may_save_shares_from), since what it makes is a private draft.
 """
 
 from backend.models import Draft
