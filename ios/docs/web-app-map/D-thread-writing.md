@@ -525,7 +525,7 @@ There is no reject/dismiss button. Not applying leaves the proposal pending unti
 | Apply todo | `POST /todo/apply-draft {llm_node_id}` | 202 `{status:'started', task_id, llm_node_id}`; 404 "No pending todo changes found". Then poll `GET /nodes/<id>/llm-status` every **2 s** until `tool_calls_meta[propose_todo].apply_status` is `completed` or `failed` (`apply_error`). The merge task reads the **LLM node's current content** (so the user's ticks/edits count), merges into the todo with the `orient_apply_todo` prompt, saves a new UserTodo version. |
 | Create issue | `POST /github/create-issue {llm_node_id}` | `{issue_url, issue_number, ...}`; errors 404 "No pending GitHub issue found", 400 "Could not parse issue from proposal", 500. |
 | Send feedback | `POST /feedback/submit {llm_node_id}` | `{feedback_id, ...}`; 404 "No pending feedback found". |
-| Save share | `POST /share/save-proposal {node_id, share_index}` | `{status: 'completed'|'partial', share, shares, saved_indexes, total}`; 400 "Already saved"; 404 "No pending share found" / "Not found" (sharing disabled). Works on the user's own nodes without a pending draft. |
+| Save share | `POST /share/save-proposal {node_id, share_index}` | `{status: 'completed'|'partial', share, shares, saved_indexes, total}`; 400 "Already saved"; 404 "Node not found" (not the user's own node) / "Not found" (sharing disabled). Saves the sent node's own blocks for its owner, entry or AI reply, with or without a pending draft (A.142). |
 
 After each success the page's copy of `tool_calls_meta` is updated (`onApplied`).
 

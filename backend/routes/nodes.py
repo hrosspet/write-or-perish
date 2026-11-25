@@ -1078,6 +1078,10 @@ def update_node(node_id):
         # edited text — chunk windowing and update gates sum this column.
         from backend.utils.tokens import approximate_token_count as _atc_upd
         node.token_count = _atc_upd(new_content)
+        # The :::share blocks saved from this node, and an AI proposal's
+        # pending share, follow the edited text (utils/share).
+        from backend.utils.share import sync_share_state_after_edit
+        sync_share_state_after_edit(node, old_content, new_content)
 
     # Optional cascade, chosen in the edit dialog when the node has replies:
     # the same privacy / AI-usage change applied to every alive reply below

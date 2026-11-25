@@ -11,16 +11,20 @@ Consent model, structurally enforced:
 """
 from flask import Blueprint, jsonify, request, current_app
 from flask_login import login_required, current_user
-from backend.models import Node, ShareDraft
+from backend.models import Draft, Node, ShareDraft
 from backend.extensions import db
-from backend.utils.share import save_share_drafts_from_node
-from backend.utils.tool_meta import update_tool_meta, get_tool_meta_entry
+from backend.utils.share import (
+    SHARE_PENDING_LABEL, may_save_shares_from, save_share_drafts_from_node,
+    saved_positions,
+)
+from backend.utils.tool_meta import (
+    get_tool_meta_entry, parse_share, update_tool_meta,
+)
 from backend.utils.timefmt import iso_utc
 from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.slugs import permalink_for
 from backend.utils.privacy import (
     AIUsage, PrivacyLevel, can_user_access_node)
-from backend.utils.proposals import find_own_pending_proposal
 from datetime import datetime
 
 share_bp = Blueprint("share", __name__)
@@ -288,20 +292,24 @@ def revoke_share(share_id):
 @share_bp.route("/save-proposal", methods=["POST"])
 @login_required
 def save_proposal():
-    """Save the share(s) proposed on a node as private drafts.
+    """Save the share(s) written on a node as private drafts.
 
     Mirrors /feedback/submit: the share text lives in the visible node
     content (fenced :::share blocks); this confirms + persists it only when
     the user clicks Save (or the equivalent apply_share tool). The result is
     PRIVATE drafts — publication is a separate action on the Share page.
 
-    Two origins are accepted:
-    - LLM proposal nodes, located via the pending share_pending Draft the
-      completion task created (walking the ancestor chain): only the
-      user's own live proposal (utils/proposals).
-    - The user's OWN nodes carrying :::share blocks they wrote or pasted
-      themselves — no pending draft exists there, so the node itself is
-      parsed directly (owner-only).
+    The blocks saved are always the addressed node's own, read from its
+    current text (an edit of the node wins), and only its owner may save
+    them: the author of an entry, or the user an AI reply was written for
+    (utils/share.may_save_shares_from). That is every node the pages show
+    the Save button on: an AI's proposal, an entry the user typed,
+    recorded or pasted, and an AI reply whose blocks have no pending
+    proposal (the user wrote them in by an edit, a newer proposal replaced
+    it, or the reply task left none). The click is the consent; no
+    pending Draft is needed for it. The pending share_pending Draft the
+    reply task leaves on its proposal gates the apply_share tool only,
+    and goes here once every block of the node is saved.
 
     Each :::share block has its own Save button: pass ``share_index``
     (0-based, content order) to save just that block. Omitting it saves
@@ -325,29 +333,28 @@ def save_proposal():
             return jsonify({"error": "Invalid share_index"}), 400
 
     node = Node.query.get(node_id)
-    if not node or not can_user_access_node(node, current_user.id):
+    if (not node or not can_user_access_node(node, current_user.id)
+            or not may_save_shares_from(node, current_user.id)):
+        # Someone else's node gets the answer a node they cannot see gets.
         return jsonify({"error": "Node not found"}), 404
 
-    # The pending proposal at or above the node, walking up its ancestors:
-    # only the user's own live proposal (utils/proposals).
-    draft, origin_node = find_own_pending_proposal(
-        node, current_user.id, 'share_pending')
-    if draft is None:
-        if node.node_type != "llm" and node.user_id == current_user.id:
-            # Self-authored share blocks — parse the addressed node
-            # directly.
-            origin_node = node
-        else:
-            return jsonify({"error": "No pending share found"}), 404
+    # The AI's pending proposal on this node, when it is one.
+    draft = Draft.query.filter_by(
+        user_id=current_user.id, parent_id=node.id,
+        label=SHARE_PENDING_LABEL,
+    ).first()
 
-    entry = get_tool_meta_entry(origin_node, "propose_share")
-    already = set((entry or {}).get("saved_indexes") or [])
+    entry = get_tool_meta_entry(node, "propose_share")
+    content = node.get_content() or ""
+    already = saved_positions(
+        entry, len(parse_share(content).get("shares") or []))
     if share_index is not None and share_index in already:
         return jsonify({"error": "Already saved"}), 400
 
     indexes = [share_index] if share_index is not None else None
     saved, total, err = save_share_drafts_from_node(
-        origin_node, current_user.id, indexes=indexes, skip=already)
+        node, current_user.id, indexes=indexes, skip=already,
+        content=content)
     if err:
         return jsonify({"error": err}), 400
 
@@ -356,7 +363,7 @@ def save_proposal():
     if draft and all_saved:
         db.session.delete(draft)
     new_ids = [s.id for _, s in saved]
-    update_tool_meta(origin_node, "propose_share", {
+    update_tool_meta(node, "propose_share", {
         "apply_status": "completed" if all_saved else "partial",
         "share_id": ((entry or {}).get("share_id")) or new_ids[0],
         "share_ids": (((entry or {}).get("share_ids")) or []) + new_ids,

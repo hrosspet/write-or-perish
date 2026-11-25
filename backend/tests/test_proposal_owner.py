@@ -5,7 +5,10 @@ sending feedback, saving shares) runs only when the reply is the
 requester's own AI reply, not deleted, and carries the propose_* entry of
 that kind (utils/proposals). That holds for the card's routes, the voice
 and text tools (llm_completion._execute_tool_calls) and the todo merge
-task, which checks again before it reads the proposal. Recordings can't
+task, which checks again before it reads the proposal. One exception: the
+share card's Save button saves the :::share blocks of any live node of
+the user's own, AI reply or entry, without the propose_share entry
+(utils/share.may_save_shares_from); what it makes is a private draft. Recordings can't
 carry a proposal label, and a recording can't start or finish under a
 deleted parent. The one-time clean-up script removes the proposal drafts
 that don't belong to their node's owner.
@@ -343,8 +346,16 @@ def _nothing_happened(effects, alice, node, kind, todo_before):
 
 # ── The proposal routes ──────────────────────────────────────────────────
 
-@pytest.mark.parametrize("kind", list(ROUTES))
-@pytest.mark.parametrize("case", ["other", "deleted", "not_proposal"])
+# Every case but one: the Save button saves the :::share blocks of the
+# user's own live AI reply whether or not it carries a propose_share
+# entry (test_save_button_saves_own_reply_without_a_proposal below).
+_REFUSALS = [(case, kind)
+             for case in ["other", "deleted", "not_proposal"]
+             for kind in ROUTES
+             if (case, kind) != ("not_proposal", "share")]
+
+
+@pytest.mark.parametrize("case,kind", _REFUSALS)
 def test_route_refuses_a_node_that_is_not_the_users_live_proposal(
         app, effects, case, kind):
     alice = _user("alice")
@@ -412,6 +423,25 @@ def test_share_route_still_saves_the_users_own_written_blocks(app, effects):
 
     assert resp.status_code == 200
     assert ShareDraft.query.one().user_id == alice.id
+
+
+def test_save_button_saves_own_reply_without_a_proposal(app, effects):
+    """alice's own live AI reply with a :::share block but no
+    propose_share entry (she wrote the block in, or the reply task left no
+    proposal): the Save button the page shows her saves it as a private
+    draft, as for blocks in her own entry. A stray pending draft on it is
+    used up, never acted on elsewhere."""
+    alice = _user("alice")
+    node = _case("not_proposal", alice, "share")
+
+    resp = _client(app, alice).post("/api/share/save-proposal",
+                                    json={"node_id": node.id})
+
+    assert resp.status_code == 200, resp.get_json()
+    row = ShareDraft.query.one()
+    assert row.user_id == alice.id and row.status == "draft"
+    assert row.source_node_id == node.id
+    assert Draft.query.filter_by(label="share_pending").count() == 0
 
 
 # ── The voice and text tools ─────────────────────────────────────────────

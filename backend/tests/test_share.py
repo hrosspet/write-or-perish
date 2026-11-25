@@ -517,14 +517,23 @@ def test_save_proposal_rejects_another_users_node(app, client):
         assert ShareDraft.query.count() == 0
 
 
-def test_save_proposal_route_no_pending(app, client):
+def test_save_proposal_ai_reply_without_pending_draft(app, client):
+    """The owner's AI reply whose :::share block has no pending proposal
+    (written in by an edit, replaced by a newer proposal, or never marked)
+    saves on the click like any proposal: a private draft. It used to
+    answer 404 "No pending share found" under a Save button the page
+    showed."""
     with app.app_context():
         uid = User.query.first().id
         origin = _mk_llm_node(uid, SHARE_TEXT)
         origin_id = origin.id
     resp = client.post("/api/share/save-proposal",
                        json={"llm_node_id": origin_id})
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.get_json()["share"]["status"] == "draft"
+    with app.app_context():
+        assert ShareDraft.query.count() == 1
+        assert ShareDraft.query.first().public_node_id is None
 
 
 # ── CRUD + lifecycle ─────────────────────────────────────────────────────
@@ -629,6 +638,13 @@ def test_routes_404_when_flag_off():
         assert client.get("/api/share").status_code == 404
         assert client.post("/api/share",
                            json={"content": "x"}).status_code == 404
+        node = Node(user_id=user.id, node_type="user")
+        node.set_content(SHARE_TEXT)
+        _db.session.add(node)
+        _db.session.commit()
+        assert client.post("/api/share/save-proposal",
+                           json={"node_id": node.id}).status_code == 404
+        assert ShareDraft.query.count() == 0
         anon = app.test_client()
         assert anon.get("/api/share/public/tester").status_code == 404
         _db.session.rollback()
