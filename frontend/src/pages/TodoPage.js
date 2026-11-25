@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api';
 import {
-  NEWER_MESSAGE_MS, NEWER_TODO_MESSAGE,
+  NEWER_MESSAGE_MS, NEWER_TODO_MESSAGE, NEWER_TODO_SHOWN_MESSAGE,
   appendItemToSection, hasCheckboxItem, insertItemAfter, stripInlineMarkdown, toggleCheckbox,
 } from '../utils/markdown';
 import { useToast } from '../contexts/ToastContext';
@@ -384,7 +384,9 @@ export default function TodoPage() {
   // - quick-add is applied to the newest list the 409 carries and saved
   //   again (#430), which the page then shows: it adds a line to Today and
   //   changes none. An edit whose item is no longer in that list is dropped
-  //   rather than guessed.
+  //   rather than guessed. Ticks tapped while it was saving wait for it
+  //   (the queue) and were made on the list the page showed then, not on
+  //   that newer one: they are undone with the same toast (#799 review).
   // What the page shows is the server's list with the edits still being
   // saved applied on top. An edit is a function from a list's content to the
   // new content, or to null when its item isn't in that list.
@@ -406,24 +408,27 @@ export default function TodoPage() {
   const saveEdit = useCallback(async (edit, onShownVersion) => {
     let base = serverTodoRef.current;
     if (!base) return { ok: false, reason: 'error', newest: null };
+    // Whether the page's base moved to a list it never showed (a 409's).
+    let moved = false;
     // The first try, and (quick-add) one more on the newest list after a 409.
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const content = edit(base.content);
-      if (content === null) return { ok: false, reason: 'gone', newest: base };
+      if (content === null) return { ok: false, reason: 'gone', newest: base, moved };
       // Already so in the list (e.g. ticked on another device).
-      if (content === base.content) return { ok: true, newest: base };
+      if (content === base.content) return { ok: true, newest: base, moved };
       try {
         const res = await api.patch('/todo', { content, base_revision: base.revision });
-        return { ok: true, newest: res.data.todo };
+        return { ok: true, newest: res.data.todo, moved };
       } catch (err) {
         const newest = err.response?.status === 409 ? err.response.data?.todo : null;
-        if (!newest) return { ok: false, reason: 'error', err, newest: base };
+        if (!newest) return { ok: false, reason: 'error', err, newest: base, moved };
         // Nothing saved; the page keeps the list it shows (#795).
         if (onShownVersion) return { ok: false, reason: 'newer', newest: base };
         base = newest;
+        moved = true;
       }
     }
-    return { ok: false, reason: 'changed', newest: base };
+    return { ok: false, reason: 'changed', newest: base, moved };
   }, []);
 
   // Resolves to whether the edit was saved. `failure` names the action in
@@ -448,6 +453,13 @@ export default function TodoPage() {
         return false;
       }
       pendingEditsRef.current = pendingEditsRef.current.filter((e) => e !== entry);
+      if (result.moved && pendingEditsRef.current.some((e) => e.onShownVersion)) {
+        // A quick-add landed on a newer list than the page showed: the
+        // ticks waiting behind it were made on the older one. Undone, with
+        // one toast; the page shows the newer list (#799 review).
+        pendingEditsRef.current = pendingEditsRef.current.filter((e) => !e.onShownVersion);
+        addToast(NEWER_TODO_SHOWN_MESSAGE, NEWER_MESSAGE_MS);
+      }
       showTodo(result.newest);
       if (!result.ok && failure) {
         if (result.reason === 'gone') {

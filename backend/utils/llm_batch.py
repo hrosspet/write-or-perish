@@ -512,6 +512,11 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     requests_by_provider: dict mapping provider -> list of
         {"custom_id": str, "model_id": str, "api_model": str,
          "messages": list, "max_tokens": int}
+        and optionally "user_id", "endpoint", "reasoning_effort", and
+        "one_shot": True for a request no later request starts with the
+        same prefix: on an OpenAI model that takes the option it asks for
+        no prompt cache, so it pays no cache write (#803,
+        utils/one_shot_cache.py). Anthropic requests ignore it.
 
     Returns a SubmittedBatches: the dict of batch IDs keyed by provider
     (+ model for OpenAI), whose ``account_refused`` names the provider
@@ -577,6 +582,7 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
     # --- OpenAI: one batch per model (all requests must share a model) ---
     openai_reqs = requests_by_provider.get("openai", [])
     if openai_reqs:
+        from backend.utils.one_shot_cache import one_shot_cache_options
         from backend.utils.safety_identifier import openai_safety_identifier
         client = OpenAI(api_key=api_keys["openai"],
                         **soft_limit.client_kwargs(openai_sdk))
@@ -639,6 +645,13 @@ def batch_submit(requests_by_provider, api_keys, phase=None):
                             # is for (Peter, 2026-11-04).
                             body["safety_identifier"] = (
                                 openai_safety_identifier(req.get("user_id")))
+                            # #803: a one-shot request asks for no prompt
+                            # cache, on a model that takes the option.
+                            if req.get("one_shot"):
+                                options = one_shot_cache_options(
+                                    req.get("model_id"), oai_model)
+                                if options:
+                                    body["prompt_cache_options"] = options
                             line = {
                                 "custom_id": req["custom_id"],
                                 "method": "POST",

@@ -1183,11 +1183,15 @@ def _request(models, model_id, custom_id, messages, merge=False):
     """A batch request. An OpenAI merge goes to the Responses endpoint,
     as the live call the merge experiments ran through, with the
     configured reasoning effort; a window stays on chat/completions, as
-    the Luna windows were tested."""
+    the Luna windows were tested.
+
+    One-shot, windows and merges alike: no request starts with a
+    window's prompt or with a whole merge, so neither writes a prompt
+    cache (#803)."""
     provider, api_model = _batch._provider_and_model(model_id)
     req = {"custom_id": custom_id, "model_id": model_id,
            "api_model": api_model, "messages": messages,
-           "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS}
+           "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS, "one_shot": True}
     if merge and provider == "openai":
         from backend.utils.llm_batch import RESPONSES_ENDPOINT
         req["endpoint"] = RESPONSES_ENDPOINT

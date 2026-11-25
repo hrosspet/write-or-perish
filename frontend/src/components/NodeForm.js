@@ -25,6 +25,8 @@ import {
 } from "../utils/spendCap";
 import { noteSkippedReply } from "../utils/subscription";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import { NEWER_ENTRY_EDIT_MESSAGE, isContentChanged } from "../utils/markdown";
+import { NewerVersionNotice, OlderDraftBox } from "./NewerVersionNotice";
 
 const NodeForm = forwardRef(
   (
@@ -164,18 +166,28 @@ const NodeForm = forwardRef(
     // server's answer ({ message, quoted }), shown as a dialog; nothing
     // was saved (Peter, 2026-11-12).
     const [quotesRefusal, setQuotesRefusal] = useState(null);
+    // An edit's Save was refused: the entry changed since the form was
+    // opened (#799). The form keeps the person's text and says what to do.
+    const [newerVersion, setNewerVersion] = useState(false);
+    // An unsaved edit written on an older version of the entry (#761,
+    // #799): offered below the editor, never loaded into it.
+    const [olderDraft, setOlderDraft] = useState(null);
 
     // Draft auto-save hook
     const {
       draft,
       isLoaded: isDraftLoaded,
       saveDraft,
+      saveDraftNow,
       deleteDraft,
       lastSaved,
       isSaving: isDraftSaving
     } = useDraft({
       nodeId: editMode ? nodeId : null,
-      parentId: editMode ? null : parentId
+      parentId: editMode ? null : parentId,
+      // The entry's text the form was opened on: the draft records it, so
+      // a draft written on an older version is offered, not loaded (#799).
+      baseContent: editMode && typeof initialContent === "string" ? initialContent : null,
     });
 
     // Audio file upload state
@@ -281,11 +293,25 @@ const NodeForm = forwardRef(
         // A left-behind recording is offered in the banner instead (#389);
         // its text comes into the box only if the user chooses Recover.
         if (draft.session_id && draft.has_stored_chunks) return;
+        if (editMode && draft.older_than_entry) {
+          // Written on an older version of the entry (#761, #799): loaded,
+          // its Save would put the older text over the newer one. The form
+          // keeps the entry's text and offers the draft below it.
+          if (draft.content !== (initialContent || "")) {
+            setOlderDraft({ id: draft.id, content: draft.content, updated_at: draft.updated_at });
+          }
+          return;
+        }
         // Auto-populate the form with draft content
         setContent(draft.content);
         setHasDraft(true);
+        // Typed on the entry's text while such an edit was offered, which
+        // is still kept (#766).
+        if (editMode && draft.older_draft && draft.older_draft.content !== draft.content) {
+          setOlderDraft(draft.older_draft);
+        }
       }
-    }, [isDraftLoaded, draft]);
+    }, [isDraftLoaded, draft]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
@@ -409,11 +435,22 @@ const NodeForm = forwardRef(
 
     // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
-      deleteDraft();
+      // Only the text typed here; an older edit on offer stays (#766).
+      deleteDraft(olderDraft ? { keepingId: olderDraft.id } : undefined);
       setHasDraft(false);
       // Reset content to initial value (empty for new nodes, original content for edit mode)
       setContent(initialContent || "");
-    }, [deleteDraft, initialContent]);
+    }, [deleteDraft, initialContent, olderDraft]);
+
+    // "Discard" on the older edit: only its row goes; the form's text stays.
+    const handleDiscardOlderDraft = useCallback(() => {
+      const older = olderDraft;
+      setOlderDraft(null);
+      if (!older || !nodeId) return;
+      api.delete(`/drafts/?node_id=${nodeId}&draft_id=${older.id}`).catch((err) => {
+        if (err.response?.status !== 404) console.error("Error discarding the older edit:", err);
+      });
+    }, [olderDraft, nodeId]);
 
     // A new entry is sent: the form is cleared before the caller moves on.
     // The page can stay on screen until the entry's node loads
@@ -571,6 +608,7 @@ const NodeForm = forwardRef(
 
       setLoading(true);
       setError("");
+      setNewerVersion(false);
       try {
         let response;
 
@@ -704,6 +742,10 @@ const NodeForm = forwardRef(
           // Update (edit) existing node (text only)
           response = await api.put(`/nodes/${nodeId}`, {
             content,
+            // The text the form was opened on (#799): saved only while it is
+            // still the entry's text, so an older text never goes over a
+            // newer one. Untouched text saves only the settings.
+            ...(typeof initialContent === "string" && { base_content: initialContent }),
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
             // Detaching the pinned prompt only makes sense when the text was
@@ -802,8 +844,14 @@ const NodeForm = forwardRef(
             ai_usage: aiUsage
           });
         }
-        // Delete draft after successful save
-        deleteDraft();
+        // Delete draft after successful save. An edit deletes only the
+        // rows this form showed (its own, the older edit on offer): another
+        // device's unsaved edit of the entry stays (#799 review).
+        if (editMode) {
+          deleteDraft({ shownIds: olderDraft ? [olderDraft.id] : [] });
+        } else {
+          deleteDraft();
+        }
         setHasDraft(false);
 
         // Auto-generate path (without Agentic Reply): after creating
@@ -852,6 +900,20 @@ const NodeForm = forwardRef(
         if (quotesErr) {
           // Nothing was saved: the form keeps its text and settings.
           setQuotesRefusal(quotesErr);
+        } else if (editMode && isContentChanged(err)) {
+          // Nothing was saved: the entry changed since the form was opened
+          // (#799). The text stays in the form, and the notice says what
+          // to do with it. It is saved as a draft at once, with the form's
+          // base: another device's Save may have deleted this form's draft,
+          // and a reload must not lose it (#799 review). Reopened, the
+          // form offers it beside the entry's current text. Only typed
+          // text: a refused settings-only Save keeps no copy of the old
+          // text as "your unsaved edit" (#799 second review).
+          setNewerVersion(true);
+          if (content !== initialContent) {
+            saveDraftNow(content);
+            setHasDraft(true);
+          }
         } else if (uploadedFile && isSpendCapError(err)) {
           // The client-side cap flag was stale; the server refused the
           // upload before storing anything (#341). The banner is up; the
@@ -967,6 +1029,17 @@ const NodeForm = forwardRef(
           placeholder={placeholder || "What's present for you right now..."}
           disabled={!editMode && uploadedFile}
         />
+
+        {newerVersion && (
+          <NewerVersionNotice message={NEWER_ENTRY_EDIT_MESSAGE} text={content} />
+        )}
+        {olderDraft && (
+          <OlderDraftBox
+            draft={olderDraft}
+            formShowsNewerText={hasDraft}
+            onDiscard={handleDiscardOlderDraft}
+          />
+        )}
 
         {/* Privacy Settings */}
         {!hidePowerFeatures && (

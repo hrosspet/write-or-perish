@@ -301,11 +301,13 @@ def _merge_once(load):
     _account_gates(user)
     _set(load.id, merge_model=models.merge, merge_heartbeat_at=_now())
     # A normal final merge's request (profile_windows._request): the same
-    # output bound, and an OpenAI merge's configured reasoning effort.
+    # output bound, an OpenAI merge's configured reasoning effort, and no
+    # prompt cache write (#803). A retry after a failed attempt then pays
+    # the full input instead of reading the first attempt's cache.
     response = LLMProvider.get_completion(
         models.merge, messages, keys, user_id=user.id,
         max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-        reasoning_effort=models.merge_effort)
+        reasoning_effort=models.merge_effort, one_shot=True)
     problem = _output_problem(response, gen_template)
     if problem:
         # Billed, so its cost row is written, outside the profile build's

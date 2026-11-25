@@ -442,6 +442,43 @@ class Config:
     PROFILE_WINDOW_RENDER_SECONDS = int(
         os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "600")
 
+    # --- Saved References Digest (backend/tasks/external_digest.py) ---
+    # The digest's model (Peter, 2026-11-24: "pls make Sol 6.2 default for
+    # digests for users who either use OAI models or who allowed to use
+    # both providers. For anthropic only users use Sonnet 5.5"; Haiku 5.5
+    # and Luna are not used for it). DIGEST_MODEL_OPENAI for an account
+    # whose own model (llm_nodes.default_model_for) is OpenAI's, and for
+    # one that answered "both providers" (User.profile_both_providers);
+    # DIGEST_MODEL_ANTHROPIC for an account on an Anthropic model that
+    # answered "one provider" or never answered. Each must be an active
+    # model of THAT provider (checked at boot, validate_digest_settings).
+    # On a failure the digest never falls back to another provider or
+    # model. Before 2026-11-24 the digest ran on the account's own chat
+    # model.
+    DIGEST_MODEL_ANTHROPIC = (
+        os.environ.get("DIGEST_MODEL_ANTHROPIC") or "claude-sonnet-5.5")
+    DIGEST_MODEL_OPENAI = (
+        os.environ.get("DIGEST_MODEL_OPENAI") or "gpt-6.2-sol")
+    # Heuristic: the most one digest request may hold, in o200k tokens
+    # (OpenAI's tokenizer, counted on this machine), the whole request:
+    # instructions, corpus header, message framing and the listed lines.
+    # The saved list is listed newest-saved first until the next line
+    # would pass it; the rest is left out and counted in the header.
+    # Peter, 2026-11-24: "The cap should be based on OAI's price hike. Use
+    # the same for Sonnet 5.5, even though there is no hike": GPT-6.2 Sol
+    # bills the whole request at 2x input and 1.5x output above 272,000
+    # input tokens, and the same list goes to Sonnet 5.5 (flat pricing,
+    # a 1M window, 3.9 times the cap; on the owner's list Claude's
+    # tokenizer made 1.44 tokens per o200k token). 258,400 = 272,000 less
+    # a 5 % margin (the planner's CAP_MARGIN, utils/chunk_plan): the
+    # tokens Sol bills can differ from tiktoken's count. Counted in
+    # tokens, not characters: text dense in tokens crosses the step far
+    # sooner (o200k tokens per 4 characters, synthetic lists, 2026-11-24:
+    # English 0.93 to 1.17, Czech 1.43, Korean 1.98, Japanese 3.10).
+    # Before 2026-11-24: 300,000 characters and 1,500 items.
+    DIGEST_MAX_PROMPT_TOKENS = int(
+        os.environ.get("DIGEST_MAX_PROMPT_TOKENS") or "258400")
+
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search
     # as a within-turn LLM tool (and the read_full / {quote:ID} pull it
@@ -562,7 +599,11 @@ class Config:
     #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
     #                       #348): conversation calls pass the previous call's
     #                       response id and record why the cache missed. Older
-    #                       models must not get the option.
+    #                       models must not get the option. The flag also
+    #                       marks the models that take prompt_cache_options
+    #                       at all: a one-shot request (a digest, a profile
+    #                       build, ...) on them asks for no prompt cache and
+    #                       pays no cache write (#803, utils/one_shot_cache).
     #
     # Model picker keys (#355):
     #   deprecated — hidden from every picker and never inherited from a
@@ -586,7 +627,8 @@ class Config:
     #                to an active model of the same provider. Without it
     #                the rule above applies. A server setting that names
     #                the retired model (LLM_NAME, CHAT_MODEL_*,
-    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*) runs on the
+    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*, DIGEST_MODEL_*)
+    #                runs on the
     #                replacement, with one warning line at boot
     #                (replace_retired_settings); without a replacement it
     #                is refused at boot.

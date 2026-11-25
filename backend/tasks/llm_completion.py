@@ -87,6 +87,7 @@ from backend.utils.text_edits import apply_text_edits
 from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
+from backend.utils.artifact_copies import ArtifactCopies, edit_stamp
 from backend.utils.privacy import (
     AI_ALLOWED, X_API_INPUT, account_allows_ai, chat_at_most,
 )
@@ -2540,6 +2541,41 @@ def _base_version_error(inp, kind, latest_number):
     return None
 
 
+def _read_copy_error(copies, previous, kind, number):
+    """Why an update_artifact call based on *previous* (the latest version,
+    v*number*, which its base_version names) may not save, judged by the
+    text the model was given (utils/artifact_copies), or None. A tick or a
+    "+" on the artifacts page edits that version in place and keeps its
+    number: a write based on the text from before would put that text
+    back. Edits are refused too, as for a changed number (Peter,
+    2026-11-06)."""
+    if copies is None or previous is None:
+        return None
+    if not copies.knows(previous):
+        return (f"You have not been given the text of '{kind}' "
+                f"v{number}. Nothing was saved.")
+    if copies.changed(previous):
+        return (f"'{kind}' v{number} was edited by the user since you "
+                "read it (an edit on the artifacts page, such as a ticked "
+                "box, keeps the version number). Nothing was saved.")
+    return None
+
+
+def _locked_latest(user_id, kind, row):
+    """*row* (the latest version of *kind*) read again and locked until the
+    turn's next commit, so a tick on the artifacts page (which locks the
+    row too) can't land between this check and the write; asked again
+    under the lock, for a version added in between."""
+    for _ in range(2):
+        row = UserArtifact.query.filter_by(id=row.id) \
+            .populate_existing().with_for_update().one()
+        newest = UserArtifact.latest_for(user_id, kind)
+        if newest is None or newest.id == row.id:
+            return newest
+        row = newest
+    return row
+
+
 def _resolve_artifact_write(inp, previous):
     """Resolve the new full text for an update_artifact call.
 
@@ -2602,7 +2638,7 @@ def _written_from(licence, llm_node, node_chain, previous=None):
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         quote_labels=None, client=None, hold=None,
-                        licence=None):
+                        licence=None, copies=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
     resolve a search-result label; None outside the retrieval loop.
@@ -2618,7 +2654,13 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
 
     *licence* (the turn's PayloadLicence): whether a write is marked as
     written from X API posts (_written_from, #689). None on approval: the
-    reply's own mark is used."""
+    reply's own mark is used.
+
+    *copies* (utils/artifact_copies.ArtifactCopies): the artifact texts
+    the model was given. An update_artifact call is then also refused when
+    the version it is based on was edited in place since (_read_copy_error),
+    and a saved write adds its version. None (callers outside a turn):
+    the version number alone decides, as before."""
     tool_results = []
 
     for tc in tool_calls:
@@ -2714,6 +2756,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     )
                 else:
                     previous = UserArtifact.latest_for(user_id, kind)
+                    if previous is not None and copies is not None:
+                        previous = _locked_latest(user_id, kind, previous)
                     latest_number = 0
                     current_id = None
                     new_text = None
@@ -2726,6 +2770,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             latest_number = version_number(previous)
                         write_err = _base_version_error(
                             inp, kind, latest_number)
+                        if write_err is None:
+                            write_err = _read_copy_error(
+                                copies, previous, kind, latest_number)
                         if write_err is None:
                             new_text, write_err = _resolve_artifact_write(
                                 inp, previous)
@@ -2743,12 +2790,19 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     elif hold:
                         # Checked like a write: it names the version it is
                         # based on, which stays the latest until the user
-                        # decides (tool_approvals.decide writes it then).
+                        # decides (tool_approvals.decide writes it then),
+                        # and keeps that version's edit stamp: a tick in
+                        # place meanwhile makes approving it save nothing.
                         result.update(hold.hold(
                             name, inp, llm_node, user_id,
                             previous_artifact_id=(previous.id if previous
                                                   else None),
-                            kind=kind))
+                            kind=kind,
+                            stamped=(previous is not None
+                                     and copies is not None),
+                            base_edited_at=(edit_stamp(previous)
+                                            if previous is not None
+                                            else None)))
                         result["previous_artifact_id"] = (
                             previous.id if previous else None)
                         result["previous_version"] = latest_number or None
@@ -2813,6 +2867,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         artifact.set_content(new_text)
                         db.session.add(artifact)
                         db.session.flush()
+                        if copies is not None:
+                            # The answer shows the model what it wrote:
+                            # a later write in the turn may rest on it.
+                            copies.given(artifact)
                         result["status"] = "success"
                         result["artifact_id"] = artifact.id
                         result["kind"] = kind
@@ -4364,6 +4422,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             db.session.commit()
 
             node_chain = _load_node_chain(parent_node, user_id)
+            # The artifact texts the model is given this turn, from the
+            # prompt built below on (utils/artifact_copies): a write based
+            # on a version edited in place since is refused.
+            artifact_copies = ArtifactCopies.at_turn_start(user_id)
 
             # Step 2: Build messages array
             self.update_state(state='PROGRESS', meta={'progress': 30, 'status': 'Preparing messages'})
@@ -6060,6 +6122,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f_tool_calls, target_node, node_chain, user_id,
                         quote_labels=quote_labels, client=client,
                         hold=write_hold, licence=licence,
+                        copies=artifact_copies,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -6252,6 +6315,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         response_tool_calls, current_node, node_chain,
                         user_id, quote_labels=quote_labels, client=client,
                         hold=write_hold, licence=licence,
+                        copies=artifact_copies,
                     )
                     if interim_truncated:
                         for tr in tool_results:
@@ -6317,6 +6381,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             if current is not None:
                                 injection_strings.append(current)
                                 _pin_shown("user_artifact", current_row.id)
+                                if artifact_copies is not None:
+                                    artifact_copies.given(current_row)
                         elif tr.get("name") not in RETRIEVAL_TOOLS:
                             injection_strings.append(_action_result_text(tr))
                         elif tr.get("status") == "success":
@@ -6328,6 +6394,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 a_type, a_id = _retrieval_pin(tr)
                                 if a_type and a_id:
                                     _pin_shown(a_type, a_id)
+                                if (a_type == "user_artifact"
+                                        and artifact_copies is not None):
+                                    # The row the text was just read from
+                                    # (the session's own copy of it).
+                                    artifact_copies.given(
+                                        stored_version(a_id, user_id))
                             else:
                                 injection_strings.append(
                                     f"[{tr.get('name')}: the requested item "

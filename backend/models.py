@@ -128,6 +128,13 @@ class User(db.Model, UserMixin):
     external_content_enabled = db.Column(
         db.Boolean, nullable=False, default=False,
         server_default=db.text("false"))
+    # When the Saved References Digest first left part of this account's
+    # list out at its cap and said so to Sentry, once (Peter, 2026-11-24:
+    # "I'd like to know when users start crossing that threshold");
+    # cleared when a later digest's list fits whole again, so the next
+    # crossing is reported again (tasks/external_digest). NULL: not
+    # crossing, or never reported.
+    digest_cut_reported_at = db.Column(db.DateTime, nullable=True)
 
     # The user's own Glean switch (#435, Account settings), on top of the
     # rollout gate (GLEAN_FOR_ALL / GLEAN_USER_IDS). NULL = the user has
@@ -1399,6 +1406,15 @@ class Draft(db.Model):
     # #388. See backend/utils/recording_device.py.
     streaming_device_key = db.Column(db.String(64), nullable=True)
 
+    # An edit draft (node_id): the entry's text the form was opened on, as
+    # the form sends it with each autosave; encrypted like content. When it
+    # is no longer the entry's text, the draft was written on an older
+    # version (routes/drafts._older_than_entry): it is offered beside the
+    # entry's current text instead of being loaded, so its Save can't put
+    # the older text over a newer one. NULL for new-entry drafts and for
+    # drafts saved by clients that don't send it.
+    base_content = db.Column(db.Text, nullable=True)
+
     # Relationships
     user = db.relationship("User", backref="drafts")
     node = db.relationship("Node", foreign_keys=[node_id])
@@ -1411,6 +1427,17 @@ class Draft(db.Model):
     def get_content(self) -> str:
         """Get decrypted content."""
         return decrypt_content(self.content)
+
+    def set_base_content(self, plaintext):
+        """The entry's text the edit draft was written on (None: unknown)."""
+        self.base_content = (None if plaintext is None
+                             else encrypt_content(plaintext))
+
+    def get_base_content(self):
+        """The entry's text the edit draft was written on, or None."""
+        if self.base_content is None:
+            return None
+        return decrypt_content(self.base_content)
 
 
 class UserProfile(db.Model):

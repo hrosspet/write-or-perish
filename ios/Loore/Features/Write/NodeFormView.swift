@@ -105,8 +105,8 @@ private struct NodeFormBody: View {
                 RegenerateTtsDialog(onChoice: model.answerTts, onCancel: model.cancelDialog)
             case .scope?:
                 ApplyToRepliesDialog(
-                    privacyChanged: config.edit?.initialPrivacy != nil && model.privacy != config.edit?.initialPrivacy,
-                    aiUsageChanged: config.edit?.initialAIUsage != nil && model.aiUsage != config.edit?.initialAIUsage,
+                    privacyChanged: model.openedPrivacy != nil && model.privacy != model.openedPrivacy,
+                    aiUsageChanged: model.openedAIUsage != nil && model.aiUsage != model.openedAIUsage,
                     onChoice: model.answerScope, onCancel: model.cancelDialog)
             case .publicReply?:
                 PublicReplyDialog(onConfirm: model.answerPublicReply, onCancel: model.cancelDialog)
@@ -140,7 +140,8 @@ private struct NodeFormBody: View {
             .foregroundStyle(LooreColor.textPrimary)
             .lineSpacing(5)
             .focused($focused)
-            .disabled(!config.isEdit && model.uploadedFile != nil)
+            // An edit form waits until it has read the entry (#799 review).
+            .disabled((!config.isEdit && model.uploadedFile != nil) || !model.ready)
             .padding(.vertical, 14)
             .padding(.horizontal, 16)
             .frame(minHeight: config.compact ? 90 : min(400, max(120, UIScreen.main.bounds.height * 0.4)),
@@ -209,6 +210,15 @@ private struct NodeFormBody: View {
             if let error = model.error {
                 Text(error).font(LooreFont.sans(14.4, .regular)).foregroundStyle(LooreColor.accent)
                     .fixedSize(horizontal: false, vertical: true)
+                if model.newerVersion {
+                    // Refused for a newer version (#799): the text to apply again.
+                    Button("Copy my text") {
+                        UIPasteboard.general.string = model.content
+                        app.toasts.show("Copied your text")
+                    }
+                    .buttonStyle(.looreOutline)
+                    .accessibilityIdentifier("nodeForm.copyMine")
+                }
             }
             if !model.content.jsTrimmed.isEmpty {
                 if model.drafts.isSaving {

@@ -407,10 +407,13 @@ def _call_llm_with_retries(self, model_id, prompt_text, user_id,
         })
 
         try:
+            # One-shot: the next step's prompt carries this one's
+            # result, so no request starts with this prompt (#803).
             response = LLMProvider.get_completion(model_id, messages,
                                                   api_keys,
                                                   max_tokens=max_tokens,
-                                                  user_id=user_id)
+                                                  user_id=user_id,
+                                                  one_shot=True)
             return response
         except PromptTooLongError as e:
             if attempt == MAX_RETRIES:
@@ -1027,8 +1030,9 @@ def _do_merge(self, user, model_id, base, version, api_keys):
     self.update_state(state='PROGRESS', meta={
         'progress': 85, 'status': 'Merging your own version'
     })
+    # One-shot: ends with the integration prompt (#803).
     response = LLMProvider.get_completion(model_id, messages, api_keys,
-                                          user_id=user.id)
+                                          user_id=user.id, one_shot=True)
     refuse_truncated_profile(user, model_id, response, "merge")
     _discard_if_base_moved(user, model_id, base.id, response, "merge")
     return response["content"], save_merge(
@@ -2328,8 +2332,9 @@ def _do_integration(self, user, model_id, last_iterative_profile_id,
         'progress': 90, 'status': 'Integrating profile versions'
     })
 
+    # One-shot: ends with the integration prompt (#803).
     response = LLMProvider.get_completion(model_id, messages, api_keys,
-                                          user_id=user.id)
+                                          user_id=user.id, one_shot=True)
     refuse_truncated_profile(user, model_id, response, "integration")
     _discard_if_base_moved(user, model_id, last_iterative_profile_id,
                            response, "integration")

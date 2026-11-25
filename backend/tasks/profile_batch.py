@@ -552,6 +552,9 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                     "messages": [{"role": "user", "content": [
                         {"type": "text", "text": prompt}]}],
                     "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+                    # The next chunk's prompt carries this one's result:
+                    # no shared prefix, no prompt cache write (#803).
+                    "one_shot": True,
                 },
                 "meta": {
                     "custom_id": cid, "user_id": user.id, "kind": "chunk",
@@ -613,6 +616,9 @@ def _build_next_profile_request(user, allow_chunk=True, chunk_num=1):
                         "custom_id": cid, "model_id": model_id,
                         "api_model": api_model, "messages": messages,
                         "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+                        # Ends with the integration prompt: no later
+                        # request starts with it (#803).
+                        "one_shot": True,
                     },
                     "meta": {
                         "custom_id": cid, "user_id": user.id,
@@ -647,6 +653,8 @@ def _merge_request(user, prev, version, provider, api_model, model_id,
             "custom_id": cid, "model_id": model_id,
             "api_model": api_model, "messages": messages,
             "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+            # As an integration: no prompt cache write (#803).
+            "one_shot": True,
         },
         "meta": {
             "custom_id": cid, "user_id": user.id, "kind": "merge",
