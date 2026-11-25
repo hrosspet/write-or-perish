@@ -573,7 +573,7 @@ def test_an_openai_digest_is_priced_at_sols_batch_prices(
 
     dn._fake_openai_batch(
         monkeypatch, {"file-out": [{
-            "custom_id": f"external-digest-{user.id}", "response": {
+            "custom_id": dn._sent_custom_id(user.id), "response": {
                 "status_code": 200, "body": {
                     "choices": [{"message": {"content": "# Topics\n- x"},
                                  "finish_reason": "stop"}],
@@ -596,8 +596,9 @@ def test_an_anthropic_digest_is_priced_at_sonnets_batch_prices(
     _db.session.commit()
     dn._stub_batch_submit(monkeypatch)
     assert _digest.sweep_external_digests()["submitted"] == 1
+    custom_id = dn._sent_custom_id(user.id)
     monkeypatch.setattr(_digest, "batch_check_and_collect", lambda ids, k: (
-        {f"external-digest-{user.id}": {
+        {custom_id: {
             "content": "# Topics\n- x", "input_tokens": 1000,
             "output_tokens": 100}}, {}, {}))
     _digest._collect_digest_batches()

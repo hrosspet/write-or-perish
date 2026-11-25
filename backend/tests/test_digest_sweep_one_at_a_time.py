@@ -9,8 +9,13 @@ at a time").
 - Each account's request goes out as its own batch, its job row
   committed, before the next account is read. The task's soft time limit,
   a key-service outage or another error loses only the account being
-  prepared, which stays due; a soft limit during a submission records a
-  batch created before it.
+  prepared, which stays due.
+- The job row is committed before the create: a create whose answer is
+  lost sends the account once that night, and the collector finds its
+  batch (OpenAI by metadata, an upload alone by its name, Anthropic by
+  the custom_id in its results), adopts it or gives the job up.
+- Once a provider refuses a submission (its account, a full queue or a
+  rate limit), its other accounts in the run are not read.
 - An account due at 4:00 and not reached is taken at 5 or 6 o'clock the
   same night, once a night; one whose list changed only after 4:00 waits
   for its next night. Those that waited longest go first.
@@ -30,7 +35,7 @@ from google.api_core import exceptions as gexc
 from backend.tests import test_external_digest_nightly as dn
 from backend.extensions import db as _db
 from backend.models import ExternalDigestBatchJob, ExternalItem, User
-from backend.utils import encryption
+from backend.utils import encryption, soft_limit
 from backend.utils.soft_limit import SoftTimeLimitExceeded
 
 _digest = dn._digest
@@ -153,27 +158,6 @@ def test_a_stop_mid_run_loses_only_the_account_being_prepared(
                 & _digest._users_in_pending_batches())
 
 
-def test_a_soft_limit_during_a_submission_records_the_batch_it_created(
-        app, monkeypatch):
-    """batch_submit raises the soft limit with the batches created before
-    it (llm_batch._stop_on_soft_limit): the job is recorded, so the
-    collector saves that digest instead of the batch running unread."""
-    first, second = _accounts(2)
-
-    def submit(requests_by_provider, api_keys, phase=None):
-        stop = SoftTimeLimitExceeded()
-        stop.submitted = {"anthropic": "msgbatch_before_the_limit"}
-        raise stop
-    monkeypatch.setattr(_digest, "batch_submit", submit)
-
-    with pytest.raises(SoftTimeLimitExceeded):
-        _digest.sweep_external_digests()
-    job = ExternalDigestBatchJob.query.one()
-    assert job.batch_id == "msgbatch_before_the_limit"
-    assert [i["user_id"] for i in job.items] == [first.id]
-    assert second.id not in _digest._users_in_pending_batches()
-
-
 def test_a_refused_submission_leaves_that_account_due_and_goes_on(
         app, monkeypatch):
     """batch_submit logs a provider's refusal or failure and returns no
@@ -182,7 +166,7 @@ def test_a_refused_submission_leaves_that_account_due_and_goes_on(
     first, second = _accounts(2)
     sent = []
 
-    def submit(requests_by_provider, api_keys, phase=None):
+    def submit(requests_by_provider, api_keys, phase=None, tag=None):
         uid = requests_by_provider["anthropic"][0]["user_id"]
         sent.append(uid)
         return {} if uid == first.id else {"anthropic": f"b{uid}"}
@@ -216,6 +200,296 @@ def test_one_account_is_rendered_at_a_time(app, monkeypatch):
 
     assert _digest.sweep_external_digests()["submitted"] == len(users)
     assert in_flight == [1] * len(users)
+
+
+# ── A create whose answer is lost (review of #806, finding 1) ───────────
+
+def _stopped_mid_create():
+    """The soft limit as the HTTP client raises it inside an SDK call
+    (utils/soft_limit): batch_submit turns it back into the soft limit,
+    with no batch id."""
+    return soft_limit._SoftLimit(SoftTimeLimitExceeded())
+
+
+def _anthropic_answer_lost(monkeypatch, reaches=True):
+    """The Anthropic SDK faked (anthropic_batch_fake) with a create that
+    stops while it waits for the answer, after the request reached the
+    provider (*reaches*) or before. Returns the fake's batches."""
+    from backend.tests import anthropic_batch_fake as fake
+    batches = fake.install(monkeypatch)
+    created = {}
+    real_batch = batches._batch
+
+    def batch(batch_id):
+        listed = real_batch(batch_id)
+        listed.created_at = created.get(batch_id, listed.created_at)
+        running = batches.batches[batch_id] != "ended"
+        listed.request_counts = SimpleNamespace(
+            processing=int(running), succeeded=int(not running))
+        return listed
+
+    def create(requests):
+        batches.calls.append(("create", [r["custom_id"] for r in requests]))
+        if reaches:
+            batch_id = f"msgbatch_lost_{len(created)}"
+            batches.add(batch_id, status="in_progress")
+            created[batch_id] = datetime.utcnow()
+        raise _stopped_mid_create()
+    batches._batch = batch
+    batches.create = create
+    batches.created = created
+    return batches
+
+
+def _settle(monkeypatch):
+    """Time passes: the run that wrote a SUBMITTING job can no longer be
+    alive (SUBMITTING_SETTLED_AFTER has passed)."""
+    monkeypatch.setattr(_digest, "SUBMITTING_SETTLED_AFTER", timedelta(0))
+
+
+def test_a_create_stopped_while_it_waits_sends_the_account_once_and_its_batch_is_collected(  # noqa: E501
+        app, monkeypatch):
+    """The soft limit strikes while Anthropic's create is under way, after
+    the request reached it: the account's job row was committed before
+    the create, so the 5 o'clock run does not send it again. Once the
+    run can no longer be alive, the collector finds the batch by the
+    request's custom_id in its results (Anthropic batches carry no
+    metadata), adopts it, registers it for deletion (#693), saves the
+    digest and deletes the batch. Through the real batch_submit."""
+    from backend.models import AnthropicBatchDeletion, UserArtifact
+    from backend.tests import anthropic_batch_fake as fake
+    now = datetime.utcnow()
+    (user,) = _accounts(1)
+    batches = _anthropic_answer_lost(monkeypatch)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        _digest._sweep(now)
+    job = ExternalDigestBatchJob.query.one()
+    assert (job.status, job.batch_id) == (_digest.SUBMITTING, "")
+    (custom_id,) = batches.calls_of("create")[0]
+    assert job.items[0]["custom_id"] == custom_id
+    assert AnthropicBatchDeletion.query.count() == 0
+
+    # (a) Not sent again that night; nothing done while a run may live.
+    assert _digest._sweep(now + HOUR) == {"status": "ok", "submitted": 0}
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 0}
+    assert len(batches.calls_of("create")) == 1
+    assert batches.calls_of("list") == []
+
+    # (b) Settled, still running: it waits, unread.
+    _settle(monkeypatch)
+    batch_id = next(iter(batches.created))
+    _digest._collect_digest_batches()
+    _db.session.expire_all()
+    assert ExternalDigestBatchJob.query.one().status == _digest.SUBMITTING
+    assert batches.calls_of("results") == []
+
+    # Ended: found by its custom_id, adopted, collected, deleted.
+    batches.batches[batch_id] = "ended"
+    batches.results_by_batch[batch_id] = [
+        fake.succeeded(custom_id, "# Topics\n- found again")]
+    assert _digest._collect_digest_batches() == {"collected": 1,
+                                                 "abandoned": 0}
+    _db.session.expire_all()
+    job = ExternalDigestBatchJob.query.one()
+    assert (job.status, job.batch_id) == ("collected", batch_id)
+    assert AnthropicBatchDeletion.query.filter_by(
+        batch_id=batch_id).one().source == "external_digest_batch_job"
+    assert UserArtifact.latest_for(
+        user.id, _digest.DIGEST_KIND).get_content() == "# Topics\n- found again"
+    assert batch_id in batches.calls_of("delete")
+
+
+def test_a_create_that_never_reached_anthropic_is_given_up(
+        app, monkeypatch):
+    """Nothing at the provider: once settled, the job is given up and the
+    account is due again on its next night, not before."""
+    now = datetime.utcnow()
+    (user,) = _accounts(1)
+    batches = _anthropic_answer_lost(monkeypatch, reaches=False)
+    # A one-request batch this database has not registered, ended, for
+    # the same account id without this request's token (another Loore
+    # instance under the same provider account): read, not adopted.
+    from backend.tests import anthropic_batch_fake as fake
+    batches.add("msgbatch_other", status="ended",
+                results=[fake.succeeded(f"external-digest-{user.id}")])
+    batches.created["msgbatch_other"] = now
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        _digest._sweep(now)
+    _settle(monkeypatch)
+    assert _digest._collect_digest_batches() == {"collected": 0,
+                                                 "abandoned": 0}
+    _db.session.expire_all()
+    job = ExternalDigestBatchJob.query.one()
+    assert (job.status, job.batch_id) == ("abandoned", "")
+    assert _digest._sweep(now + HOUR)["submitted"] == 0
+    assert user.id in [u.id for u in _digest._due_accounts(
+        now + 24 * HOUR)]
+
+
+def _openai_answer_lost(monkeypatch, reaches):
+    """The OpenAI SDK faked with an upload that succeeds and a create that
+    stops while it waits, after reaching OpenAI (*reaches*: the batch
+    exists, with the metadata it was sent) or before (only the upload
+    exists)."""
+    import sys
+    import time
+    import types
+    state = SimpleNamespace(uploads=[], batches=[], deleted=[], creates=[])
+
+    class Files:
+        def create(self, file, purpose):
+            name = file[0] if isinstance(file, tuple) else file.name
+            upload = SimpleNamespace(
+                id=f"file-{len(state.uploads)}", filename=name,
+                purpose=purpose, created_at=int(time.time()))
+            state.uploads.append(upload)
+            return upload
+
+        def list(self, purpose=None, order=None, after=None, limit=None):
+            return SimpleNamespace(
+                data=[u for u in state.uploads
+                      if u.id not in state.deleted], has_more=False)
+
+        def delete(self, file_id):
+            state.deleted.append(file_id)
+
+    class Batches:
+        def create(self, input_file_id, endpoint, completion_window,
+                   metadata=None):
+            state.creates.append(metadata)
+            if reaches:
+                state.batches.append(SimpleNamespace(
+                    id="batch_lost", metadata=metadata, status="validating",
+                    input_file_id=input_file_id,
+                    created_at=int(time.time())))
+            raise _stopped_mid_create()
+
+        def list(self, limit=None, after=None):
+            return SimpleNamespace(data=list(state.batches), has_more=False,
+                                   last_id=None)
+
+    client = SimpleNamespace(files=Files(), batches=Batches())
+    module = types.ModuleType("openai")
+    module.OpenAI = lambda **kwargs: client
+    module.NotFoundError = type("NotFoundError", (Exception,), {})
+    monkeypatch.setitem(sys.modules, "openai", module)
+    monkeypatch.setattr(_digest, "_batch_keys",
+                        lambda: {"anthropic": "k", "openai": "k"})
+    return state
+
+
+@pytest.mark.parametrize("reaches", [True, False],
+                         ids=["batch-created", "upload-only"])
+def test_an_openai_create_stopped_while_it_waits_is_found_or_cleaned_up(
+        app, monkeypatch, reaches):
+    """OpenAI: the batch is created after its input file is uploaded. A
+    stop after the create reached OpenAI leaves a batch, found by the
+    tag in its metadata and adopted; a stop between the upload and the
+    create leaves only the file, found by its name and deleted, and the
+    job is given up. The account is sent once that night either way.
+    Through the real batch_submit."""
+    now = datetime.utcnow()
+    user = _night_account("openai-user")
+    user.preferred_model = "gpt-6-astra"
+    _db.session.commit()
+    _saved(user, "p", now - 2 * HOUR)
+    state = _openai_answer_lost(monkeypatch, reaches)
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        _digest._sweep(now)
+    job = ExternalDigestBatchJob.query.one()
+    custom_id = job.items[0]["custom_id"]
+    assert (job.status, job.provider_key) == (_digest.SUBMITTING,
+                                              "openai:gpt-6.2-sol")
+    assert state.creates == [{"loore_tag": custom_id}]
+    assert [u.filename for u in state.uploads] == [f"{custom_id}.jsonl"]
+    assert _digest._sweep(now + HOUR) == {"status": "ok", "submitted": 0}
+
+    _settle(monkeypatch)
+    monkeypatch.setattr(_digest, "batch_check_and_collect",
+                        lambda ids, keys: ({}, dict(ids), {}))
+    _digest._collect_digest_batches()
+    _db.session.expire_all()
+    job = ExternalDigestBatchJob.query.one()
+    if reaches:
+        assert (job.status, job.batch_id) == ("pending", "batch_lost")
+        assert state.deleted == []   # the batch's own: deleted at collect
+    else:
+        assert (job.status, job.batch_id) == ("abandoned", "")
+        assert state.deleted == ["file-0"]
+    assert len(state.creates) == 1
+
+
+# ── A provider that refuses (review of #806, finding 2) ─────────────────
+
+@pytest.mark.parametrize("refusal", ["account_refused", "queue_full"])
+def test_after_a_providers_refusal_its_other_accounts_are_not_read(
+        app, monkeypatch, refusal):
+    """A spend limit, billing, the key, a full queue or a rate limit
+    refuses every create alike: once one comes back, the provider's
+    other accounts in the run are skipped before their lists are read,
+    so nothing is decrypted for a request that would be refused. The
+    other provider's accounts go on. The skipped ones stay due, and the
+    next hourly run of the night takes them."""
+    from backend.utils.llm_batch import SubmittedBatches
+    now = datetime.utcnow()
+    first = _night_account("anthropic-1")
+    second = _night_account("anthropic-2")
+    openai_user = _night_account("openai-user")
+    openai_user.preferred_model = "gpt-6-astra"
+    third = _night_account("anthropic-3")
+    _db.session.commit()
+    for user in (first, second, openai_user, third):
+        _saved(user, f"p{user.id}", now - 2 * HOUR)
+    state = {"refuse": True}
+    sent = []
+
+    def submit(requests_by_provider, api_keys, phase=None, tag=None):
+        ((provider, (request,)),) = requests_by_provider.items()
+        sent.append(request["user_id"])
+        answer = SubmittedBatches()
+        if provider == "anthropic" and state["refuse"]:
+            getattr(answer, refusal).add("anthropic")
+        else:
+            key = "anthropic" if provider == "anthropic" else \
+                f"openai:{request['api_model']}"
+            answer[key] = f"b{request['user_id']}"
+        return answer
+    monkeypatch.setattr(_digest, "batch_submit", submit)
+    read = []
+    real = _digest._render_digest_prompt
+    monkeypatch.setattr(_digest, "_render_digest_prompt",
+                        lambda uid: read.append(uid) or real(uid))
+
+    assert _digest._sweep(now) == {"status": "ok", "submitted": 1}
+    assert read == sent == [first.id, openai_user.id]
+    assert _job_user_ids() == [openai_user.id]
+
+    state["refuse"] = False
+    assert _digest._sweep(now + HOUR) == {"status": "ok", "submitted": 3}
+    assert sent[2:] == [first.id, second.id, third.id]
+
+
+def test_one_accounts_failure_does_not_stop_its_provider(app, monkeypatch):
+    """A list that cannot be read, and a submission that fails for another
+    reason (batch_submit logs it, no refusal), stop nothing: the next
+    account of the provider is read and sent."""
+    first, second, third = _accounts(3)
+    _fail_at(monkeypatch, first.id, ValueError("does not decrypt"))
+    sent = []
+
+    def submit(requests_by_provider, api_keys, phase=None, tag=None):
+        uid = requests_by_provider["anthropic"][0]["user_id"]
+        sent.append(uid)
+        return {} if uid == second.id else {"anthropic": f"b{uid}"}
+    monkeypatch.setattr(_digest, "batch_submit", submit)
+
+    assert _digest.sweep_external_digests() == {"status": "ok",
+                                                "submitted": 1}
+    assert sent == [second.id, third.id]
 
 
 # ── The same night, once ────────────────────────────────────────────────

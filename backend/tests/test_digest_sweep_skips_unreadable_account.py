@@ -39,7 +39,7 @@ def _kms_on(monkeypatch):
 def _record_submits(monkeypatch):
     sent = []
 
-    def fake_submit(requests_by_provider, api_keys, phase=None):
+    def fake_submit(requests_by_provider, api_keys, phase=None, tag=None):
         sent.append(requests_by_provider)
         return {"anthropic": f"batch-{len(sent)}"}
     monkeypatch.setattr(_digest, "batch_submit", fake_submit)

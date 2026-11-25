@@ -281,12 +281,30 @@ def test_rebuild_does_not_retry_an_account_failure(app, monkeypatch):
     assert len(retried) == 1
 
 
+def _sent_custom_id(user_id):
+    """The custom_id of the user's newest digest request: each carries a
+    token of its own after the account's id (external_digest._custom_id)."""
+    job = max((j for j in ExternalDigestBatchJob.query.all()
+               if any(i["user_id"] == user_id for i in j.items)),
+              key=lambda j: j.id)
+    custom_id = next(i["custom_id"] for i in job.items
+                     if i["user_id"] == user_id)
+    assert custom_id.startswith(f"external-digest-{user_id}-")
+    return custom_id
+
+
+def _sent_users(submitted):
+    """The user ids of the requests a stubbed batch_submit received."""
+    return [r["user_id"] for call in submitted
+            for reqs in call.values() for r in reqs]
+
+
 def _stub_batch_submit(monkeypatch, batch_id="batch_1"):
     """batch_submit stand-in: records what was submitted and answers with
     one batch id per provider key, the way llm_batch keys them."""
     submitted = []
 
-    def fake_submit(requests_by_provider, api_keys, phase=None):
+    def fake_submit(requests_by_provider, api_keys, phase=None, tag=None):
         submitted.append(requests_by_provider)
         ids = {}
         for provider, reqs in requests_by_provider.items():
@@ -354,9 +372,9 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
     by_provider = {provider: reqs for call in submitted
                    for provider, reqs in call.items()}
     assert [r["custom_id"] for r in by_provider["anthropic"]] == [
-        f"external-digest-{night_user.id}"]
+        _sent_custom_id(night_user.id)]
     assert [r["custom_id"] for r in by_provider["openai"]] == [
-        f"external-digest-{oai_user.id}"]
+        _sent_custom_id(oai_user.id)]
     prompt = by_provider["anthropic"][0]["messages"][0]["content"]
     assert "The corpus holds 20 saved items" in prompt
     # Each on its provider's digest model (2026-11-24).
@@ -1036,9 +1054,10 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
 
     def refuse_round():
         res = _digest.sweep_external_digests()
+        custom_id = _sent_custom_id(user.id)
         monkeypatch.setattr(
             _digest, "batch_check_and_collect",
-            lambda ids, keys: ({f"external-digest-{user.id}": {
+            lambda ids, keys: ({custom_id: {
                 "content": "I can't", "refused": True,
                 "input_tokens": 1000, "output_tokens": 5}}, {}, {}))
         _digest._collect_digest_batches()
@@ -1091,7 +1110,7 @@ def test_policy_blocked_digest_is_never_resubmitted_by_the_sweep(
             for r in reqs] == [user.id]
 
     class Collected(dict):
-        blocked = {f"external-digest-{user.id}": "bio_policy"}
+        blocked = {_sent_custom_id(user.id): "bio_policy"}
     monkeypatch.setattr(_digest, "batch_check_and_collect",
                         lambda ids, keys: (Collected(), {}, {}))
     _digest._collect_digest_batches()
@@ -1168,8 +1187,7 @@ def test_no_digest_for_an_account_nobody_used_for_a_month(app, monkeypatch):
     assert _digest.sweep_external_digests() == {"status": "ok",
                                                 "submitted": 1}
     requests_ = submitted[0]["anthropic"]
-    assert [r["custom_id"] for r in requests_] == [
-        f"external-digest-{away.id}"]
+    assert [r["user_id"] for r in requests_] == [away.id]
     assert ("The corpus holds 13 saved items"
             in requests_[0]["messages"][0]["content"])
 
@@ -1207,5 +1225,4 @@ def test_payments_on_the_sweep_needs_both_use_and_the_paid_set(
 
     assert _digest.sweep_external_digests() == {"status": "ok",
                                                 "submitted": 1}
-    assert [r["custom_id"] for r in submitted[0]["anthropic"]] == [
-        f"external-digest-{users['tester'].id}"]
+    assert _sent_users(submitted) == [users['tester'].id]

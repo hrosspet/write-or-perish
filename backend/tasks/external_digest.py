@@ -30,6 +30,7 @@ collect_external_digest_batches. The synchronous rebuild_external_digest
 task stays as the direct path (a future "rebuild now" button).
 """
 import math
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from itertools import islice
@@ -41,8 +42,8 @@ from backend.celery_app import celery, flask_app
 from backend.config import Config
 from backend.extensions import db
 from backend.models import (
-    APICostLog, BYLINE_SOURCES, ExternalDigestBatchJob, ExternalItem, User,
-    UserArtifact,
+    AnthropicBatchDeletion, APICostLog, BYLINE_SOURCES,
+    ExternalDigestBatchJob, ExternalItem, User, UserArtifact,
 )
 from backend.llm_providers import (
     LLMProvider, ProviderAccountError, is_refused, policy_block_code)
@@ -57,9 +58,11 @@ from backend.utils.privacy import account_allows_ai
 from backend.utils.profile_providers import agreed_to_both, profile_provider
 from backend.utils.approval import background_work_allowed, not_active
 from backend.utils.llm_batch import (
-    BATCH_JOB_MAX_AGE, apply_batch_key_override, batch_check_and_collect,
-    batch_ended, batch_submit, blocked_items, drop_openai_batch,
-    list_batches,
+    BATCH_JOB_MAX_AGE, BATCH_TAG_KEY, anthropic_custom_ids,
+    apply_batch_key_override, batch_check_and_collect, batch_ended,
+    batch_submit, blocked_items, delete_openai_uploads, drop_openai_batch,
+    list_batches, listed_since, openai_batch_key, openai_uploads_since,
+    request_total, tagged_upload_name,
 )
 from backend.utils import anthropic_batch_deletion
 from backend.utils.timefmt import user_local_time
@@ -542,6 +545,20 @@ def _save_digest(user, model_id, digest_text, response, corpus_at, batch):
 # run that dies holds it at most until the next hourly run.
 SWEEP_LOCK_KEY = "loore:external_digest:sweep"
 SWEEP_LOCK_TTL = 60 * 60
+# A job row is committed in this status before its batch is created, so
+# the account counts as taken that night whatever happens to the create
+# (review of #806). A create the provider answered makes it "pending";
+# one that created nothing removes it.
+SUBMITTING = "submitting"
+# Heuristic (2026-11-25): a SUBMITTING row this old was left by a run
+# that can no longer be alive (the task's hard time limit is one hour),
+# so its create has either reached the provider or not: from then on the
+# collector looks for the batch (_resolve_submitting).
+SUBMITTING_SETTLED_AFTER = timedelta(hours=1)
+# The random part of a request's custom_id (_custom_id): 4 bytes, 8 hex
+# characters, against another night's batch of the same account and
+# another Loore instance's under the same provider account.
+CUSTOM_ID_TOKEN_BYTES = 4
 
 
 def _batch_keys():
@@ -685,10 +702,22 @@ def _due_accounts(now):
     return [entry[3] for entry in due]
 
 
-def _prepare(user, supported):
+def _custom_id(user_id):
+    """The request's custom_id: the account and a token of its own, so a
+    batch whose create was not answered is found again by it, and by
+    nothing else (``_resolve_submitting``): not by a batch of another
+    night, nor by one another Loore instance sent under the same
+    provider account."""
+    token = secrets.token_hex(CUSTOM_ID_TOKEN_BYTES)
+    return f"external-digest-{user_id}-{token}"
+
+
+def _prepare(user, supported, refused=()):
     """The user's digest request as (provider, request, metadata), or
-    None when nothing is sent for them in this run. Raises the task's
-    soft time limit and a key-service outage."""
+    None when nothing is sent for them in this run. *refused*: providers
+    that refused a submission earlier in this run; an account of one is
+    not read. Raises the task's soft time limit and a key-service
+    outage."""
     # Before the corpus is read: nothing is decrypted for an account
     # whose digest model is not set up. It stays due; no other
     # provider's model and no other model is tried.
@@ -698,6 +727,8 @@ def _prepare(user, supported):
         logger.warning("Digest for user %s skipped: no digest model "
                        "of its provider is configured", user.id)
         return None
+    if model_cfg["provider"] in refused:
+        return None   # stays due for the next hourly run
     # Stamped BEFORE the corpus is read (see _save_digest).
     corpus_at = datetime.utcnow()
     try:
@@ -719,7 +750,7 @@ def _prepare(user, supported):
     if rendered is None:
         return None
     _note_cut(user, rendered)
-    custom_id = f"external-digest-{user.id}"
+    custom_id = _custom_id(user.id)
     request = {
         "custom_id": custom_id,
         "model_id": model_id,
@@ -742,36 +773,57 @@ def _prepare(user, supported):
     return model_cfg["provider"], request, meta
 
 
-def _record_job(meta, batch_ids):
-    """The job row of a batch created for one account's request, with its
-    Anthropic deletion record, committed. Returns the number of accounts
-    submitted (1, or 0 when no batch was created)."""
-    for provider_key, batch_id in batch_ids.items():
-        db.session.add(ExternalDigestBatchJob(
-            provider_key=provider_key, batch_id=batch_id, items=[meta]))
-        # Deleted at Anthropic once the job is no longer pending (#693).
-        anthropic_batch_deletion.register(
-            provider_key, batch_id, ExternalDigestBatchJob.__tablename__)
+def _adopt(job, provider_key, batch_id):
+    """The job's batch is known: pending, registered for deletion at
+    Anthropic (#693) in the same commit."""
+    job.provider_key = provider_key
+    job.batch_id = batch_id
+    job.status = "pending"
+    anthropic_batch_deletion.register(
+        provider_key, batch_id, ExternalDigestBatchJob.__tablename__)
     db.session.commit()
-    return 1 if batch_ids else 0
 
 
-def _submit_one(provider, request, meta):
-    """Submit one account's request as its own batch and commit its job
-    row. Returns 1, or 0 when the provider refused or failed the
-    submission (batch_submit logs it; the account stays due and a later
-    run tries again). The task's soft time limit striking during the
-    submission is raised after a batch created before it is recorded."""
+def _submit_one(provider, request, meta, keys):
+    """Submit one account's request as its own batch. Returns (submitted,
+    refused): 1 or 0, and whether the provider refused the submission
+    for its account or a full queue or rate limit
+    (SubmittedBatches.account_refused / queue_full).
+
+    The job row is committed as SUBMITTING before the create, so the
+    account is taken once that night whatever happens next. A batch
+    created makes it pending; a submission that created nothing (refused
+    or failed, logged by batch_submit) removes it, and the account stays
+    due. When the create raises (the task's soft time limit, a killed
+    worker), whether it reached the provider is not known: the row stays
+    SUBMITTING and the collector finds its batch, or gives it up
+    (``_resolve_submitting``). A soft limit is raised after a batch it
+    reports as created is recorded."""
+    key = (provider if provider == "anthropic"
+           else openai_batch_key(request["api_model"]))
+    job = ExternalDigestBatchJob(provider_key=key, batch_id="",
+                                 status=SUBMITTING, items=[meta])
+    db.session.add(job)
+    db.session.commit()
     try:
-        batch_ids = batch_submit({provider: [request]}, _batch_keys(),
-                                 "digest")
+        batch_ids = batch_submit({provider: [request]}, keys, "digest",
+                                 tag=request["custom_id"])
     except Exception as e:
         found = soft_limit.found_in(e)
-        if found is None:
-            raise
-        _record_job(meta, getattr(found, "submitted", None) or {})
-        raise found
-    return _record_job(meta, batch_ids)
+        created = (getattr(found, "submitted", None) or {}) if found else {}
+        for provider_key, batch_id in created.items():
+            _adopt(job, provider_key, batch_id)
+        if found is not None:
+            raise found
+        raise
+    for provider_key, batch_id in batch_ids.items():
+        _adopt(job, provider_key, batch_id)
+        return 1, False
+    db.session.delete(job)
+    db.session.commit()
+    refusals = (set(getattr(batch_ids, "account_refused", None) or ())
+                | set(getattr(batch_ids, "queue_full", None) or ()))
+    return 0, key in refusals
 
 
 def _submit_digest_batch(users):
@@ -780,18 +832,39 @@ def _submit_digest_batch(users):
     before the next account starts. Returns the number of accounts
     submitted.
 
+    Once a provider refuses a submission for its account (spend limit,
+    billing, key) or a full queue or rate limit, its remaining accounts
+    are not read in this run: they stay due for the next hourly run. One
+    account whose list cannot be read, or whose submission fails for
+    another reason, stops nothing.
+
     When the task's soft time limit, a key-service outage or another
     error ends the run, every account before it is already submitted;
-    the one being prepared has nothing written and stays due, as do the
-    accounts after it, and the next hourly run of the same night takes
-    them. The error is raised: the run stops, and shows."""
+    the one being prepared stays due (or, if its create was under way,
+    is resolved by the collector), as do the accounts after it, and the
+    next hourly run of the same night takes them. The error is raised:
+    the run stops, and shows."""
     supported = flask_app.config.get("SUPPORTED_MODELS", {})
+    keys = _batch_keys()
     submitted = 0
+    refused = set()
     for done, user in enumerate(users):
         try:
-            prepared = _prepare(user, supported)
-            if prepared is not None:
-                submitted += _submit_one(*prepared)
+            prepared = _prepare(user, supported, refused)
+            if prepared is None:
+                continue
+            sent, refusal = _submit_one(*prepared, keys)
+            submitted += sent
+            if refusal:
+                # Every provider-wide limit or account failure: a
+                # spend limit, billing and the key are the provider
+                # account's; OpenAI's batch creates per hour are the
+                # organisation's, and its queue limit is per model, the
+                # one model the digest sends every OpenAI account to.
+                refused.add(prepared[0])
+                logger.warning(
+                    "Digest sweep: %s refused a submission; its other "
+                    "accounts wait for the next hourly run", prepared[0])
         except Exception as e:
             try:
                 db.session.rollback()
@@ -843,6 +916,125 @@ def _sweep(now):
     return {"status": "ok", "submitted": submitted}
 
 
+def _tag(job):
+    """The custom_id a SUBMITTING job's request carried: its batch's
+    tag (``batch_submit(tag=...)``)."""
+    return (job.items or [{}])[0].get("custom_id")
+
+
+def _give_up(job, now, why):
+    job.status = "abandoned"
+    job.collected_at = now
+    db.session.commit()
+    logger.warning("External-digest job %s left mid-create given up (%s); "
+                   "its account is due again on its next night", job.id, why)
+
+
+def _resolve_openai(jobs, keys, now):
+    """OpenAI shows a batch in its listing as soon as it exists: the one
+    whose metadata carries the job's tag is adopted. Without one, an
+    upload named after the tag (the stop fell between the upload and
+    the create) is deleted, and the job given up."""
+    oldest = min(job.submitted_at for job in jobs)
+    by_tag = {_tag(job): job for job in jobs}
+    batches = {}
+    for batch in listed_since("openai", keys, oldest):
+        tag = (getattr(batch, "metadata", None) or {}).get(BATCH_TAG_KEY)
+        if tag in by_tag:
+            batches[tag] = batch.id
+    uploads = {}
+    names = {tagged_upload_name(tag): tag for tag in by_tag
+             if tag not in batches}
+    if names:
+        for upload in openai_uploads_since(keys, oldest):
+            tag = names.get(getattr(upload, "filename", None))
+            if tag is not None:
+                uploads.setdefault(tag, []).append(upload.id)
+    for tag, job in by_tag.items():
+        if tag in batches:
+            _adopt(job, job.provider_key, batches[tag])
+            continue
+        files = uploads.get(tag) or []
+        if files and delete_openai_uploads(keys.get("openai"),
+                                           files) < len(files):
+            continue   # the next pass tries the delete again
+        _give_up(job, now, "no batch at the provider")
+
+
+def _resolve_anthropic(jobs, keys, now):
+    """An Anthropic batch has no metadata: a one-request batch this
+    database has not registered (#693 registers every batch Loore
+    records) is read once it has ended, and the one whose request
+    carries the job's tag as its custom_id is adopted. While such a
+    batch is still running the job waits; with none, or after
+    BATCH_JOB_MAX_AGE (the provider ends every batch within 24 h), it is
+    given up."""
+    oldest = min(job.submitted_at for job in jobs)
+    by_tag = {_tag(job): job for job in jobs}
+    listed = [batch for batch in listed_since("anthropic", keys, oldest)
+              if request_total(batch) == 1]
+    known = {batch_id for (batch_id,) in db.session.query(
+        AnthropicBatchDeletion.batch_id).filter(
+        AnthropicBatchDeletion.batch_id.in_([b.id for b in listed]))} \
+        if listed else set()
+    found, running = {}, False
+    for batch in listed:
+        if batch.id in known:
+            continue
+        if getattr(batch, "processing_status", None) != "ended":
+            running = True
+            continue
+        for tag in anthropic_custom_ids(keys, batch.id) & set(by_tag):
+            found[tag] = batch.id
+        if len(found) == len(by_tag):
+            break
+    for tag, job in by_tag.items():
+        if tag in found:
+            _adopt(job, "anthropic", found[tag])
+        elif not running or now - job.submitted_at > BATCH_JOB_MAX_AGE:
+            _give_up(job, now, "no batch at the provider")
+
+
+def _settled_submitting(now):
+    """Jobs left SUBMITTING by a run that can no longer be alive."""
+    return ExternalDigestBatchJob.query.filter(
+        ExternalDigestBatchJob.status == SUBMITTING,
+        ExternalDigestBatchJob.submitted_at
+        <= now - SUBMITTING_SETTLED_AFTER).order_by(
+        ExternalDigestBatchJob.id).all()
+
+
+def _resolve_submitting(jobs, keys, now):
+    """Find the batches of jobs a run left SUBMITTING (its create was
+    under way when the task's soft time limit struck or the worker was
+    killed), per provider, by the tag the create sent: adopted, the
+    collector saves the digest and deletes the batch as for any other.
+    A listing that fails is tried again on the next pass."""
+    by_family = {}
+    for job in jobs:
+        family = "anthropic" if job.provider_key == "anthropic" else "openai"
+        by_family.setdefault(family, []).append(job)
+    for family, family_jobs in by_family.items():
+        resolve = (_resolve_anthropic if family == "anthropic"
+                   else _resolve_openai)
+        try:
+            resolve(family_jobs, keys, now)
+        except Exception as e:  # noqa: BLE001 — tried again next pass
+            soft_limit.reraise(e)
+            db.session.rollback()
+            logger.warning("External-digest jobs left mid-create: the %s "
+                           "lookup failed (%s); tried again on the next "
+                           "pass", family, type(e).__name__)
+            # Problems show: a provider unreadable for longer than any
+            # batch can live is given up on, and reported.
+            for job in family_jobs:
+                if now - job.submitted_at > BATCH_JOB_MAX_AGE:
+                    logger.error("External-digest job %s left mid-create: "
+                                 "%s could not be read for %s", job.id,
+                                 family, BATCH_JOB_MAX_AGE)
+                    _give_up(job, now, "its provider could not be read")
+
+
 def _job_outcome(job, listed, keys):
     """(results, still_pending) of one pending job. A batch the listing
     shows as still running costs no call of its own; an ended one is
@@ -867,12 +1059,20 @@ def _job_outcome(job, listed, keys):
 def _collect_digest_batches():
     """Core of the collector (plain function so tests can call it
     without the Celery machinery)."""
+    now = datetime.utcnow()
     jobs = ExternalDigestBatchJob.query.filter_by(status="pending").all()
-    if not jobs:
+    settled = _settled_submitting(now)
+    if not jobs and not settled:
         return {"collected": 0, "abandoned": 0}
 
     keys = _batch_keys()
-    now = datetime.utcnow()
+    if settled:
+        # Adopted ones are collected with the others below.
+        _resolve_submitting(settled, keys, now)
+        jobs = ExternalDigestBatchJob.query.filter_by(
+            status="pending").all()
+        if not jobs:
+            return {"collected": 0, "abandoned": 0}
     # Every pending job's status from the providers' list endpoints, many
     # per call (Peter, 2026-11-03: "I just don't want to spam them with
     # querying for results thousands of times per minute"): with one
