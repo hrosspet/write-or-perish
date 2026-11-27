@@ -5,6 +5,11 @@ import api from '../api';
 // here). The updates modal never opens over it (#392).
 export const WELCOME_PATH = '/welcome';
 
+// The first cohort's step page: an invited person arrives there from the
+// sign-in and goes straight into the interview, so a visit that starts
+// on it does not ask either, as for /welcome.
+export const COHORT_PATH = '/cohort';
+
 // The account deletion confirmation (emailed link), the restore offer and
 // the question about a prepared account (#714). The updates modal never
 // opens over them either, nor over the page after: a restore, or opening
@@ -57,7 +62,7 @@ export function useSessionUpdates(user, pathname) {
     if (!user || !user.approved || !user.terms_up_to_date) return;
     if (asked.current) return;
     asked.current = true;
-    if (pathname === WELCOME_PATH) return;
+    if (pathname === WELCOME_PATH || pathname === COHORT_PATH) return;
     api.get('/updates').then((res) => {
       const d = res.data || {};
       const count = (d.changelog?.length || 0) +

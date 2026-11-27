@@ -247,6 +247,17 @@ function CircleAudiencePicker({
           </div>
         </div>
       )}
+      {/* A circle Loore keeps for a group of the first cohort: a person
+          who joins the group later also reads what was shared with it. */}
+      {(circles || []).filter((c) => c.cohort && (circleIds || []).includes(c.id))
+        .map((c) => (
+          <div key={`later-${c.id}`} style={{
+            fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',
+            fontFamily: 'var(--sans)', fontWeight: 300,
+          }}>
+            People who join {c.cohort.name} later will also be able to read it.
+          </div>
+        ))}
       {hasRecording && (
         <div style={{
           fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',

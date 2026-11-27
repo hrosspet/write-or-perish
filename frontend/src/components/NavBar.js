@@ -334,6 +334,24 @@ function NavBar({ onNewEntryClick }) {
           </Link>
         )}
 
+        {/* The first cohort (COHORT_V1): a link named after the group, for
+            an invited person, a member and the founder. */}
+        {user && user.approved && user.cohort && user.cohort.name && (
+          <Link
+            to="/cohort"
+            title={user.cohort.name}
+            style={{
+              ...linkStyle("/cohort"),
+              maxWidth: "11rem",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {user.cohort.name}
+          </Link>
+        )}
+
         {/* Back to this page after signing in (#704), except from the
             pages that introduce Loore. */}
         {!user && (

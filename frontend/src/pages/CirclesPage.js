@@ -69,6 +69,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [removing, setRemoving] = useState(null);
   const inputId = `add-person-${circle.id}`;
+  const kept = !!circle.cohort;
 
   const startAdd = async (e) => {
     e.preventDefault();
@@ -175,11 +176,21 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
         alignItems: 'baseline', gap: '16px', flexWrap: 'wrap',
       }}>
         <h2 style={h2Style}>{circle.name}</h2>
-        <button type="button" style={quietLink}
-          onClick={() => { setEditing((v) => !v); setNewName(circle.name); setEditError(''); }}>
-          Rename or delete
-        </button>
+        {!kept && (
+          <button type="button" style={quietLink}
+            onClick={() => { setEditing((v) => !v); setNewName(circle.name); setEditError(''); }}>
+            Rename or delete
+          </button>
+        )}
       </div>
+      {/* A circle Loore keeps for a group of the first cohort: its name
+          and its people follow the group (the server refuses changes). */}
+      {kept && (
+        <div style={{ ...hintStyle, fontSize: '0.875rem' }}>
+          Loore keeps this circle for {circle.cohort.name}: its name and its
+          people follow the group.
+        </div>
+      )}
 
       {editing && (
         <form onSubmit={rename} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -224,14 +235,17 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
                 </span>
               )}
             </div>
-            <button type="button" style={quietLink} disabled={busy}
-              onClick={() => setRemoving(m.username)}>
-              Remove
-            </button>
+            {!kept && (
+              <button type="button" style={quietLink} disabled={busy}
+                onClick={() => setRemoving(m.username)}>
+                Remove
+              </button>
+            )}
           </div>
         ))}
       </div>
 
+      {!kept && (
       <form onSubmit={startAdd} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
         <label htmlFor={inputId} style={eyebrow}>
           Add a person by their Loore name
@@ -262,6 +276,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
             </div>
           )}
       </form>
+      )}
 
       <AddCircleMemberDialog
         open={!!preview}

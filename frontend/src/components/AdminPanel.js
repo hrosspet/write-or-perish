@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, Suspense, lazy } from "react";
 import XLookupConfirmDialog from "./XLookupConfirmDialog";
 import PurgeDataDialog from "./PurgeDataDialog";
 import AdminDeleteAccountDialog from "./AdminDeleteAccountDialog";
@@ -13,6 +13,9 @@ import api from "../api";
 import { formatDate, formatDateTime } from "../utils/date";
 import { useUser } from "../contexts/UserContext";
 import AdminSubscriptions from "./AdminSubscriptions";
+
+// The first cohort's tab, loaded when it is opened (COHORT_V1 only).
+const AdminCohorts = lazy(() => import("./AdminCohorts"));
 
 // Small header toggle that hides rows with $0 in its column.
 function ZeroFilterToggle({ active, onToggle, label }) {
@@ -104,6 +107,9 @@ const ADMIN_TABS = [
 ];
 // Payments (#438): shown only while the server has payments on.
 const SUBSCRIPTIONS_TAB = { key: "subscriptions", label: "Subscriptions" };
+// The first cohort: shown only while COHORT_V1 is on (the current user
+// then carries a `cohort` field, null for most accounts).
+const COHORTS_TAB = { key: "cohorts", label: "Cohorts" };
 
 // Same select treatment as AccountPage's Settings (inputStyle+selectStyle
 // there) so admin controls don't render as bare browser widgets.
@@ -655,8 +661,12 @@ export function isNewAccount(u, now = Date.now()) {
 function AdminPanel() {
   const [activeTab, setActiveTab] = useState("users");
   const userCtx = useUser();
-  const tabs = userCtx?.user?.payments_enabled
-    ? [...ADMIN_TABS, SUBSCRIPTIONS_TAB] : ADMIN_TABS;
+  const cohortsOn = !!userCtx?.user && "cohort" in userCtx.user;
+  const tabs = [
+    ...ADMIN_TABS,
+    ...(userCtx?.user?.payments_enabled ? [SUBSCRIPTIONS_TAB] : []),
+    ...(cohortsOn ? [COHORTS_TAB] : []),
+  ];
   // Payments on (#697): nobody waits for approval, and the Users tab's
   // switch blocks and unblocks.
   const letInWithoutApproval = !!userCtx?.user?.payments_enabled;
@@ -1320,6 +1330,11 @@ function AdminPanel() {
       {activeTab === "activity" && <AdminActivity />}
       {activeTab === "feedback" && <AdminFeedback />}
       {activeTab === "subscriptions" && <AdminSubscriptions />}
+      {activeTab === "cohorts" && (
+        <Suspense fallback={<div style={{ color: "var(--text-muted)" }}>Loading…</div>}>
+          <AdminCohorts />
+        </Suspense>
+      )}
 
       {activeTab === "users" && (<>
       {/* Whitelist New User Section */}
