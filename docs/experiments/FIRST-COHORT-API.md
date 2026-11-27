@@ -348,7 +348,7 @@ Body: `{"name", "slug"?, "about"?, "founder_name"?, "booking_url"?, "call_url"?,
 - `slug`: optional, `[a-z0-9][a-z0-9-]{0,63}`; made from the name when absent.
 - `about`: at most 20,000 characters. `question`: at most 5,000. `founder_name`: at most 64.
 - `booking_url`, `call_url`: must start with `https://` or `http://`, at most 512.
-- `next_call_at`: ISO date and time (a `Z` or offset is converted to UTC). `free_until`: `YYYY-MM-DD`, the last free day; without it nobody is let in for free (payments on).
+- `next_call_at`: ISO date and time. A `Z` or an offset is converted to UTC; a time without either is stored as it is, as UTC (so a `datetime-local` value must be converted first: the Admin page sends the founder's local time as UTC with a `Z`). It is answered as UTC with a `Z`; pages show it in the viewer's own time zone. `free_until`: `YYYY-MM-DD`, the last free day; without it nobody is let in for free (payments on).
 - Empty strings and `null` clear a field.
 
 201: `{"cohort": Cohort}`. Errors: 400 `{"error": "<field> …"}` (the sentence names the field), 400 `{"error": "slug can hold a-z, 0-9 and -."}`, 409 `{"error": "That slug is taken."}`.
@@ -410,7 +410,7 @@ No body. Sets `closed_at` (once; a declined invitation stays declined). An admit
 
 ## 4. Changes to existing routes (COHORT_V1 only)
 
-- `GET /api/dashboard/` → `user.cohort`: `null`, or `{"name", "slug", "role": "invited" | "member" | "founder", "state": <invitation state or null for a founder>, "report_step_done": bool}`. Present for an account with a live invitation, or a founder. Use it for the NavBar link (named after the cohort) and for the once-per-session redirect from Home to `/cohort` while `role` is `"invited"` or `"member"` and `report_step_done` is `false`.
+- `GET /api/dashboard/` → `user.cohort` (the key is there for every account while the flag is on, so `"cohort" in user` tells the web app the flag is on): `null`, or `{"name", "slug", "role": "invited" | "member" | "founder", "state": <invitation state or null for a founder>, "report_step_done": bool}`. Present for an account with a live invitation, or a founder. Use it for the NavBar link (named after the cohort) and for the once-per-session redirect from Home to `/cohort` while `role` is `"invited"` or `"member"` and `report_step_done` is `false`.
 - `user.subscription.cohort_free_until` (payments on): the free period's last day, or `null`. During it `user.subscription.state` is `"set_by_hand"`, so `notLetIn` already lets the account in; no separate frontend rule is needed.
 - `user.circles_enabled` is `true` for a founder and for every account bound to a live invitation.
 - `GET /api/circles`: a circle Loore keeps for a group has `"cohort": {"name", "slug"}`. Renaming or deleting it, adding or removing its people (and the add preview) answer `409 {"error": "Loore keeps this circle for First Eight: its name and its people follow the group.", "code": "cohort_circle"}`. Hide those controls.
@@ -436,3 +436,4 @@ The interview is an ordinary agentic thread (prompt key `cohort_interview`, trea
 - Blank a section or all of it: save the text without it. Sending an empty report is refused (use Send nothing).
 - Take back after Send: `PUT /api/nodes/<id>` with `{"content": "<current text>", "privacy_level": "private"}`. The founder can no longer open it, and it leaves his Shared with you.
 - The introduction is read and saved the same way, and shared through `POST /api/cohort/intro {"node_id", "share": true}` (or the normal share step with the member's `circle_id`, followed by `POST /api/cohort/intro {"node_id"}`).
+- An introduction the member writes without a draft (no report, No AI, or by choice): `POST /api/nodes/` with `{"content", "privacy_level": "private", "ai_usage"}` (the account's default AI usage), then `POST /api/cohort/intro {"node_id", "share": true}`. `POST /api/nodes/` asks for no AI reply by itself.
