@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { WELCOME_PATH, QUIET_PATHS } from './useSessionUpdates';
+import { WELCOME_PATH, COHORT_PATH, QUIET_PATHS } from './useSessionUpdates';
 import { isRecordingActive, subscribeRecording } from '../utils/recordingActivity';
 
 // Set for the tab when the user closes the both-providers question
@@ -9,13 +9,13 @@ import { isRecordingActive, subscribeRecording } from '../utils/recordingActivit
 export const LATER_FLAG = 'loore.bothProvidersLater';
 
 // Pages where the question never opens on its own: a Voice or Text
-// session, the newcomer's welcome, the Account page (its own setting, and
+// session, the newcomer's welcome, the first cohort's step page, the Account page (its own setting, and
 // its own question after a preferred-model change), the Import page (its
 // result asks), and the signed-out and account-deletion pages.
 export const NO_ASK_PATHS = [
   '/voice', '/textmode', WELCOME_PATH, '/account', '/import',
   '/alpha-thank-you', '/landing', '/login', '/confirm-email',
-  '/account-deleted', ...QUIET_PATHS,
+  '/account-deleted', COHORT_PATH, ...QUIET_PATHS,
 ];
 
 const storage = (fn) => { try { return fn(window.sessionStorage); } catch (e) { return null; } };
@@ -47,7 +47,8 @@ export function useBothProvidersQuestion(user, pathname, blocked) {
 
   useEffect(() => {
     if (skipVisit.current === null) {
-      skipVisit.current = pathname === WELCOME_PATH || QUIET_PATHS.includes(pathname);
+      skipVisit.current = pathname === WELCOME_PATH || pathname === COHORT_PATH
+        || QUIET_PATHS.includes(pathname);
     }
     if (shown.current || skipVisit.current) return;
     if (!user || !user.approved || !user.terms_up_to_date) return;

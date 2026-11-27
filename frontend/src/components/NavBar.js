@@ -9,6 +9,7 @@ import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 import { here, signInPath, signInPathFrom } from "../utils/destination";
 import { downloadAccountData, EXPORT_FAILED_MESSAGE } from "../utils/dataExport";
+import { forgetCohortOnSignOut } from "../utils/cohort";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -334,6 +335,24 @@ function NavBar({ onNewEntryClick }) {
           </Link>
         )}
 
+        {/* The first cohort (COHORT_V1): a link named after the group, for
+            an invited person, a member and the founder. */}
+        {user && user.approved && user.cohort && user.cohort.name && (
+          <Link
+            to="/cohort"
+            title={user.cohort.name}
+            style={{
+              ...linkStyle("/cohort"),
+              maxWidth: "11rem",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {user.cohort.name}
+          </Link>
+        )}
+
         {/* Back to this page after signing in (#704), except from the
             pages that introduce Loore. */}
         {!user && (
@@ -389,6 +408,13 @@ function NavBar({ onNewEntryClick }) {
                     <Link to="/account" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
                       Account
                     </Link>
+
+                    {/* Circles: what people shared with the user. */}
+                    {user.circles_enabled && (
+                      <Link to="/shared" onClick={() => setOverflowOpen(false)} style={dropdownItemStyle}>
+                        Shared with you
+                      </Link>
+                    )}
 
                     {/* The user's own public page (#228) — what visitors
                         see at /@<username>. */}
@@ -527,7 +553,8 @@ function NavBar({ onNewEntryClick }) {
                 </Link>
 
                 <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-                <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}>
+                <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}
+                  onClick={forgetCohortOnSignOut}>
                   Logout
                 </a>
               </div>

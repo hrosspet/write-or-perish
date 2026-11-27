@@ -45,6 +45,12 @@ import CommonsPage from "./pages/CommonsPage";
 import PublicThreadPage from "./pages/PublicThreadPage";
 import ProfileGenerationWatcher from "./components/ProfileGenerationWatcher";
 import UpdatesModal from "./components/UpdatesModal";
+import CirclesPage from "./pages/CirclesPage";
+import SharedWithYouPage from "./pages/SharedWithYouPage";
+import InvitationPage from "./pages/InvitationPage";
+import CohortPage from "./pages/CohortPage";
+import CohortArrival from "./components/cohort/CohortArrival";
+import InterviewBackLink from "./components/cohort/InterviewBackLink";
 import BothProvidersDialog from "./components/BothProvidersDialog";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
@@ -204,6 +210,18 @@ function App() {
     return () => window.removeEventListener('keydown', handleSearchShortcut);
   }, []);
 
+  // The first cohort's letter (/invitation/<code>): a public page of its
+  // own, without the navigation bar or anything of the app around it, for
+  // everyone (signed out, not let in yet, or a member).
+  if (pathname.startsWith('/invitation/')) {
+    return (
+      <Routes>
+        <Route path="/invitation/:code" element={<InvitationPage />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    );
+  }
+
   if (noSubscription) {
     return (
       <>
@@ -221,6 +239,9 @@ function App() {
           <Route path="/account-restore" element={<AccountRestorePage />} />
           {/* Connect X found the account prepared for this person (#714). */}
           <Route path="/prepared-account" element={<PreparedAccountPage />} />
+          {/* The first cohort: accepting an invitation can let the account
+              in (its free period), so /cohort claims a kept code here. */}
+          <Route path="/cohort" element={<CohortPage bare />} />
           <Route path="*" element={<SubscribePage />} />
         </Routes>
       </>
@@ -285,6 +306,8 @@ function App() {
 
         <ProfileGenerationWatcher />
         <PendingDestination />
+        <CohortArrival />
+        <InterviewBackLink />
         <Routes>
           <Route path="/" element={<RootRoute />} />
           <Route path="/landing" element={<LandingPage />} />
@@ -341,6 +364,13 @@ function App() {
           <Route path="/share" element={<ProtectedRoute><SharePage /></ProtectedRoute>} />
           <Route path="/commons" element={<ProtectedRoute><CommonsPage /></ProtectedRoute>} />
           <Route path="/account" element={<ProtectedRoute><AccountPage /></ProtectedRoute>} />
+          {/* Circles (dark behind user.circles_enabled; the pages say
+              "Not available" without it). */}
+          <Route path="/circles" element={<ProtectedRoute><CirclesPage /></ProtectedRoute>} />
+          <Route path="/shared" element={<ProtectedRoute><SharedWithYouPage /></ProtectedRoute>} />
+          {/* The first cohort (dark behind COHORT_V1): the person's current
+              step, or the group page. */}
+          <Route path="/cohort" element={<ProtectedRoute><CohortPage /></ProtectedRoute>} />
           <Route path="/node/:id" element={<NodeRoute />} />
           <Route path="/admin" element={<ProtectedRoute><AdminPanel /></ProtectedRoute>} />
           <Route path="/:atName" element={<AtRoute />} />

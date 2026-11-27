@@ -430,7 +430,7 @@ final class SharedThreadModelTests: StubbedAppTestCase {
         // LLM Response waits while another node loads (the entry just opened).
         let settled = await eventually { !NodePrefetch.shared.isPending }
         XCTAssertTrue(settled)
-        model.llmResponsePressed()
+        model.aiReplyPressed()          // LLM Response (circles: the same control in every thread)
         let asked = await eventually { self.calls.contains("POST /api/nodes/10/llm") }
         XCTAssertTrue(asked)
         XCTAssertNotNil(body(of: "POST /api/nodes/10/llm"))
@@ -495,6 +495,39 @@ final class SharedThreadModelTests: StubbedAppTestCase {
         let agentic = body(of: "POST /api/drafts/streaming/s5/save-as-node")
         XCTAssertEqual(agentic?["ai_usage"] as? String, "chat")
         XCTAssertEqual(agentic?["agentic"] as? Bool, true)
+    }
+
+    /// A finished Glean (read reply) asked for by `owner` (the viewer is "seowriter",
+    /// user 5; "anna" is user 7), at `privacy`.
+    private func gleanJSON(owner: String, privacy: String) -> String {
+        let ownerId = owner == "seowriter" ? 5 : 7
+        return """
+        {"id":20,"content":"The picks","node_type":"llm","llm_model":"gpt-6-luna","user":{"id":99,"username":"gpt-6-luna"},
+         "parent_user_id":\(ownerId),"human_owner_username":"\(owner)","read_reply":true,"llm_task_status":"completed",
+         "privacy_level":"\(privacy)","ai_usage":"chat","child_count":0,"children":[],
+         "ancestors":[{"id":9,"content":"note","node_type":"user","user_id":\(ownerId),"ai_usage":"chat","privacy_level":"\(privacy)"}]}
+        """
+    }
+
+    func testACircleReaderRepliesUnderSomeoneElsesSharedGleanOnThePlainReplyPath() async {
+        let model = await loadedThread(gleanJSON(owner: "anna", privacy: "circles"), id: 20)
+        XCTAssertTrue(model.isReadReply)
+        XCTAssertFalse(model.isOwner)
+        XCTAssertFalse(model.readReplyMessage, "the form's own POST /api/nodes/, as under any node of the thread")
+    }
+
+    func testTheOwnersReplyUnderAGleanIsATextModeMessage() async {
+        for privacy in ["circles", "private", "public"] {
+            let model = await loadedThread(gleanJSON(owner: "seowriter", privacy: privacy), id: 20)
+            XCTAssertTrue(model.isOwner, privacy)
+            XCTAssertTrue(model.readReplyMessage, privacy)
+        }
+    }
+
+    func testUnderSomeoneElsesGleanNotSharedWithACircleTheBoxIsAsBefore() async {
+        let model = await loadedThread(gleanJSON(owner: "anna", privacy: "public"), id: 20)
+        XCTAssertFalse(model.isOwner)
+        XCTAssertTrue(model.readReplyMessage)
     }
 
     // MARK: "Only you see this reply"

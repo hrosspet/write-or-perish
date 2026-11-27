@@ -63,8 +63,17 @@ private struct NodeFormBody: View {
                 PrivacySelectorView(privacy: Binding(get: { model.privacy }, set: { model.choosePrivacy($0) }),
                                     aiUsage: Binding(get: { model.aiUsage }, set: { model.chooseAIUsage($0) }),
                                     disabled: model.loading,
-                                    lockPrivacy: model.lockPrivacy,
+                                    lockPrivacy: model.lockPrivacy, audience: model.audience,
+                                    threadAudience: model.threadAudienceNames, lockPublic: model.lockPublic,
+                                    hidePublic: model.hidePublic, onlyMe: model.onlyMe,
                                     trainRefused: config.edit?.trainRefused ?? false)
+                    // The "nobody could read this" refusal goes as soon as
+                    // somebody can: it must not stand beside "Share with 3 people".
+                    .onChange(of: model.audience.readers) { _, readers in
+                        if !readers.isEmpty, model.error == CircleAudienceState.noReadersMessage {
+                            model.error = nil
+                        }
+                    }
             }
             if model.showsAgenticToggles {
                 LabeledPillToggle(label: "Agentic Reply", isOn: $model.useAgenticPrompt,
@@ -105,11 +114,15 @@ private struct NodeFormBody: View {
                 RegenerateTtsDialog(onChoice: model.answerTts, onCancel: model.cancelDialog)
             case .scope?:
                 ApplyToRepliesDialog(
-                    privacyChanged: model.openedPrivacy != nil && model.privacy != model.openedPrivacy,
+                    privacyChanged: (model.openedPrivacy != nil && model.privacy != model.openedPrivacy)
+                        || (model.sharesEntry && model.audience.changed),
                     aiUsageChanged: model.openedAIUsage != nil && model.aiUsage != model.openedAIUsage,
                     onChoice: model.answerScope, onCancel: model.cancelDialog)
             case .publicReply?:
                 PublicReplyDialog(onConfirm: model.answerPublicReply, onCancel: model.cancelDialog)
+            case .circleReply?:
+                CircleReplyDialog(names: model.threadAudienceNames ?? [], onConfirm: model.answerCircleReply,
+                                  onCancel: model.cancelDialog)
             case .split?:
                 SplitContentDialog(charCount: model.pendingPaste?.jsLength ?? model.content.jsLength,
                                    onConfirm: model.confirmSplit, onCancel: model.cancelSplit)

@@ -49,6 +49,33 @@ PROMPT_DEFAULTS = {
         'file': 'read_thread.txt',
         'admin': True,
     },
+    # The first cohort (experiment, COHORT_V1; utils/cohort.py). Listed on
+    # the Prompts page only for a cohort's founder and invited people
+    # (`cohort`), readable there and never editable (`fixed`): the report
+    # and introduction drafts always run on these files. The interview
+    # file is the section added after the person's own agentic prompt in
+    # their interview thread, with {cohort_name}, {cohort_about},
+    # {founder_name}, {invitation_letter} and {profile_note} filled in when
+    # the thread starts; the thread's
+    # prompt node shows the whole text.
+    'cohort_interview': {
+        'title': 'Interview',
+        'file': 'cohort_interview.txt',
+        'cohort': True,
+        'fixed': True,
+    },
+    'cohort_report': {
+        'title': 'Interview report',
+        'file': 'cohort_report.txt',
+        'cohort': True,
+        'fixed': True,
+    },
+    'cohort_intro': {
+        'title': 'Group introduction',
+        'file': 'cohort_intro.txt',
+        'cohort': True,
+        'fixed': True,
+    },
 }
 
 PROMPTS_DIR = os.path.join(

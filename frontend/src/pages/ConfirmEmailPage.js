@@ -4,6 +4,7 @@ import { useUser } from "../contexts/UserContext";
 import api from "../api";
 import { emailState } from "../utils/emailState";
 import { here, signInPath } from "../utils/destination";
+import { forgetCohortOnSignOut } from "../utils/cohort";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 
@@ -96,7 +97,8 @@ export default function ConfirmEmailPage() {
       // backend.
       const here = encodeURIComponent(location.pathname + location.search);
       action = (
-        <a href={`${backendUrl}/auth/logout?next=${here}`} style={linkStyle}>
+        <a href={`${backendUrl}/auth/logout?next=${here}`} style={linkStyle}
+          onClick={forgetCohortOnSignOut}>
           Sign out and use the other account &rarr;
         </a>
       );

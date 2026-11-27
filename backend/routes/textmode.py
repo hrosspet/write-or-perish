@@ -62,9 +62,6 @@ def _serialize_message(node, viewer_id):
     return msg
 
 
-VALID_PRIVACY_LEVELS = {"private", "anonymous", "public"}
-
-
 @textmode_bp.route("/start", methods=["POST"])
 @body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
@@ -96,7 +93,9 @@ def start_conversation():
     if not content or not content.strip():
         return jsonify({"error": "Content is required"}), 400
 
-    if privacy_level not in VALID_PRIVACY_LEVELS:
+    # The shared list of levels (#588): this route kept its own, which
+    # accepted "anonymous" (not a level) and refused "circles".
+    if not validate_privacy_level(privacy_level):
         return jsonify({"error": f"Invalid privacy_level: {privacy_level}"}), 400
     # A public entry quotes only public nodes (Peter, 2026-11-12).
     if privacy_level == "public":
@@ -477,7 +476,8 @@ def continue_from_node(node_id):
     node the textmode prompt is attached under it first and the message
     hangs under that, so the thread is an agentic session from here
     (tools, artifacts, mode notes); inside an agentic thread nothing is
-    added. The text counterpart of POST /voice/from-node.
+    added, nor for a message that joins a shared thread (Circles, below).
+    The text counterpart of POST /voice/from-node.
 
     Body: { content: string, model?: string, auto_generate?: bool,
             ai_usage?: string, privacy_level?: string }.
@@ -486,7 +486,8 @@ def continue_from_node(node_id):
     be adhered to"): a form that still shows Private after the node was
     made public in another tab saves a private message. A client that
     sends none (an installed iPhone build, a page loaded earlier) gets
-    the node's, as before. The prompt node attached under the node is
+    the node's, as before (``message_level``: every check below reads
+    that one variable). The prompt node attached under the node is
     Public only when the message and the node are Public and the
     account's default level is Public, else Private
     (session_helpers.prompt_entry_privacy, given the more private of the
@@ -499,6 +500,20 @@ def continue_from_node(node_id):
     #362): a read reply is 'chat' for the tweets it quotes, which says
     nothing about what the user writes under it.
 
+    Circles: the message follows the reply rules of a typed reply
+    (POST /nodes/) and a recorded one (save-as-node). Under a shared node
+    it is "circles"; in someone else's shared thread it is never
+    Everyone, and not "circles" where the thread is closed to the writer
+    or in their own Only-me branch (circles.new_reply_refusal, before
+    anything is written). A "circles" message under a node of a shared
+    thread joins the thread (circles.join_reply) and hangs directly under
+    the node, where the thread's people read it: no Text-mode prompt is
+    added between, since a prompt node is never read by them
+    (attach_agentic_prompt_under) and a message under it would not be
+    either. Such a message gets no automatic reply anyway (a shared
+    thread), and it quotes only what the thread's people can read
+    (publish_quotes.circle_share_refusal).
+
     The one caller today is the reply box under a read reply (#323): a
     conversation about the picks says a lot about what the user is
     oriented toward, and this is what lets the assistant record it in
@@ -509,7 +524,10 @@ def continue_from_node(node_id):
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
     # Nothing is written under a deleted node (410), as in POST /nodes/;
-    # the row is locked against a delete that is under way.
+    # the row is locked against a delete that is under way. Only under a
+    # node the user can open, the parent check of the other reply routes
+    # (assert_parent_alive runs parent_visibility_error): a node of theirs
+    # in a shared thread that is closed to them gets the same 404.
     from backend.utils.node_deletion import assert_parent_alive
     err = assert_parent_alive(node.id)
     if err is not None:
@@ -534,19 +552,28 @@ def continue_from_node(node_id):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
     if ai_usage == 'none':
         return ai_usage_refused_response()
+    # The level the message is stored with: the form's, else the node's.
+    # The reply rules, the quote rule, the automatic reply and the prompt
+    # node all read this one variable.
     node_privacy = node.privacy_level or "private"
-    privacy_level = node_privacy
+    message_level = node_privacy
     if data.get("privacy_level") is not None:
-        privacy_level = data["privacy_level"]
-        if (not isinstance(privacy_level, str)
-                or not validate_privacy_level(privacy_level)):
+        message_level = data["privacy_level"]
+        if (not isinstance(message_level, str)
+                or not validate_privacy_level(message_level)):
             return jsonify(
-                {"error": f"Invalid privacy_level: {privacy_level}"}), 400
+                {"error": f"Invalid privacy_level: {message_level}"}), 400
     # The prompt node is no more visible than the node or the message.
-    prompt_privacy = min(node_privacy, privacy_level,
+    prompt_privacy = min(node_privacy, message_level,
                          key=lambda level: _VISIBILITY.get(level, 0))
+    # Typed replies under a Glean follow the Circles reply rules, as a
+    # typed or recorded reply does; refused before anything is written.
+    from backend.utils import circles as cz
+    refused = cz.new_reply_refusal(node, message_level, current_user)
+    if refused is not None:
+        return refused
     # A public message quotes only public nodes (Peter, 2026-11-12).
-    if privacy_level == "public":
+    if message_level == "public":
         from backend.utils.publish_quotes import publish_refusal
         refusal = publish_refusal(content, current_user.id)
         if refusal is not None:
@@ -554,7 +581,7 @@ def continue_from_node(node_id):
         # A day's public replies under other people's posts.
         from backend.utils.public_reply_limits import public_reply_refusal
         refusal = public_reply_refusal(
-            current_user.id, node.id, privacy_level)
+            current_user.id, node.id, message_level)
         if refusal is not None:
             return refusal
     auto_generate = bool(data.get("auto_generate", True))
@@ -564,7 +591,7 @@ def continue_from_node(node_id):
     # no level sent it is the node's.
     auto_off = None
     if auto_generate:
-        auto_off = auto_generate_refusal(privacy_level=privacy_level)
+        auto_off = auto_generate_refusal(privacy_level=message_level)
     if auto_off is not None:
         auto_generate = False
     if auto_generate:
@@ -587,23 +614,40 @@ def continue_from_node(node_id):
         if refused is not None:
             return read_only_model_response(refused)
 
-    prompt_node = attach_agentic_prompt_under(
-        node, current_user.id, PROMPT_KEY, prompt_privacy, ai_usage)
-    parent_id = prompt_node.id if prompt_node is not None else node.id
-
     from backend.utils.tokens import approximate_token_count
     user_node = Node(
         user_id=current_user.id,
         human_owner_id=current_user.id,
-        parent_id=parent_id,
+        parent_id=node.id,
         node_type="user",
-        privacy_level=privacy_level,
+        privacy_level=message_level,
         ai_usage=ai_usage,
         token_count=approximate_token_count(content),
     )
+    # Circles: a message into a shared thread joins its audience (the
+    # explicit act) and stays directly under the node, where the thread's
+    # people read it. Any other message goes under the Text-mode prompt
+    # when no agentic prompt sits above the node.
+    joined = cz.join_reply(user_node, node, current_user.id)
+    prompt_node = None
+    if not joined:
+        prompt_node = attach_agentic_prompt_under(
+            node, current_user.id, PROMPT_KEY, prompt_privacy, ai_usage)
+        if prompt_node is not None:
+            user_node.parent_id = prompt_node.id
     user_node.set_content(content)
     db.session.add(user_node)
     db.session.flush()
+    # A message that joined a shared thread quotes only nodes all of the
+    # thread's people can read (Peter, 2026-11-12), as a typed or recorded
+    # reply there does. Nothing is saved otherwise.
+    if joined:
+        from backend.utils.publish_quotes import circle_share_refusal
+        refusal = circle_share_refusal(
+            [(user_node, content, set(), None)], current_user.id)
+        if refusal is not None:
+            db.session.rollback()
+            return refusal
 
     response = {
         "prompt_node_id": prompt_node.id if prompt_node is not None else None,

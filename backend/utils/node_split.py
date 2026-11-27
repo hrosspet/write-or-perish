@@ -88,6 +88,9 @@ def split_node_into_chain(node, segments=None):
             privacy_level=node.privacy_level,
             ai_usage=node.ai_usage,
             token_count=approximate_token_count(seg),
+            # Circles: the parts of one entry or reply are read by the
+            # same people as its first part.
+            audience_root_id=node.audience_root_id,
         )
         part.set_content(seg)
         part.created_at = node.created_at + PART_STEP * i
@@ -113,6 +116,14 @@ def split_chain_tip(node):
     parent. Reads ``children`` (prefetched on the thread view, one query
     per part elsewhere); no content is read.
     """
+    parts = split_chain_parts(node)
+    return parts[-1] if parts else node
+
+
+def split_chain_parts(node):
+    """The parts that follow *node* in its split chain, in order (empty
+    when the entry was not split, or *node* is its last part)."""
+    parts = []
     current = node
     while current.created_at is not None:
         nxt = next(
@@ -124,5 +135,6 @@ def split_chain_tip(node):
             None)
         if nxt is None:
             break
+        parts.append(nxt)
         current = nxt
-    return current
+    return parts

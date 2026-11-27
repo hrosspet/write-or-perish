@@ -1,0 +1,239 @@
+// Circles: wording shared by the picker, the entry page and the dialogs.
+
+const NUMBER_WORDS = [
+  'no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight',
+  'nine', 'ten', 'eleven', 'twelve',
+];
+
+// "two" … "twelve", then digits.
+export function countWord(n) {
+  return n >= 0 && n < NUMBER_WORDS.length ? NUMBER_WORDS[n] : String(n);
+}
+
+// A person's Loore name as it is written in Circles copy: "@ben". A
+// name that already carries "@" is not given a second one.
+export function atName(name) {
+  const bare = String(name || '').replace(/^@+/, '');
+  return bare ? `@${bare}` : '';
+}
+
+// ["a", "b", "c"] → "@a, @b and @c"
+export function joinNames(names) {
+  const list = (names || []).map(atName).filter(Boolean);
+  if (list.length <= 1) return list.join('');
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+// Things, not people: ["profile", "memory", "to-do list"] →
+// "profile, memory and to-do list".
+export function joinPlain(items) {
+  const list = (items || []).filter(Boolean);
+  if (list.length <= 1) return list.join('');
+  return `${list.slice(0, -1).join(', ')} and ${list[list.length - 1]}`;
+}
+
+// What an AI reply in a shared thread reads of its requester's own data
+// (audience.ai_reads, from the server) when a prompt someone else wrote
+// asks for it, as a sentence; '' when it reads none. The reply is the
+// requester's alone (every AI reply is created private, Peter
+// 2026-11-12).
+export function aiReadsPrivateSentence(aiReads) {
+  const list = joinPlain(aiReads);
+  return list
+    ? `Your AI reads your ${list} for this reply, as the prompt shared in this thread asks.`
+    : '';
+}
+
+// The dialog before an AI reply when the thread's prompt is an older
+// version of Loore's own default prompt (audience.ai_reads_older_default,
+// from the server; Peter, 2026-11-12: "show the dialog for older
+// defaults, but warn the user that they are old").
+export function aiReadsOlderDefaultBody(aiReads) {
+  const list = joinPlain(aiReads);
+  return "This thread uses an older version of Loore's own prompt. "
+    + 'Only you will see the reply.'
+    + (list ? ` Your AI reads your ${list} for it.` : '');
+}
+
+// Names typed into "for this entry only": commas or spaces, @ optional.
+export function splitNames(text) {
+  const seen = new Set();
+  const out = [];
+  (text || '').replace(/,/g, ' ').split(/\s+/).forEach((raw) => {
+    const name = raw.trim().replace(/^@+/, '');
+    if (name && !seen.has(name.toLowerCase())) {
+      seen.add(name.toLowerCase());
+      out.push(name);
+    }
+  });
+  return out;
+}
+
+// The sentence under the picker, before saving.
+export function readersSentence(readers, what = 'entry') {
+  if (!readers || readers.length === 0) return '';
+  return `${joinNames(readers)} can read this ${what} and reply to it. `
+    + 'Nobody else can.';
+}
+
+// The same for an entry shared with a group of the first cohort, whose
+// circle gains everyone who joins the group later: "Nobody else can" would
+// not be true. `groups`: the names of the chosen group circles.
+export function groupReadersSentence(readers, groups, what = 'entry') {
+  if (!readers || readers.length === 0 || !groups || groups.length === 0) return '';
+  return `${joinNames(readers)} can read this ${what} and reply to it, and so `
+    + `will people who join ${joinPlain(groups)} later.`;
+}
+
+// The save button: "Share with Close friends" for one circle and no
+// extra names, else "Share with 5 people".
+export function shareButtonLabel({ circles, circleIds, names, readers }) {
+  const picked = (circles || []).filter((c) => (circleIds || []).includes(c.id));
+  if (picked.length === 1 && (names || []).length === 0) {
+    return `Share with ${picked[0].name}`;
+  }
+  const n = (readers || []).length;
+  if (n === 0) return 'Share';
+  return `Share with ${n} ${n === 1 ? 'person' : 'people'}`;
+}
+
+// Everyone who sees a reply in a shared thread, except the one writing:
+// the author and the readers.
+export function replyAudienceNames(audience, myUsername) {
+  if (!audience) return [];
+  return [audience.author, ...(audience.readers || [])]
+    .filter((name) => name && name !== myUsername);
+}
+
+// The banner over a shared entry, for a reader.
+export function sharedBannerText(audience) {
+  const author = atName(audience.author);
+  const others = Math.max((audience.readers || []).length - 1, 0);
+  const whom = others === 0
+    ? 'you'
+    : `you and ${countWord(others)} other ${others === 1 ? 'person' : 'people'}`;
+  const only = others === 0
+    ? `Only you and ${author} can read it`
+    : 'Only they can read it';
+  return `${author} shared this with ${whom}. ${only}, and nobody but `
+    + `${author} can make it public.`;
+}
+
+// "Don't ask again in this thread": per thread, per user, on this device.
+export function replyAckKey(entryId, userId) {
+  return `loore_circle_reply_ack_${userId}_${entryId}`;
+}
+
+// The same for the dialog before an AI reply. It has its own key, so
+// ticking the box for typed replies does not skip the AI dialog.
+export function aiReplyAckKey(entryId, userId) {
+  return `loore_circle_ai_reply_ack_${userId}_${entryId}`;
+}
+
+// Why no AI reply can be generated on `node` in a shared thread, in one
+// sentence, or null when it can.
+export function aiReplyOffReason(audience, node, user) {
+  if (!audience) return null;
+  const closed = "This entry's AI usage is None, so no AI can read it.";
+  if (audience.entry_ai_usage === 'none') {
+    return audience.is_author
+      ? closed
+      : `${atName(audience.author)} set this entry's AI usage to None, so no AI can read it.`;
+  }
+  if (node?.ai_usage === 'none') return closed;
+  if (user?.default_ai_usage === 'none') {
+    return 'Your own AI usage is set to None in Account settings.';
+  }
+  return null;
+}
+
+// The "Remove <name>" dialog. A person reads an entry through any of
+// its circles or by being named for it, so the dialog says what removing
+// them from this one circle does, and what it does not.
+export function removeMemberBody(rawName, circleName) {
+  const name = atName(rawName);
+  return `From this moment ${name} no longer reads your entries through `
+    + `${circleName}. An entry you also shared with ${name} another way `
+    + `(another circle ${name} is in, or by name) stays open to ${name}. `
+    + `${name} is not told.`;
+}
+
+// The two requests that name another person to take something back. The
+// name goes in the request body, never in the address: the address is
+// what the server keeps as the account's last-seen place and what error
+// reports carry. `client` is the app's axios instance (api.js).
+export function removeMemberRequest(client, circleId, username) {
+  return client.delete(`/circles/${circleId}/members`, { data: { username } });
+}
+
+export function showPersonAgainRequest(client, username) {
+  return client.delete('/circles/mutes', { data: { username } });
+}
+
+// Leaving (Peter, 2026-11-23). From a shared entry's page: the circles
+// through which the reader reads it and their name on it. `preview` is
+// the server's answer: { author, closes }, where `closes` counts the
+// entries that close with it, this one included. How many circles that
+// is stays the author's (only she sees her circles).
+export function leaveEntryBody(preview) {
+  const author = atName(preview?.author);
+  const others = Math.max((preview?.closes || 0) - 1, 0);
+  const base = 'You will no longer read this thread or reply in it, and '
+    + `nobody sees your name among its readers any more, ${author} included.`;
+  if (others === 0) return base;
+  const what = others === 1 ? 'entry' : 'entries';
+  return `${base} You also stop reading ${countWord(others)} other ${what} `
+    + `${author} shared with you the same way as this one.`;
+}
+
+// From the list of people the reader hid: everything of that person's.
+export function leavePersonTitle(name) {
+  return `Leave everything ${atName(name)} shares with you?`;
+}
+
+export function leavePersonBody(name) {
+  const author = atName(name);
+  return `You leave ${possessive(name)} circles and the entries ${author} `
+    + 'named you for, and nobody sees your name among their readers any '
+    + `more, ${author} included.`;
+}
+
+export function leaveNote(name) {
+  const author = atName(name);
+  return 'Your replies stay where they are, with your name. '
+    + `${author} gets no note, and can add you again.`;
+}
+
+// The two leave requests. A person is named in the body, never in the
+// address (as removeMemberRequest).
+export function leavePreviewRequest(client, target) {
+  return client.post('/circles/leave/preview', target);
+}
+
+export function leaveRequest(client, target) {
+  return client.post('/circles/leave', target);
+}
+
+// At the share step, when the entry has a recording (Peter, 2026-11-23:
+// "keep & say so").
+export const RECORDING_SHARED_NOTE = 'They can also play its original '
+  + 'recording, even after you edit the text.';
+
+export const NO_READERS_MESSAGE = "Nobody could read this entry yet. Choose "
+  + "a circle with people in it, or name a person.";
+
+// The check before sharing found readers the sentence on the screen did
+// not name (a name typed and not yet looked up): nothing is shared, and
+// the sentence is brought up to date.
+export const READERS_CHANGED_MESSAGE = "Who can read this has changed. "
+  + "Check the names above, then share again.";
+
+// The same people, in any order, case ignored.
+export function sameNames(a, b) {
+  const norm = (list) => (list || []).map((n) => String(n).toLowerCase()).sort().join(',');
+  return norm(a) === norm(b);
+}
+
+export function possessive(name) {
+  return `${atName(name)}'s`;
+}

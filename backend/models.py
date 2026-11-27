@@ -483,9 +483,20 @@ class User(db.Model, UserMixin):
         """A plan that gives the paid feature set by itself (alpha, pro):
         a subscription neither adds to it nor takes from it (#438). An alpha
         tester whose free month is still to come keeps the alpha plan's
-        access until it starts."""
+        access until it starts. An account bound to a live invitation of
+        the first cohort, while its cohort is free (COHORT_V1 only,
+        utils/cohort.free_access), counts as set by hand too: let in with
+        full access, AI included, without a card."""
         return ((self.plan or "free") in self.VOICE_MODE_PLANS
-                or self.alpha_free_month_upcoming)
+                or self.alpha_free_month_upcoming
+                or self.cohort_free_access)
+
+    @property
+    def cohort_free_access(self):
+        """Inside a first-cohort free period (utils/cohort.free_access).
+        Always False while COHORT_V1 is off, with no query."""
+        from backend.utils.cohort import free_access
+        return free_access(self)
 
     @property
     def subscription_grants_access(self):
@@ -583,14 +594,22 @@ class User(db.Model, UserMixin):
                     cls.alpha_free_until > datetime.utcnow())
 
     @classmethod
+    def cohort_free_clause(cls):
+        """In SQL: inside a first-cohort free period (cohort_free_access).
+        Always false while COHORT_V1 is off."""
+        from backend.utils.cohort import free_access_user_ids
+        return cls.id.in_(free_access_user_ids())
+
+    @classmethod
     def paid_features_clause(cls):
         """In SQL: the account may start model calls (an admin, a plan set
-        by hand, a subscription that gives access, or an alpha tester's
-        free month)."""
+        by hand, a subscription that gives access, an alpha tester's free
+        month, or a first-cohort free period)."""
         return or_(cls.is_admin.is_(True),
                    cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
                    cls.subscription_grants_access_clause(),
-                   cls.alpha_free_month_clause())
+                   cls.alpha_free_month_clause(),
+                   cls.cohort_free_clause())
 
     def get_id(self):
         return str(self.id)
@@ -653,11 +672,12 @@ class User(db.Model, UserMixin):
         return cls.query.filter(
             cls.approved.is_(True),
             # on_paid_plan in SQL: a plan set by hand, a subscription that
-            # grants the paid feature set (#438), or an alpha tester's free
-            # month.
+            # grants the paid feature set (#438), an alpha tester's free
+            # month, or a first-cohort free period.
             or_(cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
                 cls.subscription_grants_access_clause(),
-                cls.alpha_free_month_clause()),
+                cls.alpha_free_month_clause(),
+                cls.cohort_free_clause()),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
@@ -815,7 +835,7 @@ class Node(db.Model):
 
     # Privacy level: controls who can access this node
     # - private: Only the owner can read (default for new nodes)
-    # - circles: Shared with specific user-defined groups (future feature)
+    # - circles: Shared with the circles and people its author chose
     # - public: Visible to all users
     privacy_level = db.Column(db.String(16), nullable=False, default="private")
 
@@ -935,6 +955,28 @@ class Node(db.Model):
     # Pin-to-profile: surfaces any node on the Profile page & Log
     pinned_at = db.Column(db.DateTime, nullable=True)
     pinned_by = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+
+    # Circles: the entry whose audience decides who reads this node. Only
+    # read while privacy_level is "circles". An entry its author shared
+    # points at itself (its audience is in NodeCircle / NodeReader); a
+    # reply in a shared thread points at that entry, so the whole thread
+    # has one audience. NULL = not shared with anyone: a "circles" node
+    # without it behaves as private (old rows, old clients, #588).
+    # Set only by the code that shares an entry (circles.set_audience,
+    # the apply-to-replies cascade) and by the explicit reply paths:
+    # circles.join_reply (a person's typed, recorded or uploaded reply
+    # into the thread) and circles.join_ai_reply (an AI reply one of the
+    # thread's people asked for under a node of the thread; it is set
+    # there also on a reply its requester keeps private). Nothing else
+    # that is created under a shared node joins its audience: a prompt
+    # node (Voice, Text mode, Glean) and what is written below it, a
+    # node type added later. They keep the level they were created with,
+    # and a "circles" level without this pointer is private.
+    # No foreign key on purpose: on a reply it is also the lasting
+    # record of whose thread the node was written
+    # into, and it must outlive the entry. A pointer whose entry is gone
+    # reads as "someone else's, closed" (privacy.py, circles.py).
+    audience_root_id = db.Column(db.Integer, nullable=True, index=True)
 
     # Soft-delete: non-NULL means scheduled for cleanup after SOFT_DELETE_GRACE_DAYS.
     deleted_at = db.Column(db.DateTime, nullable=True, index=True)
@@ -1144,8 +1186,20 @@ class Node(db.Model):
                             if dek is not None
                             else encrypt_content(self.content))
 
+    def hold_content(self, text):
+        """Keep *text* as this object's content for as long as the object
+        lives (one task's session): get_content returns it from now on,
+        also after a commit expires the row. Nothing is written. The
+        completion task holds a prompt someone else shared with the
+        requester at the text the requester agreed to, so a later edit of
+        the prompt cannot reach the reply being built."""
+        self._held_content = text
+
     def get_content(self) -> str:
         """Get decrypted content. Resolves from linked UserPrompt if set."""
+        held = getattr(self, "_held_content", None)
+        if held is not None:
+            return held
         # Artifact-based prompt resolution
         prompt_artifact = self.get_artifact_row("prompt")
         if prompt_artifact is not None:
@@ -1226,6 +1280,187 @@ def _enforce_node_content_encryption(mapper, connection, node):
             "encrypting; fix the writer (use set_content/set_privacy_level)",
             node.id, node.privacy_level)
         node.content = encrypt_content(node.content)
+
+
+class Circle(db.Model):
+    """A named list of people, owned by one user. Only the owner sees the
+    circle, its name and who is in it."""
+    __tablename__ = "circle"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    name = db.Column(db.String(80), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    # The first cohort (experiment): the circle Loore keeps for one member
+    # of a cohort, holding every other member (utils/cohort.py
+    # sync_cohort_circles). Its owner can't rename or delete it or change
+    # its people by hand. NULL for every circle a person made.
+    cohort_id = db.Column(db.Integer, db.ForeignKey("cohort.id"),
+                          nullable=True, index=True)
+
+
+class Cohort(db.Model):
+    """The first cohort (experiment, COHORT_V1): a small group a founder
+    invites in person. Plaintext fields are the founder's own public
+    words (shown on invitation pages) and dates; no user content."""
+    __tablename__ = "cohort"
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(64), unique=True, nullable=False)
+    name = db.Column(db.String(80), nullable=False)
+    about = db.Column(db.Text, nullable=True)
+    # The name the founder signs with in letters and prompts ("Peter");
+    # the owner's username when unset (accounts have no display name).
+    founder_name = db.Column(db.String(64), nullable=True)
+    # Nullable only so that a deleted founder account leaves the row
+    # (account_deletion.delete_identity).
+    owner_user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=True, index=True)
+    booking_url = db.Column(db.String(512), nullable=True)
+    call_url = db.Column(db.String(512), nullable=True)
+    next_call_at = db.Column(db.DateTime, nullable=True)
+    question = db.Column(db.Text, nullable=True)
+    question_set_at = db.Column(db.DateTime, nullable=True)
+    # Last day (UTC) of the free period; NULL: no free period.
+    free_until = db.Column(db.Date, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+
+
+class CohortInvitation(db.Model):
+    """One person's invitation to a cohort. States are timestamps
+    (utils/cohort.invitation_state). The founder sees these and the
+    letter, never anything the person wrote. The node ids carry no
+    foreign key on purpose: the person's "Delete all my content" deletes
+    those nodes, and an id that no longer resolves reads as none."""
+    __tablename__ = "cohort_invitation"
+    id = db.Column(db.Integer, primary_key=True)
+    cohort_id = db.Column(db.Integer, db.ForeignKey("cohort.id"),
+                          nullable=False, index=True)
+    code = db.Column(db.String(64), unique=True, nullable=False)
+    # Stored lowercased, without @; NULL for an invitation any signed-in
+    # account may accept with its code (local testing).
+    x_handle = db.Column(db.String(64), nullable=True)
+    # The X account id the handle resolved to when the invitation was
+    # made: compared at claim when known (a handle can change hands).
+    x_id = db.Column(db.String(64), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    # The founder's letter to this person, encrypted like node content.
+    letter = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    first_opened_at = db.Column(db.DateTime, nullable=True)
+    claimed_at = db.Column(db.DateTime, nullable=True)
+    interview_started_at = db.Column(db.DateTime, nullable=True)
+    report_drafted_at = db.Column(db.DateTime, nullable=True)
+    report_sent_at = db.Column(db.DateTime, nullable=True)
+    report_skipped_at = db.Column(db.DateTime, nullable=True)
+    call_done_at = db.Column(db.DateTime, nullable=True)
+    admitted_at = db.Column(db.DateTime, nullable=True)
+    declined_at = db.Column(db.DateTime, nullable=True)
+    closed_at = db.Column(db.DateTime, nullable=True)
+    interview_node_id = db.Column(db.Integer, nullable=True)
+    report_node_id = db.Column(db.Integer, nullable=True)
+    intro_node_id = db.Column(db.Integer, nullable=True)
+    report_task_status = db.Column(db.String(32), nullable=True)
+    intro_task_status = db.Column(db.String(32), nullable=True)
+    # When the running draft was asked for: a status still running after
+    # utils/cohort.DRAFT_STALE_AFTER reads as failed (a worker that died),
+    # and a task acts only for the request that queued it.
+    report_task_started_at = db.Column(db.DateTime, nullable=True)
+    intro_task_started_at = db.Column(db.DateTime, nullable=True)
+    # The report node now on the invitation was written by a model (True),
+    # or is the headings the person writes under themselves (False): the
+    # page says "Loore wrote this draft" only for the first.
+    report_written_by_model = db.Column(db.Boolean, nullable=True)
+    __table_args__ = (
+        db.UniqueConstraint("cohort_id", "x_handle",
+                            name="uq_cohort_invitation_cohort_handle"),
+    )
+
+    def set_letter(self, plaintext):
+        self.letter = encrypt_content(plaintext) if plaintext else None
+
+    def get_letter(self):
+        return decrypt_content(self.letter) if self.letter else ""
+
+
+class CircleMember(db.Model):
+    """A person in a circle. ``entries_from`` is the "Only new entries"
+    cut-off: NULL = the member reads everything shared with the circle;
+    a time = only what was shared with it from then on."""
+    __tablename__ = "circle_member"
+    id = db.Column(db.Integer, primary_key=True)
+    circle_id = db.Column(
+        db.Integer, db.ForeignKey("circle.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    entries_from = db.Column(db.DateTime, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("circle_id", "user_id",
+                            name="uq_circle_member_circle_user"),
+    )
+
+
+class NodeCircle(db.Model):
+    """An entry shared with a circle. Who that is, is read from the
+    circle's members when someone opens the entry, so removing a person
+    closes it to them at once. ``shared_at`` is compared with a member's
+    ``entries_from``."""
+    __tablename__ = "node_circle"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    circle_id = db.Column(
+        db.Integer, db.ForeignKey("circle.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    shared_at = db.Column(db.DateTime, default=datetime.utcnow,
+                          nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("node_id", "circle_id",
+                            name="uq_node_circle_node_circle"),
+    )
+
+
+class NodeReader(db.Model):
+    """A person named for one entry only (no circle is made)."""
+    __tablename__ = "node_reader"
+    id = db.Column(db.Integer, primary_key=True)
+    node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("node_id", "user_id",
+                            name="uq_node_reader_node_user"),
+    )
+
+
+class CircleMute(db.Model):
+    """``user_id`` chose "Don't show <name>'s entries" for
+    ``muted_user_id``: no notes about that person's shared entries, and
+    the entries are closed to ``user_id`` while the row exists. Only
+    ``user_id`` ever sees it."""
+    __tablename__ = "circle_mute"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=False, index=True)
+    muted_user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    __table_args__ = (
+        db.UniqueConstraint("user_id", "muted_user_id",
+                            name="uq_circle_mute_user_muted"),
+    )
 
 
 class NodeContextArtifact(db.Model):
@@ -2497,8 +2732,17 @@ class UserNotification(db.Model):
     read_at = db.Column(db.DateTime, nullable=True)
     # Last time the user hit "skip for now" (stays unread)
     skipped_at = db.Column(db.DateTime, nullable=True)
+    # A note about a shared entry (type "circle_share"): the entry and
+    # the person who shared it. One note per entry per reader, whatever
+    # its status. NULL on every other type.
+    node_id = db.Column(
+        db.Integer, db.ForeignKey("node.id", ondelete="CASCADE"),
+        nullable=True, index=True)
+    actor_user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=True, index=True)
 
-    user = db.relationship("User", backref="notifications")
+    user = db.relationship("User", backref="notifications",
+                           foreign_keys=[user_id])
 
 
 class Poll(db.Model):

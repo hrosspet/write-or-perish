@@ -595,6 +595,10 @@ def create_app():
         # or the redirect below would loop).
         if request.endpoint and request.endpoint.startswith("public_pages."):
             return
+        # The first cohort's invitation page needs no account (COHORT_V1).
+        from backend.utils.cohort import open_without_approval
+        if open_without_approval(request.path):
+            return
 
         # Payments on (#697): an account the admin blocked, or one held as
         # spam (#713), reaches only who it is, its subscription and
@@ -739,6 +743,11 @@ def create_app():
     from backend.routes.public_pages import public_pages_bp
     app.register_blueprint(public_pages_bp)
 
+    # Circles: sharing with chosen people (dark behind CIRCLES_V1 /
+    # CIRCLES_USER_IDS; the routes answer 404 while off for the user).
+    from backend.routes.circles import circles_bp
+    app.register_blueprint(circles_bp, url_prefix="/api/circles")
+
     # Dev-update channel: changelog + notifications + polls (#207).
     from backend.routes.updates import updates_bp
     app.register_blueprint(updates_bp, url_prefix="/api/updates")
@@ -773,6 +782,15 @@ def create_app():
 
     from backend.routes.prompts import prompts_bp
     app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
+
+    # The first cohort (experiment, dark behind COHORT_V1; every route
+    # answers 404 while it is off): the public invitation page, the
+    # invited person's steps and the founder's admin routes.
+    from backend.routes.cohort import (
+        cohort_admin_bp, cohort_bp, invitation_bp)
+    app.register_blueprint(invitation_bp, url_prefix="/api/invitation")
+    app.register_blueprint(cohort_bp, url_prefix="/api/cohort")
+    app.register_blueprint(cohort_admin_bp, url_prefix="/api/admin/cohorts")
 
     # --------------------------------------------------------------------
     # Voice‑mode media blueprint – serves audio files in dev & tests.

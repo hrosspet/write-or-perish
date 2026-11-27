@@ -7,6 +7,7 @@ import SubscriptionSection from "../components/SubscriptionSection";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
 import { downloadAccountData, EXPORT_FAILED_MESSAGE } from "../utils/dataExport";
 import { SUBSCRIBE_X_LOGIN_MESSAGES, xLoginOutcome } from "../utils/xLogin";
+import { forgetCohortOnSignOut } from "../utils/cohort";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 
@@ -150,7 +151,7 @@ export default function SubscribePage() {
         </p>
       )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: "1.5rem", marginTop: "3rem" }}>
-        <a href={`${backendUrl}/auth/logout`} style={quiet}>Sign out</a>
+        <a href={`${backendUrl}/auth/logout`} style={quiet} onClick={forgetCohortOnSignOut}>Sign out</a>
         <button type="button" style={quiet} onClick={downloadData}>
           Download your data
         </button>

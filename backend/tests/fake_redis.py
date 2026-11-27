@@ -1,6 +1,7 @@
 """A Redis stand-in for the run locks (backend/utils/run_locks.py): SET
-with NX/EX, GET, INCR, and EVAL of the two lock scripts, on a clock the
-test moves (``advance``), so a TTL can run out."""
+with NX/EX, GET, INCR, INCRBY, a transaction pipeline, and EVAL of the
+two lock scripts, on a clock the test moves (``advance``), so a TTL can
+run out."""
 from backend.utils import run_locks
 
 
@@ -39,11 +40,36 @@ class FakeRedis:
 
     def incr(self, key):
         """INCR: a missing key counts from 0; the key keeps its expiry."""
+        return self.incrby(key, 1)
+
+    def incrby(self, key, amount):
+        """INCRBY: a missing key counts from 0; the key keeps its expiry."""
         entry = self._live(key)
-        value = int(entry[0]) + 1 if entry is not None else 1
+        value = (int(entry[0]) if entry is not None else 0) + int(amount)
         self.data[key] = (str(value).encode(),
                           entry[1] if entry is not None else None)
         return value
+
+    def pipeline(self):
+        """A transaction: the calls run in order at execute(), which
+        returns their results (nothing else runs in between here)."""
+        fake = self
+
+        class _Pipeline:
+            def __init__(self):
+                self.calls = []
+
+            def __getattr__(self, name):
+                def queue(*args, **kwargs):
+                    self.calls.append((name, args, kwargs))
+                    return self
+                return queue
+
+            def execute(self):
+                calls, self.calls = self.calls, []
+                return [getattr(fake, name)(*args, **kwargs)
+                        for name, args, kwargs in calls]
+        return _Pipeline()
 
     def eval(self, script, numkeys, key, *args):
         token = str(args[0]).encode()

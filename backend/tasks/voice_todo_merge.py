@@ -202,13 +202,14 @@ def _fail_confirm_node(llm_node_id, user_id, confirm_node_id):
 
 
 def _merge_input_mark(proposal_node, todo):
-    """X_API_INPUT when a merged todo list is written from X API posts
-    (#689): the proposal (the reply that proposed the changes) or the list
-    it rewrites holds them. None otherwise."""
-    from backend.utils.privacy import X_API_INPUT, unlicensed_input
-    kinds = {unlicensed_input(row) for row in (proposal_node, todo)
-             if row is not None}
-    return X_API_INPUT if X_API_INPUT in kinds else None
+    """The mark of a merged todo list (privacy.strongest_input): X_API_INPUT
+    when it is written from X API posts (#689), CIRCLE_INPUT when from
+    another person's writing in a shared thread (Circles): the proposal
+    (the reply that proposed the changes) or the list it rewrites carries
+    the mark. None otherwise."""
+    from backend.utils.privacy import strongest_input, unlicensed_input
+    return strongest_input(unlicensed_input(row) for row in (proposal_node, todo)
+                           if row is not None)
 
 
 def build_merge_messages(merge_prompt, update_summary, current_todo):

@@ -748,6 +748,25 @@ def delete_identity(user_id, *, notify=True, reserve_handles=True):
          Invite.target_x_id: None},
         synchronize_session=False)
 
+    # The first cohort (experiment): an invitation is the founder's record
+    # (states and his letter); it stays, without the account. A cohort
+    # whose founder deletes the account stays without its owner.
+    # Closed first, so that it is never accepted again by anyone, and a
+    # member leaves the group's circles.
+    from backend.models import Cohort, CohortInvitation
+    from backend.utils.cohort import close_for_deleted_account
+    counts["cohort_invitation.closed"] += close_for_deleted_account(U, now)
+    counts["cohort_invitation.user_id"] += CohortInvitation.query.filter(
+        CohortInvitation.user_id == U).update(
+        {CohortInvitation.user_id: None,
+         CohortInvitation.interview_node_id: None,
+         CohortInvitation.report_node_id: None,
+         CohortInvitation.intro_node_id: None},
+        synchronize_session=False)
+    counts["cohort.owner_user_id"] += Cohort.query.filter(
+        Cohort.owner_user_id == U).update(
+        {Cohort.owner_user_id: None}, synchronize_session=False)
+
     handles = {(user.username or "").lower()}
     handles.update(h for (h,) in db.session.query(
         UsernameHistory.old_username).filter(UsernameHistory.user_id == U))

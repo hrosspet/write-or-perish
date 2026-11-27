@@ -23,6 +23,7 @@ import {
 } from '../utils/spokenRefusal';
 import api from '../api';
 import { entryQuestion, EVERYDAY_QUESTION } from '../utils/entryPrompt';
+import { interviewOpenFromCohort } from '../utils/cohort';
 
 // Chain-chapter numerals — turns cap at a handful of nodes (tool-round
 // budget), so a static list covers it.
@@ -46,7 +47,10 @@ function WaveformBars({ animated = true }) {
             borderRadius: '1px',
             opacity: 0.6,
             animation: animated ? `waveBarVoice 1.2s ease-in-out ${i * 0.05}s infinite alternate` : 'none',
-            height: animated ? undefined : '4px',
+            // The resting height also before a bar's staggered animation
+            // starts: without it the bars not started yet were invisible,
+            // and the first two read as a stray '' above the player.
+            height: '4px',
           }}
         />
       ))}
@@ -691,7 +695,16 @@ function VoiceSession({
     // The glean starts under the failed reply, which the server turns
     // into its parent, as for the Glean button under a failed reply in
     // text mode: it reads the user's message, never the failure.
-    onLLMFailed: (nodeId) => setGleanAnchor(nodeId),
+    onLLMFailed: (nodeId) => {
+      // The first cohort's interview, opened here by /cohort on its
+      // pending reply (?resume=): that reply failed, and /cohort says so
+      // with Try again.
+      if (resumeId && String(nodeId) === String(resumeId) && interviewOpenFromCohort()) {
+        navigate('/cohort', { replace: true });
+        return;
+      }
+      setGleanAnchor(nodeId);
+    },
     // The user cancelled the reply: none is coming, so Glean starts under
     // their message instead of waiting for it (#514).
     onCancelled: (userNodeId) => setGleanAnchor(userNodeId),

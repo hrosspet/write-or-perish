@@ -25,6 +25,7 @@ struct ThreadSheets: ViewModifier {
                         edit: .init(nodeId: target.id, initialContent: target.content, initialPrivacy: target.privacy,
                                     initialAIUsage: target.aiUsage, detachPrompt: target.hasPromptArtifact,
                                     hasGeneratedTTS: target.hasTTS, hasChildren: target.hasChildren,
+                                    isAIReply: target.isAIReply,
                                     trainRefused: target.trainRefused))) { result in
                         Task { await model.editSaved(result, autoGenerate: $autoGenerate) }
                     } onClose: {
@@ -32,11 +33,29 @@ struct ThreadSheets: ViewModifier {
                     }
                 }
             }
+            .looreDialog(isPresented: $model.showAIReplyDialog) {
+                CircleReplyDialog(names: model.aiReplyNames, aiReply: true, aiReads: model.aiReplyReads,
+                                  olderDefault: model.aiReplyOlderDefault,
+                                  onConfirm: { model.aiReplyConfirmed(dontAskAgain: $0) },
+                                  onCancel: { model.showAIReplyDialog = false })
+            }
             // Write tool calls waiting for approval: one reply's calls per dialog.
             .looreDialog(isPresented: Binding(get: { model.approvals.shownGroup != nil },
                                               set: { if !$0 { model.approvals.later() } })) {
                 if let group = model.approvals.shownGroup {
                     ToolApprovalDialog(group: group, model: model.approvals)
+                }
+            }
+            // A reader leaves the thread (Peter, 2026-11-23).
+            .looreDialog(isPresented: Binding(get: { model.leavePlan != nil },
+                                              set: { if !$0 { model.leavePlan = nil } })) {
+                if let plan = model.leavePlan {
+                    CircleConfirmDialog(title: CirclesWording.leaveThreadTitle,
+                                        message: CirclesWording.leaveThreadBody(author: plan.author, closes: plan.closes),
+                                        note: CirclesWording.leaveNote(author: plan.author),
+                                        confirmLabel: CirclesWording.leaveLabel, busy: model.leaving,
+                                        onConfirm: { Task { await model.confirmLeave() } },
+                                        onCancel: { model.leavePlan = nil })
                 }
             }
             .looreDialog(isPresented: $model.showPromptEditConfirm) {

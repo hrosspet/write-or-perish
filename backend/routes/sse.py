@@ -35,6 +35,26 @@ def _not_found(what):
     return jsonify({"error": f"{what} not found"}), 404
 
 
+def _still_open(node, viewer_id):
+    """Whether an open stream of *node* may go on sending its text or
+    audio to *viewer_id*. A stream checks again before each such event:
+    removing a reader from a shared entry's audience, taking the entry
+    back or hiding its author closes the node at once, an open stream
+    included. Its owner (for an AI reply, the person who asked for it)
+    needs no lookup, except for an AI reply asked for in someone else's
+    shared thread, which is open to its owner while the thread is.
+    *viewer_id* None: a stream that is its owner's alone (a profile, a
+    saved reference), checked when it opened."""
+    if viewer_id is None:
+        return True
+    from backend.utils.privacy import (
+        can_user_access_node, is_node_owner, is_others_thread_answer,
+    )
+    if is_node_owner(node, viewer_id) and not is_others_thread_answer(node):
+        return True
+    return can_user_access_node(node, viewer_id)
+
+
 def format_sse_message(data, event=None):
     """Format data as an SSE message."""
     msg = ""
@@ -160,7 +180,7 @@ def transcription_stream(node_id):
 
 
 def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
-                          entity_label, last_chunk):
+                          entity_label, last_chunk, viewer_id=None):
     """
     Shared SSE generator for TTS chunk streaming.
 
@@ -175,6 +195,9 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
         chunk_fk_attr: TTSChunk foreign key column name ('node_id' or 'profile_id')
         entity_label: Human-readable label for error messages
         last_chunk: Last chunk index the client has already received
+        viewer_id: for a node, the user the stream is for: checked again
+            before each event that carries audio or text (_still_open).
+            None for the owner-only entities.
     """
     last_sent_chunk = last_chunk
     heartbeat_interval = 15  # seconds
@@ -204,6 +227,13 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
                 TTSChunk.chunk_index > last_sent_chunk,
                 TTSChunk.status == 'completed'
             ).order_by(TTSChunk.chunk_index).all()
+
+            if ((new_chunks or entity.tts_task_status == 'completed')
+                    and not _still_open(entity, viewer_id)):
+                yield format_sse_message(
+                    {"error": f"{entity_label} not found"}, event="error"
+                )
+                break
 
             for chunk in new_chunks:
                 chunk_data = {
@@ -261,7 +291,7 @@ def _tts_stream_generator(app, entity_cls, entity_id, chunk_fk_attr,
 
 
 def _tts_stream_response(app, entity_cls, entity_id, chunk_fk_attr,
-                          entity_label, last_chunk):
+                          entity_label, last_chunk, viewer_id=None):
     """Wrap the TTS stream generator in an SSE Response (429 when the
     account holds the most open streams, utils/open_streams)."""
     slot = open_streams.admit(current_user.id)
@@ -270,7 +300,7 @@ def _tts_stream_response(app, entity_cls, entity_id, chunk_fk_attr,
     return Response(
         open_streams.CountedStream(_tts_stream_generator(
             app, entity_cls, entity_id, chunk_fk_attr,
-            entity_label, last_chunk
+            entity_label, last_chunk, viewer_id=viewer_id
         ), slot),
         mimetype='text/event-stream',
         headers={
@@ -312,7 +342,8 @@ def tts_stream(node_id):
 
     last_chunk = request.args.get('last_chunk', -1, type=int)
     app = current_app._get_current_object()
-    return _tts_stream_response(app, Node, node_id, 'node_id', 'Node', last_chunk)
+    return _tts_stream_response(app, Node, node_id, 'node_id', 'Node',
+                                last_chunk, viewer_id=current_user.id)
 
 
 def text_stream_events(sent, text):
@@ -372,7 +403,16 @@ def llm_stream(node_id):
                     yield format_sse_message(
                         {"error": "Node not found"}, event="error")
                     break
-                if current.llm_task_status not in ('pending', 'processing'):
+                finished = current.llm_task_status not in (
+                    'pending', 'processing')
+                events, now_sent = ((), sent) if finished else \
+                    text_stream_events(sent, current.get_streaming_content())
+                if ((finished or events)
+                        and not _still_open(current, viewer_id)):
+                    yield format_sse_message(
+                        {"error": "Node not found"}, event="error")
+                    break
+                if finished:
                     yield format_sse_message({
                         "status": current.llm_task_status,
                         "continuation_node_id": current.continuation_node_id,
@@ -381,8 +421,7 @@ def llm_stream(node_id):
                                   else None),
                     }, event="done")
                     break
-                events, sent = text_stream_events(
-                    sent, current.get_streaming_content())
+                sent = now_sent
                 for event, data in events:
                     yield format_sse_message(data, event=event)
                 if time.time() - last_heartbeat > heartbeat_interval:

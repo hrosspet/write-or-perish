@@ -158,6 +158,11 @@ def open_without_subscription(method, path):
         return True   # sign-in, sign-out, the pages themselves
     if (method, path) in _OPEN_EXACT:
         return True
+    # The first cohort (COHORT_V1 only): the invitation page and the claim,
+    # before the claim lets the account in for the cohort's free period.
+    from backend.utils.cohort import open_without_subscription as cohort_open
+    if cohort_open(method, path):
+        return True
     return any(path == p or path.startswith(p + "/") for p in _OPEN_PREFIXES)
 
 
@@ -731,7 +736,19 @@ def subscription_state(user, config=None):
         # past its grace days, or withdrawn after a dispute or a refund.
         "access": bool(user.subscription_grants_access),
         "has_customer": bool(user.stripe_customer_id),
+        **_cohort_fields(user),
     }
+
+
+def _cohort_fields(user):
+    """The first cohort (COHORT_V1 only; no key while it is off): the
+    last free day of the account's cohort, which also makes its state
+    "set_by_hand" until then (User.plan_set_by_hand)."""
+    from backend.utils.cohort import cohort_enabled, free_until_of
+    if not cohort_enabled():
+        return {}
+    until = free_until_of(user)
+    return {"cohort_free_until": until.isoformat() if until else None}
 
 
 def user_payload_fields(user, config=None):

@@ -7,6 +7,7 @@ import { here, signInPath } from "../utils/destination";
 import {
   choiceRowStyle, choiceStyle, headingStyle, linkStyle, pageStyle, textStyle,
 } from "./accountPageStyles";
+import { forgetCohortOnSignOut } from "../utils/cohort";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL || "";
 const DAY_MS = 24 * 3600 * 1000;
@@ -88,7 +89,7 @@ export default function ConfirmAccountDeletionPage() {
               <>
                 {" "}You are signed in as @{user.username}.{" "}
                 <a href={`${backendUrl}/auth/logout?next=${encodeURIComponent(location.pathname + location.search)}`}
-                  style={linkStyle}>Sign out and use the other account</a>
+                  style={linkStyle} onClick={forgetCohortOnSignOut}>Sign out and use the other account</a>
               </>
             )}
           </p>

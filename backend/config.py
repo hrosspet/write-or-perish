@@ -503,6 +503,36 @@ class Config:
     SHARE_V1 = os.environ.get(
         "SHARE_V1", "true").lower() in ("1", "true", "yes")
 
+    # --- Circles: entries shared with people the author chose ---
+    # Ships dark, the GLEAN_FOR_ALL / GLEAN_USER_IDS pattern: everyone
+    # when CIRCLES_V1 is on, else the user ids in CIRCLES_USER_IDS
+    # (comma-separated). Both default off. With the flag off for a user
+    # they see no Circles screens, cannot be added to a circle, and read
+    # nothing shared (a "circles" entry is private, as before the
+    # feature), so switching both off closes every shared entry at once.
+    CIRCLES_V1 = os.environ.get(
+        "CIRCLES_V1", "false").lower() in ("1", "true", "yes")
+    CIRCLES_USER_IDS = {
+        int(x) for x in
+        os.environ.get("CIRCLES_USER_IDS", "").replace(" ", "").split(",")
+        if x
+    }
+
+    # --- The first cohort (experiment, docs/experiments/FIRST-COHORT*.md) ---
+    # Dark, default off. Off: every /api/cohort, /api/invitation and
+    # /api/admin/cohorts route answers 404 and no cohort rule changes
+    # anything else. On: Circles is also on for a cohort's founder and for
+    # every account bound to a live invitation (utils/cohort.py).
+    COHORT_V1 = os.environ.get(
+        "COHORT_V1", "false").lower() in ("1", "true", "yes")
+    # For trying the cohort locally only: an invitation without an X handle,
+    # which any signed-in account holding the link may accept (local
+    # accounts sign in by email). Off, the founder's route requires a
+    # handle: such a link would give free access to whoever opens it first.
+    COHORT_ALLOW_OPEN_INVITATIONS = os.environ.get(
+        "COHORT_ALLOW_OPEN_INVITATIONS", "false").lower() in (
+        "1", "true", "yes")
+
     # --- Replies while they are written (#367) ---
     # STREAMING_REPLIES: an LLM reply's text shows on its node as it
     # arrives (Node.streaming_content + the llm-stream SSE). On by
