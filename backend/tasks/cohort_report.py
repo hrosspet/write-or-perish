@@ -15,8 +15,9 @@ The model is the person's own, chosen the way their replies are
 (llm_nodes.pick_model_for_generation): never another provider. The call
 is billed to their account (request_type "cohort_report" /
 "cohort_intro"), which their spend cap counts. A refusal, an empty
-answer or an error marks the draft failed, and the page offers to ask
-again; nothing is half saved.
+answer, a text cut off at the output cap or an error marks the draft
+failed, and the page offers to ask again; nothing is half saved. The cap
+leaves room for a model's reasoning (utils/cohort.draft_output_cap).
 """
 import logging
 from datetime import datetime
@@ -50,8 +51,11 @@ def _log_cost(user_id, model_id, response, kind, inv_id):
 
 
 def _usable_text(response):
-    from backend.llm_providers import is_empty_truncated, is_refused
-    if is_refused(response) or is_empty_truncated(response):
+    """The draft's text, or None: refused, empty, or cut off at the
+    output cap anywhere (a draft that stops mid-sentence is never saved
+    as done)."""
+    from backend.llm_providers import is_refused
+    if is_refused(response) or response.get("truncated"):
         return None
     text = (response.get("content") or "").strip()
     return text or None
@@ -150,14 +154,16 @@ def run_report_draft(invitation_id, stamp=None):
             db.session.commit()
             return None
         text, sources = ch.interview_transcript(inv, user)
-        if not text:
+        # Only the interviewer spoke: nothing of the person's to report
+        # (no call is made for six "Nothing said." lines).
+        if not text or not ch.has_own_words(sources):
             inv.report_task_status = ch.NOTHING
             db.session.commit()
             return None
         cohort = db.session.get(Cohort, inv.cohort_id)
         model_id = pick_model_for_generation(sources[-1], user)
         response = _call(model_id, ch.report_prompt(cohort), text,
-                         ch.REPORT_MAX_TOKENS, user.id)
+                         ch.draft_output_cap(model_id), user.id)
         _log_cost(user.id, model_id, response, "cohort_report", inv.id)
         db.session.commit()
         if not _still_ours(inv, "report_task_status", stamp):
@@ -165,7 +171,8 @@ def run_report_draft(invitation_id, stamp=None):
         draft = _usable_text(response)
         if draft is None:
             logger.warning("Cohort report for invitation %s not saved: "
-                           "refused or empty (model %s)", inv.id, model_id)
+                           "refused, empty or cut off (model %s)", inv.id,
+                           model_id)
             inv.report_task_status = ch.FAILED
             db.session.commit()
             return None
@@ -207,7 +214,7 @@ def run_intro_draft(invitation_id, stamp=None):
             return None
         model_id = pick_model_for_generation(None, user)
         response = _call(model_id, ch.intro_prompt(), text,
-                         ch.INTRO_MAX_TOKENS, user.id)
+                         ch.draft_output_cap(model_id), user.id)
         _log_cost(user.id, model_id, response, "cohort_intro", inv.id)
         db.session.commit()
         if not _still_ours(inv, "intro_task_status", stamp):
@@ -215,8 +222,8 @@ def run_intro_draft(invitation_id, stamp=None):
         draft = _usable_text(response)
         if draft is None:
             logger.warning("Cohort introduction for invitation %s not "
-                           "saved: refused or empty (model %s)", inv.id,
-                           model_id)
+                           "saved: refused, empty or cut off (model %s)",
+                           inv.id, model_id)
             inv.intro_task_status = ch.FAILED
             db.session.commit()
             return None

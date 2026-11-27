@@ -123,20 +123,34 @@ def _open_paths(tip):
     return {"text": f"/node/{tip.id}", "voice": f"/voice?parent={tip.id}"}
 
 
+# An AI reply that will not come: the page offers to ask for it again.
+_REPLY_FAILED = ("failed", "cancelled")
+
+
+def _failed_reply(tip):
+    return (tip is not None and tip.node_type == "llm"
+            and tip.llm_task_status in _REPLY_FAILED)
+
+
 def _interview_json(inv, user_id):
     root = ch.interview_root(inv, user_id)
     if root is None:
         return {"node_id": None, "started_at": iso_utc(inv.interview_started_at),
                 "tip_node_id": None, "tip_is_ai": None, "tip_status": None,
-                "open": None}
+                "tip_error": None, "tip_is_opening": None, "open": None}
     tip_id, _path = ch.thread_path(root.id, user_id)
     tip = db.session.get(Node, tip_id) if tip_id else None
+    failed = _failed_reply(tip)
     return {
         "node_id": root.id,
         "started_at": iso_utc(inv.interview_started_at),
         "tip_node_id": tip.id if tip else None,
         "tip_is_ai": (tip.node_type == "llm") if tip else None,
         "tip_status": tip.llm_task_status if tip else None,
+        # Why the last reply (the opening, or a later one) did not come:
+        # the text written for its owner (llm_completion.reply_error_text).
+        "tip_error": (tip.llm_task_error or None) if failed else None,
+        "tip_is_opening": (tip.parent_id == root.id) if tip else None,
         "open": _open_paths(tip),
     }
 
@@ -329,7 +343,10 @@ def start_interview():
     """Start the interview, or answer the one already started. The thread
     is the person's own private agentic thread under a prompt node with
     the key cohort_interview (utils/cohort.compose_interview_prompt), and
-    the AI writes the first message, on the person's own model."""
+    the AI writes the first message, on the person's own model. A thread
+    that ends in an AI reply that failed (its opening, or a later reply)
+    gets that reply asked for again, under the same parent: the "Try
+    again" of /cohort."""
     from backend.utils.context_artifacts import attach_context_artifacts
     from backend.utils.llm_nodes import (
         AIUsageRefused, ReadOnlyModelRefused, TooManyReplies,
@@ -357,13 +374,23 @@ def start_interview():
                         "code": "voice_unavailable"}), 403
 
     root = ch.interview_root(inv, user.id)
+    # The reply to ask for again: when the thread ends in an AI reply that
+    # failed (the opening, or a later one), a new one is written under the
+    # same parent, as the thread page's Try again does.
+    retry_parent = None
     if root is not None:
+        tip_id, _ = ch.thread_path(root.id, user.id)
+        tip = db.session.get(Node, tip_id) if tip_id else None
+        if _failed_reply(tip):
+            retry_parent = (db.session.get(Node, tip.parent_id)
+                            if tip.parent_id else None)
+            if retry_parent is None or retry_parent.deleted_at is not None:
+                retry_parent = root
+    if root is not None and retry_parent is None:
         alive = Node.query.filter(Node.parent_id == root.id,
                                   Node.deleted_at.is_(None)).all()
         if any(not (n.node_type == "llm" and n.llm_task_status == "failed")
                for n in alive):
-            tip_id, _ = ch.thread_path(root.id, user.id)
-            tip = db.session.get(Node, tip_id) if tip_id else None
             return jsonify({
                 "created": False,
                 "interview_node_id": root.id,
@@ -392,7 +419,7 @@ def start_interview():
     body = {"created": created, "interview_node_id": root.id, "mode": mode}
     try:
         llm_node, task_id = create_llm_placeholder(
-            root.id, model_id, user.id, ai_usage=ai_usage,
+            (retry_parent or root).id, model_id, user.id, ai_usage=ai_usage,
             source_mode="voice" if mode == "voice" else "textmode")
     except SubscriptionRequired:
         db.session.rollback()

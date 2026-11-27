@@ -128,10 +128,18 @@ def _circle_notes(rows):
         if (node is None or actor is None
                 or not can_user_access_node(node, current_user.id)):
             continue
+        # Shared with a first-cohort group the reader belongs to: the
+        # note says so, and offers no "Don't show" (the group is an
+        # audience its members joined; hiding stays on Shared with you).
+        from backend.utils.cohort import group_of_share
+        group = group_of_share(node.id, actor.id, current_user.id)
         out.append({
             "id": n.id,
             "type": n.type,
-            "title": f"@{actor.username} shared an entry with you.",
+            "title": (f"@{actor.username} shared an entry with {group}."
+                      if group else
+                      f"@{actor.username} shared an entry with you."),
+            "group": group,
             "body": n.body,
             "link": n.link,
             "created_at": iso_utc(n.created_at),

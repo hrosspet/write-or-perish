@@ -110,6 +110,7 @@ def _make_app():
     from backend.routes.prompts import prompts_bp
     from backend.routes.search import search_bp
     from backend.routes.textmode import textmode_bp
+    from backend.routes.updates import updates_bp
     app.register_blueprint(circles_bp, url_prefix="/api/circles")
     app.register_blueprint(invitation_bp, url_prefix="/api/invitation")
     app.register_blueprint(cohort_bp, url_prefix="/api/cohort")
@@ -119,6 +120,7 @@ def _make_app():
     app.register_blueprint(prompts_bp, url_prefix="/api/prompts")
     app.register_blueprint(search_bp, url_prefix="/api")
     app.register_blueprint(textmode_bp, url_prefix="/api/textmode")
+    app.register_blueprint(updates_bp, url_prefix="/api/updates")
     return app
 
 
@@ -669,7 +671,9 @@ def test_the_report_reads_only_her_own_interview_and_no_ai_none(app, _stubs):
     assert ELSEWHERE_WORDS not in call["text"]     # another thread
     assert "Interviewer:\nHello Mara" in call["text"]
     assert "addressed to Peter" in call["system"]
-    assert call["max_tokens"] == ch.REPORT_MAX_TOKENS
+    # Room for a model's reasoning and the text (#366).
+    assert call["max_tokens"] == ch.draft_output_cap("gpt-5")
+    assert call["max_tokens"] >= 16000
     mara = _user("mara")
     assert call["user_id"] == mara.id
     assert call["model_id"] == "gpt-5"   # the thread's model, hers
@@ -1437,3 +1441,143 @@ def test_no_introduction_from_a_report_set_to_no_ai(app, _stubs):
     cohort_tasks.run_intro_draft(inv.id)
     assert _inv(codes["mara"]).intro_task_status == ch.FAILED
     assert _stubs == []
+
+
+# ── From the browser walk-through (2026-11-27) ──────────────────────────
+
+def test_a_draft_cut_off_at_the_output_cap_is_failed_not_saved(app, _stubs,
+                                                               monkeypatch):
+    """The introduction once came back as "I teach drawing at a secondary
+    school in" (the reasoning used the cap): never saved as done."""
+    cid, codes = _admitted_group(app)
+    mara = _client(app, "mara")
+    rid = mara.post("/api/cohort/report/draft",
+                    json={"blank": True}).get_json()["report"]["node_id"]
+    _db.session.get(Node, rid).set_content("# My report\n\nI teach drawing.")
+    _db.session.commit()
+    cut = []
+
+    def truncated(model_id, system, text, max_tokens, user_id):
+        cut.append(max_tokens)
+        return {"content": "I teach drawing at a secondary school in",
+                "truncated": True, "input_tokens": 10, "output_tokens": 999}
+    monkeypatch.setattr(cohort_tasks, "_call", truncated)
+    nodes_before = Node.query.count()
+    assert mara.post("/api/cohort/intro/draft").status_code == 202
+    intro = mara.get("/api/cohort/intro").get_json()["intro"]
+    assert intro == {"node_id": None, "task_status": "failed",
+                     "shared_with_group": False}
+    assert Node.query.count() == nodes_before
+    assert cut and cut[0] == ch.draft_output_cap("gpt-5")
+    # Asking again works, and a whole answer is saved.
+    monkeypatch.setattr(cohort_tasks, "_call",
+                        lambda *a, **k: {"content": "I teach drawing.",
+                                         "input_tokens": 1,
+                                         "output_tokens": 1})
+    assert mara.post("/api/cohort/intro/draft").status_code == 202
+    intro = mara.get("/api/cohort/intro").get_json()["intro"]
+    assert intro["task_status"] == "done" and intro["node_id"]
+
+
+def test_a_report_cut_off_at_the_output_cap_is_failed_not_saved(
+        app, _stubs, monkeypatch):
+    _interviewed(app)
+    monkeypatch.setattr(
+        cohort_tasks, "_call",
+        lambda *a, **k: {"content": "# My report for Peter\n\n## Where I",
+                         "truncated": True, "input_tokens": 1,
+                         "output_tokens": 1})
+    report = _report(app)
+    assert report["task_status"] == "failed" and report["node_id"] is None
+
+
+def test_an_interview_with_nothing_of_hers_has_nothing_to_draft(app, _stubs):
+    cid = _cohort(app)
+    code = _invite(app, cid)
+    _claim(app, "mara", code)
+    started = _start(app)
+    opening = _db.session.get(Node, started["opening_node_id"])
+    opening.set_content("Hello Mara. What takes most of your attention?")
+    opening.llm_task_status = "completed"
+    _db.session.commit()
+    report = _report(app)
+    assert report["task_status"] == "nothing_to_draft"
+    assert _stubs == []                      # no call for "Nothing said."
+
+
+def test_a_failed_reply_shows_on_me_and_start_asks_for_it_again(app):
+    cid = _cohort(app)
+    code = _invite(app, cid)
+    _claim(app, "mara", code)
+    started = _start(app)
+    root = started["interview_node_id"]
+    opening = _db.session.get(Node, started["opening_node_id"])
+    opening.llm_task_status = "failed"
+    opening.llm_task_error = "Loore couldn't write this reply. Try again."
+    _db.session.commit()
+    me = _client(app, "mara").get("/api/cohort/me").get_json()["invitation"]
+    interview = me["interview"]
+    assert interview["tip_node_id"] == opening.id
+    assert interview["tip_status"] == "failed"
+    assert interview["tip_is_opening"] is True
+    assert interview["tip_error"] == "Loore couldn't write this reply. Try again."
+    # Try again: a new opening under the root, opened where it is written.
+    again = _start(app)
+    new_id = again["opening_node_id"]
+    assert new_id and new_id != opening.id
+    new = _db.session.get(Node, new_id)
+    assert new.parent_id == root and new.node_type == "llm"
+    assert again["open"]["text"] == f"/node/{new_id}?awaitLlm={new_id}"
+    interview = _client(app, "mara").get(
+        "/api/cohort/me").get_json()["invitation"]["interview"]
+    assert interview["tip_node_id"] == new_id
+    assert interview["tip_error"] is None
+    # A later reply that failed is asked for again under her message.
+    new.llm_task_status = "completed"
+    _db.session.commit()
+    a1 = _answer(app, "mara", new.id, "My answer.")
+    reply = Node(user_id=new.user_id, human_owner_id=_user("mara").id,
+                 parent_id=a1, node_type="llm", llm_model="gpt-5",
+                 llm_task_status="failed", privacy_level="private",
+                 ai_usage="chat")
+    reply.set_content("[LLM response generation pending...]")
+    _db.session.add(reply)
+    _db.session.commit()
+    interview = _client(app, "mara").get(
+        "/api/cohort/me").get_json()["invitation"]["interview"]
+    assert interview["tip_is_opening"] is False
+    assert interview["tip_status"] == "failed"
+    again = _start(app)
+    assert _db.session.get(Node, again["opening_node_id"]).parent_id == a1
+
+
+def test_the_interview_prompt_mentions_a_profile_only_when_there_is_one(app):
+    from backend.models import UserProfile
+    cid = _cohort(app)
+    code = _invite(app, cid)
+    _claim(app, "mara", code)
+    started = _start(app)
+    text = _db.session.get(Node, started["interview_node_id"]).get_content()
+    assert ch.PROFILE_NOTE_NO in text and ch.PROFILE_NOTE_YES not in text
+    assert "{profile_note}" not in text
+    _db.session.add(UserProfile(user_id=_user("ben").id, content="Ben, a sailor.",
+                                generated_by="gpt-5", ai_usage="chat"))
+    _db.session.commit()
+    assert ch.has_profile(_user("ben").id)
+    assert not ch.has_profile(_user("mara").id)
+
+
+def test_a_note_about_a_group_share_names_the_group(app):
+    cid, _codes = _admitted_group(app)
+    mara_circle, _ = _members_of("mara", cid)
+    r = _client(app, "mara").post("/api/nodes/", json={
+        "content": "For the group", "privacy_level": "circles",
+        "ai_usage": "chat", "circle_ids": [mara_circle.id]})
+    assert r.status_code == 201, r.get_json()
+    nid = r.get_json()["id"]
+    notes = [n for n in _client(app, "ben").get("/api/updates").get_json()[
+        "notifications"] if n.get("node_id") == nid]
+    assert len(notes) == 1
+    assert notes[0]["group"] == "First Eight"
+    assert notes[0]["title"] == "@mara shared an entry with First Eight."
+    assert ch.group_of_share(nid, _user("mara").id, _user("chidi").id) is None

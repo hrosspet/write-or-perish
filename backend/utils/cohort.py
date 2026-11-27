@@ -52,12 +52,6 @@ PAGE_ENTRIES = 50
 # ordinary circle by its owner still reads new entries only unless the
 # owner chooses otherwise.
 NEW_MEMBERS_READ_EARLIER_ENTRIES = True
-# Output caps of the two drafts, in tokens. They include a reasoning
-# model's thinking, which counts against the same cap (#366): the
-# prompts themselves ask for at most 500 words (report) and 150 words
-# (introduction); about 700 words of report text fit with room to think.
-REPORT_MAX_TOKENS = 2000
-INTRO_MAX_TOKENS = 1000
 # Nodes of the interview thread walked to find where it ends (a thread of
 # about twenty minutes has a few dozen).
 MAX_THREAD_NODES = 2000
@@ -535,7 +529,8 @@ def compose_interview_prompt(user_id, cohort, inv, mode):
     """The interview thread's prompt text: the person's own agentic
     prompt for *mode* (their Voice or Text prompt, edited or Loore's),
     then the interview section with the cohort's name and about, the
-    founder's name and the person's letter filled in. Reads the letter."""
+    founder's name, the person's letter and whether a profile was
+    prepared for them filled in. Reads the letter."""
     from backend.utils.prompts import get_user_prompt, load_default_prompt
     base = get_user_prompt(
         user_id, "voice" if mode == "voice" else "textmode") or ""
@@ -544,6 +539,8 @@ def compose_interview_prompt(user_id, cohort, inv, mode):
         "{founder_name}": _plain(founder_name(cohort)),
         # The name the web app's link back to /cohort carries (the NavBar).
         "{cohort_name}": _plain(cohort.name or ""),
+        "{profile_note}": (PROFILE_NOTE_YES if has_profile(user_id)
+                           else PROFILE_NOTE_NO),
         "{cohort_about}": _plain(cohort.about or ""),
         "{invitation_letter}": _plain(inv.get_letter()),
     }
@@ -653,6 +650,48 @@ def interview_transcript(inv, user):
     return "\n\n".join(parts), used
 
 
+def draft_output_cap(model_id):
+    """Output cap of a report or introduction draft call on *model_id*:
+    room for a model's reasoning and the text, as the other background
+    jobs give (llm_providers.DEFAULT_MAX_OUTPUT_TOKENS within the model's
+    own cap; tasks/intentions.token_limits). A model that always thinks
+    spends output tokens on reasoning first, and a low cap ended a draft
+    mid-sentence (#366; the e2e test of 2026-11-27). The word limits stay
+    in the prompts; the cap costs nothing unless it is used."""
+    from flask import current_app
+    from backend.llm_providers import DEFAULT_MAX_OUTPUT_TOKENS
+    cfg = (current_app.config.get("SUPPORTED_MODELS") or {}).get(model_id) or {}
+    return min(cfg.get("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+               DEFAULT_MAX_OUTPUT_TOKENS)
+
+
+def has_own_words(nodes):
+    """*nodes* (a transcript's) hold at least one message of the
+    person's, not only the interviewer's."""
+    return any(not _is_ai(n) for n in nodes)
+
+
+# The interview prompt's {profile_note}: whether a profile is in the
+# person's prompt, so the interviewer mentions one only when it exists.
+PROFILE_NOTE_YES = ("A profile was prepared from their public tweets and is "
+                    "included above; it may be wrong, and they can correct "
+                    "it at any time.")
+PROFILE_NOTE_NO = "No profile was prepared for this person."
+
+
+def has_profile(user_id):
+    """The person has a profile with text that a model may read (the
+    one their prompt's {user_profile} brings in). Reads no content."""
+    from backend.models import UserProfile
+    from backend.utils.privacy import AI_ALLOWED
+    latest = (UserProfile.query.filter_by(user_id=user_id)
+              .order_by(UserProfile.created_at.desc(), UserProfile.id.desc())
+              .with_entities(UserProfile.ai_usage,
+                             func.length(UserProfile.content))
+              .first())
+    return bool(latest and latest[0] in AI_ALLOWED and (latest[1] or 0) > 0)
+
+
 def report_template(cohort):
     """The report's headings, for a person who writes it themselves:
     the form the report prompt asks the model for."""
@@ -755,6 +794,23 @@ def close_for_deleted_account(user_id, now=None):
         if cohort is not None:
             sync_cohort_circles(cohort, now=now)
     return closed
+
+
+def group_of_share(node_id, actor_id, reader_id):
+    """The name of the cohort through whose circle *actor_id* shared
+    *node_id* with *reader_id* (a member of that circle), or None. Reads
+    no text; None while COHORT_V1 is off."""
+    if not cohort_enabled():
+        return None
+    row = (db.session.query(Cohort.name)
+           .join(Circle, Circle.cohort_id == Cohort.id)
+           .join(NodeCircle, NodeCircle.circle_id == Circle.id)
+           .join(CircleMember, CircleMember.circle_id == Circle.id)
+           .filter(NodeCircle.node_id == node_id,
+                   Circle.user_id == actor_id,
+                   CircleMember.user_id == reader_id)
+           .first())
+    return row[0] if row else None
 
 
 def cohort_of_circle(circle):
