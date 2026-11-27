@@ -212,7 +212,7 @@ Errors:
 - 409 `cohort_no_report`: "There is no report yet."
 - 400 `cohort_report_empty`: "The report is empty. To send nothing, choose Send nothing."
 - 409 `cohort_no_founder`: "This group has no founder to send it to."
-- Any answer of the Circles share step, passed through as it is (for example 409 `"code": "quotes_not_shared"` when the report quotes an entry the founder cannot read, 400 `circle_unknown_name`).
+- Any answer of the Circles share step, passed through as it is (it runs the audience route's own gate first, answering 404 `{"error": "Node not found"}` when it refuses; for example 409 `"code": "quotes_not_shared"` when the report quotes an entry the founder cannot read, 400 `circle_unknown_name`).
 
 The sentence under the button ("Only Peter will be able to read this. You can take it back later.") is the frontend's.
 
@@ -258,7 +258,7 @@ Errors:
 - 403 `cohort_not_yours`: "That entry is not yours." (also a prompt node)
 - 403 `cohort_members_only`.
 - 409 `cohort_intro_not_shared`: "Share it with the group first."
-- Any answer of the Circles share step, passed through.
+- Any answer of the Circles share step, passed through: for example 404 `{"error": "Node not found"}` for an entry the audience route would not share (an AI reply from a thread now closed to the member), 400 `circle_reply_audience` for a node written in someone else's thread.
 
 ### GET /api/cohort/page
 
