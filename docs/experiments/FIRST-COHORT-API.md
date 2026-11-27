@@ -19,7 +19,7 @@ One state per invitation, from its timestamps (`utils/cohort.invitation_state`),
 
 The page at the link has its own, coarser state: `open` | `claimed` | `declined` | `closed`.
 
-Draft task statuses (`report.task_status`, `intro.task_status`): `null` (never asked) | `"pending"` | `"processing"` | `"done"` | `"failed"` (refused, empty, an error, or AI switched off meanwhile: offer to ask again) | `"nothing_to_draft"` (the interview has nothing the model may read, or the report is empty). Poll the GET route while it is `pending` or `processing`.
+Draft task statuses (`report.task_status`, `intro.task_status`): `null` (never asked) | `"pending"` | `"processing"` | `"done"` | `"failed"` (refused, empty, an error, or AI switched off meanwhile: offer to ask again) | `"nothing_to_draft"` (the interview has nothing the model may read, or the report is empty). Poll the GET route while it is `pending` or `processing`. A draft still `pending` or `processing` ten minutes after it was asked for (its worker died) is answered as `"failed"`, and asking again, `regenerate` and `blank` work again.
 
 ---
 
@@ -41,7 +41,7 @@ Anyone holding the link. Records `first_opened_at` once (a time, nothing else ab
 ```
 
 - `founder`: the name the founder signs with (`founder_name`), else his username.
-- `letter` is present only while `state` is `"open"`. For `claimed`, `declined`, `closed` it is absent: show one plain sentence. The bound person reads the letter through `GET /api/cohort/me`.
+- `letter` is present only while `state` is `"open"`. For `claimed`, `declined`, `closed` it is absent: show one plain sentence. The bound person reads the letter through `GET /api/cohort/me`. An invitation accepted once never shows `"open"` again (when the account that accepted it is deleted, it is closed).
 
 Errors: `404 {"error": "Not found"}` for an unknown code (no other detail).
 
@@ -131,7 +131,7 @@ Body: `{"code": "<code from the link>"}`. Binds the invitation to the signed-in 
 Errors:
 - 404 `{"error": "Not found"}`: unknown code.
 - 409 `cohort_not_open`: "This invitation is no longer open." (declined or closed)
-- 409 `cohort_taken`: "This invitation was accepted from another account."
+- 409 `cohort_taken`: "This invitation was accepted from another account." (also when that account no longer exists)
 - 409 `cohort_owner`: "You started this group. The invitation is for someone else."
 - 409 `cohort_other`: "You have already accepted another invitation."
 - 403 `cohort_sign_in_with_x`: "This invitation is for @mara. Sign in with X as @mara to accept it." (the account has no X sign-in)
@@ -177,7 +177,7 @@ Errors:
 Body (all optional): `{"regenerate": true}` for a new draft over an unsent one (the old node stays among the person's entries; it is not deleted), `{"blank": true}` for no model call: a node with the report's headings for the person to write themselves.
 
 - With a report already there and no `regenerate`: 200 with the current report, nothing new (also with `blank`).
-- While a draft is being written: 202 with the current status, nothing new queued.
+- While a draft is being written: 202 with the current status, nothing new queued (also for two presses at the same moment: one draft is queued).
 - Model draft queued: 202. Poll `GET /api/cohort/report`.
 - Blank: 201, `task_status` `"done"`.
 
@@ -372,14 +372,15 @@ Body: any of the POST fields except `slug`; only the fields present change. A ch
 Body: `{"x_handle": "mara", "letter": "markdown", "x_lookup": false}`.
 
 - `letter`: required, at most 20,000 characters.
-- `x_handle`: optional (with or without `@`). With it, the handle is approved through the admin whitelist's own function: an account with the handle's X id is made (or the existing one is used) and approved, so the person's X sign-in lands in it. Without it, any signed-in account holding the link may accept (for trying it locally).
+- `x_handle`: required (with or without `@`), unless the server's `COHORT_ALLOW_OPEN_INVITATIONS` is on (for trying it locally; default off). The handle is approved through the admin whitelist's own function: an account with the handle's X id is made (or the existing one is used) and approved, so the person's X sign-in lands in it. Without a handle (setting on only), any signed-in account holding the link may accept.
 - `x_lookup`: `true` only after the founder agreed to the paid X lookup (the same dialog as the whitelist; the price comes in the 404 below).
 
 201: `{"invitation": AdminInvitation, "link": "/invitation/<code>"}`. Loore sends nothing: the founder sends the link himself.
 
 Errors:
 - 400 `{"error": "letter is required."}` / length.
-- 409 `{"error": "There is already an invitation for @mara in this group."}`.
+- 400 `{"error": "An invitation needs the person's X handle.", "code": "cohort_handle_required"}` (no handle, setting off).
+- 409 `{"error": "There is already an invitation for @mara in this group."}` (whatever its state: reopen a declined one instead).
 - The whitelist's answers, with `"code": "cohort_handle"` added: 400 (bad or reserved handle, or a username taken by an account that is not this X account), 404 `{"error", "reason": "not-in-archive", "x_lookup_cost_usd": <price in USD>, "code"}` (offer the paid lookup), 404 `not-on-x`, 409 `ambiguous`, 502 `archive-error` / `x-error`, 409 (a concurrent request).
 - 409 `cohort_account_blocked`: "@mara's account is blocked. Unblock it in Users first."
 - 409 `cohort_account_deleted`: "@mara's account is being deleted."
@@ -398,7 +399,7 @@ Errors: 409 `cohort_not_open`; 409 `cohort_not_claimed` ("Nobody has accepted th
 
 ### POST /api/admin/cohorts/&lt;id&gt;/invitations/&lt;iid&gt;/admit
 
-No body. Sets `admitted_at` (once) and syncs the group's circles: every member and the founder get a circle named after the cohort holding all the other members; the person added reads only what is shared with the group from then on. 200: `{"invitation": AdminInvitation}`.
+No body. Sets `admitted_at` (once) and syncs the group's circles: every member and the founder get a circle named after the cohort holding all the other members; the person added also reads what the group shared before (with one note per member's circle that holds entries, for its newest). 200: `{"invitation": AdminInvitation}`.
 
 Errors: as `call_done`.
 
@@ -406,12 +407,18 @@ Errors: as `call_done`.
 
 No body. Sets `closed_at` (once; a declined invitation stays declined). An admitted member leaves every circle of the group and their own group circle is deleted. Loore tells nobody. 200: `{"invitation": AdminInvitation}`.
 
+### POST /api/admin/cohorts/&lt;id&gt;/invitations/&lt;iid&gt;/reopen
+
+No body. Undoes a "Not for me" given before anyone accepted the invitation: clears `declined_at`, and the link shows the letter again. Loore tells nobody. 200: `{"invitation": AdminInvitation}`.
+
+Errors: 409 `{"error": "Only an invitation declined before anyone accepted it can be reopened.", "code": "cohort_not_reopenable"}` (not declined, accepted once, or closed).
+
 ---
 
 ## 4. Changes to existing routes (COHORT_V1 only)
 
 - `GET /api/dashboard/` → `user.cohort` (the key is there for every account while the flag is on, so `"cohort" in user` tells the web app the flag is on): `null`, or `{"name", "slug", "role": "invited" | "member" | "founder", "state": <invitation state or null for a founder>, "report_step_done": bool}`. Present for an account with a live invitation, or a founder. Use it for the NavBar link (named after the cohort) and for the once-per-session redirect from Home to `/cohort` while `role` is `"invited"` or `"member"` and `report_step_done` is `false`.
-- `user.subscription.cohort_free_until` (payments on): the free period's last day, or `null`. During it `user.subscription.state` is `"set_by_hand"`, so `notLetIn` already lets the account in; no separate frontend rule is needed.
+- `user.subscription.cohort_free_until` (payments on): the free period's last day, or `null` (also for an account with a subscription of its own, which keeps applying unchanged). During it `user.subscription.state` is `"set_by_hand"`, so `notLetIn` already lets the account in; no separate frontend rule is needed.
 - `user.circles_enabled` is `true` for a founder and for every account bound to a live invitation.
 - `GET /api/circles`: a circle Loore keeps for a group has `"cohort": {"name", "slug"}`. Renaming or deleting it, adding or removing its people (and the add preview) answer `409 {"error": "Loore keeps this circle for First Eight: its name and its people follow the group.", "code": "cohort_circle"}`. Hide those controls.
 - `POST /api/circles/leave` and `/leave/preview`, for an entry read through a group circle: `409 {"error": "You read this as a member of First Eight. To stop seeing someone's entries, hide them. To leave the group, tell Peter.", "code": "cohort_circle"}`.

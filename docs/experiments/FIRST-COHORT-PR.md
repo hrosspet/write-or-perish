@@ -23,20 +23,25 @@ What is built (web): `/invitation/<code>` (`pages/InvitationPage.js`), `/cohort`
 - **The cohort prompts are read, never edited.** Listed on the Prompts page for a founder and invited people only, `"editable": false`, and every change route answers 403 "This prompt can't be changed." The drafts always run on the files.
 - **Approval goes through the whitelist's own function.** `routes/admin.whitelist_x_handle` (the whitelist route's body, moved out unchanged) makes the account with the handle's X id; an account that already holds that id is used as it is (a new `existing_ok` argument; the route's own behaviour and order are unchanged). With payments off the whitelist leaves new accounts unapproved for the pre-fill workflow, so the invitation approves the account by hand, as Activate does. A blocked or deleting account is refused with a sentence.
 - **Claim matches the X id when it is known.** A handle can change hands; the id it resolved to when the invitation was made is compared with the signed-in account's X id. Without a known id, the X handle seen at the account's last X sign-in is compared, case ignored (the spec's rule).
-- **A claim binds once.** Two claims of one code at the same moment: a conditional update binds it to one account, the other is told it was accepted from another account.
+- **A claim binds once, and an invitation is accepted once.** Two claims of one code at the same moment: a conditional update binds it to one account, the other is told it was accepted from another account. An invitation with `claimed_at` set counts as accepted whatever its account, so its letter is never served at the link again and nobody else can take the first person's place (review M1).
 - **Decline after the claim needs the bound account** ("Nothing leaves without your say"): only the person declines for themselves once they accepted. Declining as a member takes them out of the group's circles.
+- **An invitee who already pays keeps their own subscription** (review W5): the free period applies only to an account with no subscription that gives access (trialing or active) and no alpha free month. Such an account's level ceiling, paid period and Stripe billing stay as they were; `subscription.cohort_free_until` is `null` for it.
+- **A draft whose worker died can be asked for again** ("Problems show"; review M2). The time a draft was asked for is kept beside its status; a status still pending or processing after `DRAFT_STALE_AFTER` reads as `failed` everywhere (the pages then say it did not work and offer to ask again, or to write it by hand). The task is queued with that time and acts only while the invitation's draft is still that one: a task that comes late calls nothing, and one whose draft was given up on while the model wrote it saves no node (the call is billed and logged).
+- **A double click makes one paid call** (review W2): the status moves to pending in one conditional update, and only the request that moved it queues the task.
+- **"Not for me" stays one click; the founder can undo it** (review W3, frontend Needs Peter 5). `POST .../invitations/<iid>/reopen` (Admin → Cohorts → Reopen) clears `declined_at` on an invitation declined before anyone accepted it; the link shows the letter again. One accepted once, or closed, is not reopened.
+- **An invitation needs an X handle** (review W6): without one, whoever opens the link first would accept it and get the free period. Handle-less invitations are made only where `COHORT_ALLOW_OPEN_INVITATIONS` is on (default off), for trying it locally.
 - **The free period** (spec): an account bound to a live (not declined, not closed) invitation whose cohort's `free_until` is today or later counts as a plan set by hand: web, iPhone and the 402 gate follow `User.plan_set_by_hand`. A cohort without `free_until` lets nobody in for free. The same case is in the SQL versions of "paid features" (`User.paid_features_clause`, `User.profile_eligible_query`), so the background jobs (profile updates, recent context, embeddings) treat such an account as one with access ("full access, AI included").
 - **Circles for cohort people** (spec): on for every founder and every account bound to a live invitation, in `privacy.circles_enabled_for`, only while `COHORT_V1` is on. One query per database session, forgotten after every flush, commit and rollback, as the Circles sets are.
 - **The circles Loore keeps can't be changed by hand, and a member can't "leave" one.** Rename, delete, add, remove and the add preview answer 409 with a sentence. Leaving an entry read through a group circle answers 409 with the way out: hide the person (the per-reader mute still works), or tell the founder. Peter's "leave" (2026-11-23) is for an audience a person was put in without being asked; joining the group was the consent (walkthrough: "accepting the invitation is the consent"), and a leave would be undone by the next sync.
 - **Closing a person who was not admitted does not take back a report they sent.** Sending was their act; they take it back themselves (taking back works with Circles off). Their Circles access ends with the invitation, so they share nothing new.
-- **A deleted account leaves the invitation behind without it** ("deleting a user's content deletes what they made, lists about other people included; what other people made about them stays"): the invitation is the founder's record, so `delete_identity` clears its account and node ids. A founder's deleted account leaves the cohort without an owner.
+- **A deleted account leaves the invitation behind without it, closed** ("deleting a user's content deletes what they made, lists about other people included; what other people made about them stays"): the invitation is the founder's record, so `delete_identity` closes it (so it is never accepted again, review M1), takes a member out of the group's circles, and clears its account and node ids. A founder's deleted account leaves the cohort without an owner.
 - **The page at the link** records only `first_opened_at`, and answers with `X-Robots-Tag: noindex, nofollow` and `Cache-Control: private, no-store` (it carries a letter about a person).
 - **Loore sends nothing to anyone.** No email, no X message; the founder sends the link himself.
 
 Frontend:
 
 - **"Start the interview" goes straight to Sign in with X** (`/auth/login?next=/cohort`), not to the sign-in page with its email choice: the claim checks the X account. Signed in already, it goes to `/cohort` at once. The code is kept in this browser under its own key, the way the referral code is kept (`utils/invite.codeStore`, now shared by both); unlike the referral code, a sign-in does not drop it, only a claim or a refusal that cannot change. Where the browser keeps nothing (some private windows), it rides in the address (`/cohort?code=`).
-- **"Not for me" declines at once, with no dialog** (walkthrough: "asks nothing more"; see Needs Peter 5).
+- **"Not for me" declines at once, with no dialog** (walkthrough: "asks nothing more"); the founder's Reopen undoes a mistaken one (above).
 - **A claim refused for the wrong X account keeps the code** and offers Sign out, so signing in with the right account finishes it; the other refusals drop it.
 - **What is sent is what the editor shows** ("Nothing leaves without your say", "The user's edit wins"). Send saves the editor's text first, on the text it loaded (`base_content`), so a newer text saved elsewhere is never overwritten; Send nothing also saves the person's edits first, so they stay in their own entry.
 - **Taking the report back is on the page** ("You can take it back later" is promised under the button): the call step says whether the founder can read it, with "Take it back" (a dialog, then the normal edit to Only me), or "Send to Peter" again where it is not shared.
@@ -69,6 +74,7 @@ Frontend:
 | 64 / 512 characters | founder name / booking and call links | `routes/cohort.MAX_FOUNDER_NAME_CHARS`, `MAX_URL_CHARS` |
 | 48 characters, `-2`, `-3`… | a slug made from the name, made unique | `utils/cohort.slugify` |
 | " (group)" | added to a member's group circle name when they have a circle of their own by that name | `utils/cohort._circle_name` |
+| 10 minutes | a report or introduction draft still pending or processing this long after it was asked for reads as failed (the model call takes up to about a minute; the rest covers a queue behind other replies) | `utils/cohort.DRAFT_STALE_AFTER` |
 | 3 s | how often a page asks whether a report or introduction draft is ready | `components/cohort/CohortSteps.DRAFT_POLL_MS` |
 | 30 days | how long the invitation code waits in the browser for a sign-in (the referral code's number) | `utils/cohort.COHORT_CODE_MAX_AGE_DAYS` |
 | `/`, `/dashboard` | the page loads that send an invitee with an open report step to `/cohort` (once per tab session) | `utils/cohort.SIGN_IN_LANDINGS` |
@@ -81,7 +87,7 @@ Frontend:
 2. *(Moved to "Decided by the coordinator, for Peter to object to": members admitted later read what the group shared before.)*
 3. **Close ends the free period at once.** Scenario: after the call you decide not to admit Ben and press Close. With payments on, Ben is then not let in and has no AI, although the walkthrough says "a person you do not admit keeps their account for the free period". As built (the spec's rule: free while the invitation is not declined or closed), leave a person you do not admit as they are; Close is for someone who must leave. Recommendation: keep it so, and use Close only for that. If you say nothing: as built.
 4. **What happens on the day after `free_until`.** Nothing is built for it (the walkthrough leaves the price to you). With payments on, an account that never had a subscription is then not let in (it sees only the subscribe page); with payments off nothing changes. Recommendation: decide the price and the message before the six weeks end. If you say nothing: as above.
-5. **"Not for me" is one click, and it cannot be undone.** Scenario: Mara presses it by mistake; her invitation is declined, and you cannot invite @mara to the same cohort again (one invitation per handle per cohort). As built (the walkthrough: "asks nothing more"), there is no confirmation. Recommendation: keep it so; if a mistaken decline happens, it is a database fix. If you say nothing: as built.
+5. *(Answered by the coordinator: "Not for me" stays one click, and the founder can reopen it from Admin → Cohorts. See Decided.)*
 
 ## Deviations from the spec
 
@@ -92,13 +98,19 @@ Frontend:
 - **Report cap 2,000 tokens** instead of about 1,000 (700 words): reasoning tokens count against the cap.
 - **Node ids on the invitation have no foreign key.** "Delete all my content" deletes those nodes; an id that no longer resolves reads as none (`Node.audience_root_id` is done the same way).
 - **Added columns:** `CohortInvitation.x_id` (the X id the handle resolved to, compared at claim) and `Cohort.founder_name` (the name letters and prompts use; accounts have no display name, so without it the prompts would say "hrosspet").
-- **An invitation may be made without `x_handle`:** then any signed-in account holding the link can accept it. Needed to walk the steps locally, where accounts sign in by email.
+- **An invitation may be made without `x_handle` where `COHORT_ALLOW_OPEN_INVITATIONS` is on** (default off): then any signed-in account holding the link can accept it. Needed to walk the steps locally, where accounts sign in by email.
+- **More routes and columns from the review:** `POST /api/admin/cohorts/<id>/invitations/<iid>/reopen`; `CohortInvitation.report_task_started_at` / `intro_task_started_at`.
 - **The interview prompt file holds the interview section only.** The thread's prompt is composed when the interview starts (the person's own agentic prompt + the section, filled), as a prompt version of theirs with `generated_by` "cohort". The spec's "prompt key `cohort_interview`" is the root's key.
 - **Extra routes:** `GET /api/admin/cohorts/<id>`, `GET /api/cohort/intro`; `{"blank": true}` on the report draft; `GET /api/cohort/me` always answers both `invitation` and `owner_of`.
 - **New fields on existing payloads** (COHORT_V1 only): `user.cohort`, `user.subscription.cohort_free_until`, `cohort` on a group circle in `GET /api/circles`; `editable` on every prompt (always, an added field).
 - **No rate limit by IP** on the page at the link: there is no IP limiter in the codebase (the spec's fallback).
 - **The design roadmaps** (`FOUR-FEATURE-ECOSYSTEM.md`, `TECHNICAL-ROADMAP.md`, `ACCELERATED-DEVELOPMENT-ROADMAP.md`) are not updated: this is an experiment branch, not for main without your review.
 - **`NEW_MEMBERS_READ_EARLIER_ENTRIES` is `True`** (the spec said only entries shared from then on): decided by the coordinator, above.
+
+## Worth an issue later
+
+- **Two admits at the same moment can give one person two kept circles** (review W1). There is no lock in admit, and no unique constraint on `Circle(user_id, cohort_id)`. Two first admits (or a double click on the very first one) under PostgreSQL READ COMMITTED can each create a circle for the founder; later syncs keep one circle per person, and the other keeps its members, including someone closed later, and cannot be deleted by hand (409). Fix: lock the cohort row (`with_for_update`) in admit, close, decline and rename, and add a partial unique index on `(user_id, cohort_id)`. Not done here: it needs a migration on prod, and the founder admits one person at a time.
+- **Two `/interview/start` calls at once before a root exists make two roots**; the invitation keeps the second, and the first stays a private thread of the person's own. Harmless.
 
 Frontend:
 
@@ -126,13 +138,16 @@ Frontend (no browser was opened; jest renders the pages with the API mocked, and
 
 Local LLM calls bill a real key: use the safe test account, local user 5 `seowriter`, as the invited person, and keep the interview short.
 
-1. In the uncommitted root `.env`: `COHORT_V1=true`. Nothing else is needed: Circles turns on for the founder and the invited person by itself. (`PAYMENTS_ENABLED=true` too, if you want to see the free period at work.) Restart the stack (`make dev`).
+1. In the uncommitted root `.env`: `COHORT_V1=true` and `COHORT_ALLOW_OPEN_INVITATIONS=true` (local accounts sign in by email, so the invitations below have no X handle; never set it on prod). Circles turns on for the founder and the invited person by itself. (`PAYMENTS_ENABLED=true` too, if you want to see the free period at work.) Restart the stack (`make dev`).
 2. Schema, in a backend container Python shell (`docker compose exec backend flask shell`): new tables come with `db.create_all()`; the new column on the existing `circle` table does not:
 
    ```python
    from sqlalchemy import text
    db.create_all()
    db.session.execute(text("ALTER TABLE circle ADD COLUMN IF NOT EXISTS cohort_id INTEGER REFERENCES cohort(id)"))
+   # Only if the cohort tables were created before the review's fixes:
+   db.session.execute(text("ALTER TABLE cohort_invitation ADD COLUMN IF NOT EXISTS report_task_started_at TIMESTAMP"))
+   db.session.execute(text("ALTER TABLE cohort_invitation ADD COLUMN IF NOT EXISTS intro_task_started_at TIMESTAMP"))
    db.session.commit()
    ```
 
@@ -179,4 +194,4 @@ Steps 1 and 2 as above, then (`http://localhost:3001`):
 5. **Invitee**: reload `/cohort`: the group page. **Draft my introduction from my report** (or **Write it myself**), edit, **Share with the group**. The members list shows the introduction.
 6. **A second invitee admitted later** (another invitation and account, its report written by hand so no model is called): after its admit, it reads the first invitee's introduction on the group page (the coordinator's decision above).
 7. **Sharing an entry with the group**: write an entry, choose Circles under "Who can read this", then the cohort's circle: the panel says that people who join later will also read it. It appears under "Shared in the group".
-8. **The other doors**: on a third link press **Not for me** (one sentence, nothing asked); open it again (one sentence instead of the letter). In Admin, **Close** an invitation (a dialog first). On `/circles` the group's circle has no Rename, Remove or Add.
+8. **The other doors**: on a third link press **Not for me** (one sentence, nothing asked); open it again (one sentence instead of the letter); in Admin → Cohorts press **Reopen** on that row, and the link shows the letter again. In Admin, **Close** an invitation (a dialog first). On `/circles` the group's circle has no Rename, Remove or Add.
