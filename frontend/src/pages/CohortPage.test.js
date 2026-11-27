@@ -504,10 +504,12 @@ test('the report step offers continuing the interview', async () => {
 test('nothing to draft: continue the interview, ask again, write it, or send nothing', async () => {
   setMe(invitation({
     state: 'interview_started', interview: { node_id: 123, open: { text: '/node/130', voice: '/voice?parent=130' } },
-    report: { node_id: null, task_status: 'nothing_to_draft' },
+    report: { node_id: null, task_status: 'nothing_to_draft', nothing_reason: 'empty' },
   }));
   await renderPage();
-  expect(screen.getByText(REPORT_TEXT.nothing)).toBeInTheDocument();
+  // She said nothing: No AI is not mentioned.
+  expect(screen.getByText(REPORT_TEXT.nothingSaid)).toBeInTheDocument();
+  expect(screen.queryByText(/No AI/)).toBeNull();
   expect(screen.getByRole('button', { name: 'Continue the interview in text' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Ask again' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Write it myself' })).toBeInTheDocument();
@@ -615,7 +617,7 @@ test('a failed opening is shown as failed, with its reason and Try again', async
     state: 'interview_started',
     interview: {
       node_id: 1, tip_node_id: 2, tip_is_ai: true, tip_status: 'failed', tip_is_opening: true,
-      tip_error: 'Loore couldn\'t write this reply. Try again in a moment.',
+      tip_error: 'Your monthly spending limit is reached.',
       open: { text: '/node/2', voice: '/voice?parent=2' },
     },
   }));
@@ -624,8 +626,9 @@ test('a failed opening is shown as failed, with its reason and Try again', async
     open: { text: '/node/3?awaitLlm=3', voice: '/voice?resume=3' },
   };
   await renderPage();
-  expect(screen.getByRole('alert')).toHaveTextContent(
-    "Loore could not write its first message. Loore couldn't write this reply. Try again in a moment.");
+  // One sentence, then the reason the server gives in words of its own.
+  expect(screen.getByRole('alert').textContent).toBe(
+    'Loore could not write its first message. Your monthly spending limit is reached.');
   expect(screen.queryByText(/Continue where you left off/)).toBeNull();
   expect(screen.queryByRole('button', { name: 'Continue in text' })).toBeNull();
   await act(async () => {
@@ -634,6 +637,16 @@ test('a failed opening is shown as failed, with its reason and Try again', async
   // Asked for again through the start route, never by opening the failed node.
   expect(mockPost).toHaveBeenCalledWith('/cohort/interview/start', { mode: 'text' });
   expect(screen.getByTestId('where')).toHaveTextContent('/node/3?awaitLlm=3');
+});
+
+test('without a reason of its own, the failure is one sentence', async () => {
+  setMe(invitation({
+    state: 'interview_started',
+    interview: { node_id: 1, tip_node_id: 2, tip_is_ai: true, tip_status: 'failed', tip_is_opening: true, tip_error: null, open: null },
+  }));
+  await renderPage();
+  expect(screen.getByRole('alert').textContent).toBe('Loore could not write its first message.');
+  expect(screen.getByRole('button', { name: 'Try again in text' })).toBeInTheDocument();
 });
 
 test('a later reply that failed says so too', async () => {
@@ -698,4 +711,13 @@ test('with the experiment switched off, /cohort says the page is not available',
   routes.get['/cohort/me'] = { response: { status: 404, data: { error: 'Not found' } } };
   await renderPage();
   expect(screen.getByRole('alert')).toHaveTextContent(COHORT_TEXT.unavailable);
+});
+
+test('nothing to draft because her answers are set to No AI: that is said', async () => {
+  setMe(invitation({
+    state: 'interview_started', interview: { node_id: 123, open: { text: '/node/130', voice: '/voice?parent=130' } },
+    report: { node_id: null, task_status: 'nothing_to_draft', nothing_reason: 'no_ai' },
+  }));
+  await renderPage();
+  expect(screen.getByText(REPORT_TEXT.nothing)).toBeInTheDocument();
 });

@@ -6,6 +6,7 @@ import { CircleConfirmDialog, accentButton, plainButton, quietButton } from './C
 import MarkdownEditor from './cohort/MarkdownEditor';
 import useSubmitShortcut from '../hooks/useSubmitShortcut';
 import { formatDateTime } from '../utils/date';
+import { useIsMobile } from '../hooks/useIsMobile';
 import { errorSentence, fromLocalInput, toLocalInput } from '../utils/cohort';
 
 // Admin → Cohorts (the first cohort, docs/experiments/FIRST-COHORT.md,
@@ -312,8 +313,7 @@ function NewInvitation({ cohort, onAdded }) {
           onChange={(e) => setHandle(e.target.value)} style={{ ...inputStyle, maxWidth: '320px' }} />
         <p style={hintStyle}>
           Approves the handle as the whitelist does; only that X account can accept
-          the invitation. Leave it empty only on a local test server, where any
-          signed-in account holding the link can accept it.
+          the invitation.
         </p>
       </div>
       <MarkdownEditor id="invitation-letter" label="Letter"
@@ -386,7 +386,12 @@ function LetterEditor({ cohortId, invitation, onDone, onCancel }) {
   );
 }
 
+// Below this width each invitation is a card, its actions under it
+// (a table there scrolled sideways and hid the actions).
+export const CARD_LAYOUT_MAX_WIDTH = 720;
+
 function InvitationTable({ cohort, invitations, onChanged }) {
+  const asCards = useIsMobile(CARD_LAYOUT_MAX_WIDTH);
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState('');
   const [closeAsk, setCloseAsk] = useState(null);
@@ -416,9 +421,72 @@ function InvitationTable({ cohort, invitations, onChanged }) {
     verticalAlign: 'top', fontSize: '0.85rem', textAlign: 'left',
   };
 
-  return (
-    <div style={{ overflowX: 'auto' }}>
-      {error && <p role="alert" style={{ ...errorStyle, marginBottom: '10px' }}>{error}</p>}
+  const actionsOf = (inv) => {
+    const can = invitationActions(inv);
+    const busy = busyId === inv.id;
+    return (
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+        {can.editLetter && (
+          <button type="button" style={smallButton} disabled={busy}
+            onClick={() => setEditing(editing === inv.id ? null : inv.id)}>
+            Edit letter
+          </button>
+        )}
+        {can.callDone && (
+          <button type="button" style={smallButton} disabled={busy}
+            onClick={() => act(inv, 'call_done')}>
+            Call done
+          </button>
+        )}
+        {can.admit && (
+          <button type="button" style={smallButton} disabled={busy}
+            onClick={() => setAdmitAsk(inv)}>
+            Admit
+          </button>
+        )}
+        {can.close && (
+          <button type="button" style={smallButton} disabled={busy}
+            onClick={() => setCloseAsk(inv)}>
+            Close
+          </button>
+        )}
+        {can.reopen && (
+          <button type="button" style={smallButton} disabled={busy}
+            onClick={() => act(inv, 'reopen')}>
+            Reopen
+          </button>
+        )}
+      </div>
+    );
+  };
+  const timesOf = (inv) => TIMES.filter(([key]) => inv[key]).map(([key, label]) => (
+    <div key={key}>{label} {formatDateTime(inv[key])}</div>
+  ));
+  const letterEditorOf = (inv) => (
+    <LetterEditor cohortId={cohort.id} invitation={inv}
+      onCancel={() => setEditing(null)}
+      onDone={async () => { setEditing(null); await onChanged(); }} />
+  );
+
+  const listing = asCards ? (
+    <ul aria-label="Invitations" style={{ listStyle: 'none', margin: 0, padding: 0 }}>
+      {invitations.map((inv) => (
+        <li key={inv.id} style={{
+          borderTop: '1px solid var(--border)', padding: '12px 0',
+          display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.88rem',
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+            <span style={{ color: 'var(--text-primary)', overflowWrap: 'anywhere' }}>{personOf(inv)}</span>
+            <CopyButton text={`${window.location.origin}${inv.link}`} title="Copy link" />
+          </div>
+          <div style={{ color: 'var(--text-primary)' }}>{STATE_LABELS[inv.state] || inv.state}</div>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem' }}>{timesOf(inv)}</div>
+          {actionsOf(inv)}
+          {editing === inv.id && letterEditorOf(inv)}
+        </li>
+      ))}
+    </ul>
+  ) : (
       <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: '760px' }}>
         <thead>
           <tr>
@@ -429,8 +497,6 @@ function InvitationTable({ cohort, invitations, onChanged }) {
         </thead>
         <tbody>
           {invitations.map((inv) => {
-            const can = invitationActions(inv);
-            const busy = busyId === inv.id;
             const link = `${window.location.origin}${inv.link}`;
             return (
               <React.Fragment key={inv.id}>
@@ -438,54 +504,19 @@ function InvitationTable({ cohort, invitations, onChanged }) {
                   <td style={cell}>{personOf(inv)}</td>
                   <td style={{ ...cell, color: 'var(--text-primary)' }}>{STATE_LABELS[inv.state] || inv.state}</td>
                   <td style={{ ...cell, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    {TIMES.filter(([key]) => inv[key]).map(([key, label]) => (
-                      <div key={key}>{label} {formatDateTime(inv[key])}</div>
-                    ))}
+                    {timesOf(inv)}
                   </td>
                   <td style={cell}>
                     <CopyButton text={link} title="Copy link" />
                   </td>
                   <td style={{ ...cell, whiteSpace: 'nowrap' }}>
-                    <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                      {can.editLetter && (
-                        <button type="button" style={smallButton} disabled={busy}
-                          onClick={() => setEditing(editing === inv.id ? null : inv.id)}>
-                          Edit letter
-                        </button>
-                      )}
-                      {can.callDone && (
-                        <button type="button" style={smallButton} disabled={busy}
-                          onClick={() => act(inv, 'call_done')}>
-                          Call done
-                        </button>
-                      )}
-                      {can.admit && (
-                        <button type="button" style={smallButton} disabled={busy}
-                          onClick={() => setAdmitAsk(inv)}>
-                          Admit
-                        </button>
-                      )}
-                      {can.close && (
-                        <button type="button" style={smallButton} disabled={busy}
-                          onClick={() => setCloseAsk(inv)}>
-                          Close
-                        </button>
-                      )}
-                      {can.reopen && (
-                        <button type="button" style={smallButton} disabled={busy}
-                          onClick={() => act(inv, 'reopen')}>
-                          Reopen
-                        </button>
-                      )}
-                    </div>
+                    {actionsOf(inv)}
                   </td>
                 </tr>
                 {editing === inv.id && (
                   <tr>
                     <td colSpan={5} style={{ ...cell, borderTop: 'none' }}>
-                      <LetterEditor cohortId={cohort.id} invitation={inv}
-                        onCancel={() => setEditing(null)}
-                        onDone={async () => { setEditing(null); await onChanged(); }} />
+                      {letterEditorOf(inv)}
                     </td>
                   </tr>
                 )}
@@ -494,6 +525,12 @@ function InvitationTable({ cohort, invitations, onChanged }) {
           })}
         </tbody>
       </table>
+  );
+
+  return (
+    <div style={{ overflowX: asCards ? 'visible' : 'auto' }}>
+      {error && <p role="alert" style={{ ...errorStyle, marginBottom: '10px' }}>{error}</p>}
+      {listing}
       <CircleConfirmDialog
         open={!!admitAsk}
         title={`Admit ${admitAsk ? personOf(admitAsk) : ''} to ${cohort.name}?`}

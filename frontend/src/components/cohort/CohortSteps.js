@@ -249,7 +249,10 @@ export const REPORT_TEXT = {
   drafting: 'Loore is writing your report from the interview. It appears here when it is ready, usually within a minute or two.',
   failed: 'Loore could not write the report.',
   failedAgain: 'Loore could not write a new draft. This is your earlier one.',
+  // report.nothing_reason "no_ai": the person's messages are all set to
+  // No AI; "empty" (or none): they said nothing in the interview yet.
   nothing: 'Loore found nothing in the interview it may use (parts set to No AI are left out). You can write the report yourself, or send nothing.',
+  nothingSaid: 'There is nothing of yours in the interview yet, so Loore has nothing to draft from. You can continue the interview, write the report yourself, or send nothing.',
   // Only over a draft a model wrote (report.written_by_loore).
   intro: 'Loore wrote this draft from your interview. It is your document: change anything, empty a section, or empty all of it.',
   own: (founder) => `This is your report. Write what you want ${founder} to know; leave any part empty.`,
@@ -352,7 +355,10 @@ export function ReportStep({ inv, user, onChanged, onSent, onBack, openError, on
     const nothing = status === 'nothing_to_draft';
     return (
       <Section title="Your report" labelledBy="cohort-report">
-        <p style={textStyle}>{nothing ? REPORT_TEXT.nothing : REPORT_TEXT.failed}</p>
+        <p style={textStyle}>
+          {!nothing ? REPORT_TEXT.failed
+            : report.nothing_reason === 'no_ai' ? REPORT_TEXT.nothing : REPORT_TEXT.nothingSaid}
+        </p>
         <div style={rowStyle}>
           {inv.interview && inv.interview.node_id && (
             <button type="button" style={accentButton} disabled={busy} onClick={() => draft({})}>

@@ -192,3 +192,42 @@ test('a row without a handle is told apart by the start of its letter', async ()
   await act(async () => { render(<AdminCohorts />); });
   expect(screen.getByText('No handle: "Dear Mara,…"')).toBeInTheDocument();
 });
+
+test('the X handle hint does not say it may be left empty', async () => {
+  mockGet.mockImplementation((url) => {
+    if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+    if (url === '/admin/cohorts/1/invitations') return Promise.resolve({ data: { invitations: [] } });
+    return Promise.reject(new Error(url));
+  });
+  await act(async () => { render(<AdminCohorts />); });
+  expect(screen.queryByText(/Leave it empty/)).toBeNull();
+  expect(screen.queryByText(/COHORT_ALLOW_OPEN_INVITATIONS/)).toBeNull();
+});
+
+test('on a narrow screen each invitation is a card with its actions in view', async () => {
+  const realMatchMedia = window.matchMedia;
+  window.matchMedia = (query) => ({
+    matches: /max-width/.test(query), media: query,
+    addEventListener: () => {}, removeEventListener: () => {},
+    addListener: () => {}, removeListener: () => {},
+  });
+  try {
+    const claimed = row({ username: 'ben', x_handle: 'ben', claimed_at: '2026-11-27T10:00:00Z', state: 'report_sent' });
+    mockGet.mockImplementation((url) => {
+      if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+      if (url === '/admin/cohorts/1/invitations') return Promise.resolve({ data: { invitations: [claimed] } });
+      return Promise.reject(new Error(url));
+    });
+    await act(async () => { render(<AdminCohorts />); });
+    expect(screen.queryByRole('table')).toBeNull();
+    const card = within(screen.getByRole('list', { name: 'Invitations' })).getByRole('listitem');
+    expect(within(card).getByText('@ben')).toBeInTheDocument();
+    expect(within(card).getByText('Report sent')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Call done' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Admit' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Close' })).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: 'Copy link' })).toBeInTheDocument();
+  } finally {
+    window.matchMedia = realMatchMedia;
+  }
+});

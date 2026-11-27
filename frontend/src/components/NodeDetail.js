@@ -51,6 +51,10 @@ import {
 import NotSharedNotice from "./NotSharedNotice";
 
 
+// The first cohort's interview prompt (backend utils/cohort.INTERVIEW_KEY):
+// a failed opening under it sends the person back to /cohort.
+const COHORT_INTERVIEW_KEY = 'cohort_interview';
+
 // Glean (#435) is the Community Archive read under its user-facing name.
 // The Glean button's tooltip before the thread's first gleaning, and
 // after it (another pass over the day).
@@ -626,7 +630,12 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       // replace the dead history entry, so a back press walks real nodes.
       if (String(llmTaskNodeId) === String(id)) {
         const parent = node?.ancestors?.[node.ancestors.length - 1];
-        if (parent && !parent.deleted) {
+        // The first cohort's interview: its opening failed. Its parent is
+        // the interview prompt, shown whole; /cohort says what happened
+        // and offers Try again, so the person goes back there.
+        if (parent && !parent.deleted && parent.prompt_key === COHORT_INTERVIEW_KEY) {
+          navigate('/cohort', { replace: true });
+        } else if (parent && !parent.deleted) {
           if (location.state?.fromParent) {
             navigate(-1);
           } else {

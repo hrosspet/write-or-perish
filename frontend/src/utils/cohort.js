@@ -70,6 +70,11 @@ function interviewOpenName() {
   }
 }
 
+// /cohort opened the interview in this tab (Text or Voice).
+export function interviewOpenFromCohort() {
+  return interviewOpenName() !== null;
+}
+
 // The pages the interview runs on: the thread page and Voice.
 export function isInterviewPage(pathname) {
   return pathname === '/voice' || /^\/node\/\d+$/.test(pathname);
