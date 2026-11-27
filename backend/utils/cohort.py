@@ -534,14 +534,16 @@ def _plain(text):
 def compose_interview_prompt(user_id, cohort, inv, mode):
     """The interview thread's prompt text: the person's own agentic
     prompt for *mode* (their Voice or Text prompt, edited or Loore's),
-    then the interview section with the cohort's about, the founder's
-    name and the person's letter filled in. Reads the letter."""
+    then the interview section with the cohort's name and about, the
+    founder's name and the person's letter filled in. Reads the letter."""
     from backend.utils.prompts import get_user_prompt, load_default_prompt
     base = get_user_prompt(
         user_id, "voice" if mode == "voice" else "textmode") or ""
     section = load_default_prompt(INTERVIEW_KEY) or ""
     values = {
         "{founder_name}": _plain(founder_name(cohort)),
+        # The name the web app's link back to /cohort carries (the NavBar).
+        "{cohort_name}": _plain(cohort.name or ""),
         "{cohort_about}": _plain(cohort.about or ""),
         "{invitation_letter}": _plain(inv.get_letter()),
     }

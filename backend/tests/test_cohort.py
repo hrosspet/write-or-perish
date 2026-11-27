@@ -584,6 +584,8 @@ def test_a_report_written_by_hand_needs_no_model(app, _stubs):
     # ...but the headings to write it herself, and Send.
     r = c.post("/api/cohort/report/draft", json={"blank": True})
     assert r.status_code == 201
+    # Her own writing: the page must not say Loore wrote it.
+    assert r.get_json()["report"]["written_by_loore"] is False
     node = _db.session.get(Node, r.get_json()["report"]["node_id"])
     assert node.get_content().startswith("# My report for Peter")
     assert "## My questions for Peter" in node.get_content()
@@ -611,6 +613,10 @@ def test_the_interview_starts_private_with_its_prompt_and_an_opening(app):
     # The founder's letter never acts as a placeholder in her prompt.
     assert "Dear Mara, I read your thread on (user_profile)" in text
     assert "{invitation_letter}" not in text and "{cohort_about}" not in text
+    # The way back to the report is named as the web app labels it: the
+    # cohort's name, the link at the top of the page.
+    assert "{cohort_name}" not in text
+    assert 'go back with the "First Eight" link at the top of the page' in text
     opening = _db.session.get(Node, started["opening_node_id"])
     assert opening.parent_id == root.id and opening.node_type == "llm"
     assert opening.human_owner_id == mara.id
@@ -656,6 +662,7 @@ def test_the_report_reads_only_her_own_interview_and_no_ai_none(app, _stubs):
     _code, root, nodes = _interviewed(app)
     report = _report(app)
     assert report["task_status"] == "done"
+    assert report["written_by_loore"] is True
     call = _stubs[-1]
     assert INTERVIEW_WORDS in call["text"]
     assert NONE_WORDS not in call["text"]          # marked None
@@ -681,6 +688,11 @@ def test_the_report_reads_only_her_own_interview_and_no_ai_none(app, _stubs):
     assert r.status_code == 202
     new_id = c.get("/api/cohort/report").get_json()["report"]["node_id"]
     assert new_id != node.id and _db.session.get(Node, node.id) is not None
+    # Headings to write under herself, over the draft: no longer Loore's.
+    r = c.post("/api/cohort/report/draft",
+               json={"regenerate": True, "blank": True})
+    assert r.status_code == 201
+    assert r.get_json()["report"]["written_by_loore"] is False
 
 
 def test_the_report_task_refuses_a_thread_that_is_not_hers(app, _stubs):

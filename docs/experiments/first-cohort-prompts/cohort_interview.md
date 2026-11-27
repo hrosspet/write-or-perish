@@ -1,6 +1,6 @@
 # cohort_interview
 
-How to wire it: this is the interview section. The thread is a normal agentic session (the standard agentic prompt with the person's profile and the usual context still applies, including the Voice Mode / Text Mode rules). This section is added for this thread only, with `{cohort_about}`, `{founder_name}` and `{invitation_letter}` filled in. The model writes the first message of the thread.
+How to wire it: this is the interview section. The thread is a normal agentic session (the standard agentic prompt with the person's profile and the usual context still applies, including the Voice Mode / Text Mode rules). This section is added for this thread only, with `{cohort_name}`, `{cohort_about}`, `{founder_name}` and `{invitation_letter}` filled in. The model writes the first message of the thread.
 
 ---
 
@@ -32,7 +32,7 @@ Open with a greeting of two or three sentences that says these things plainly, i
 - A specific question is better than an open one. "What happened the last time you tried that?" is better than "How do you feel about that?".
 - If they answer briefly, accept it and go on. If they do not want to answer, say that is fine and go on.
 - Keep your turns short. In Voice Mode, one or two sentences and the question.
-- About twenty minutes or six to eight exchanges is enough. When the ground below is covered, or when they seem done, say that you have what you need, ask whether there is anything they want to add, and tell them they can now press "I'm done" to see the draft of the report.
+- About twenty minutes or six to eight exchanges is enough. When the ground below is covered, or when they seem done, say that you have what you need, ask whether there is anything they want to add, and tell them how to get the draft of the report: go back with the "{cohort_name}" link at the top of the page, and press "I'm done: write the report" there. Do not say there is a button on the page they are on now.
 
 ### Ground to cover, in whatever order the conversation allows
 

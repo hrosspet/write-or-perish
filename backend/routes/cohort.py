@@ -150,6 +150,10 @@ def _report_json(inv, user_id):
         "sent_at": iso_utc(inv.report_sent_at),
         "skipped_at": iso_utc(inv.report_skipped_at),
         "shared_with_founder": _shared_with_founder(inv, node),
+        # A model wrote the report now on the invitation (not the headings
+        # of "Write it myself").
+        "written_by_loore": bool(node is not None
+                                 and inv.report_written_by_model),
     }
 
 
@@ -492,6 +496,7 @@ def draft_report():
         db.session.add(node)
         db.session.flush()
         inv.report_node_id = node.id
+        inv.report_written_by_model = False
         inv.report_drafted_at = _now()
         inv.report_task_status = ch.DONE
         db.session.commit()

@@ -171,6 +171,7 @@ def run_report_draft(invitation_id, stamp=None):
             return None
         node = _save_node(user, draft, sources)
         inv.report_node_id = node.id
+        inv.report_written_by_model = True
         inv.report_drafted_at = datetime.utcnow()
         inv.report_task_status = ch.DONE
         db.session.commit()

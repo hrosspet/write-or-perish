@@ -54,8 +54,9 @@ PROMPT_DEFAULTS = {
     # (`cohort`), readable there and never editable (`fixed`): the report
     # and introduction drafts always run on these files. The interview
     # file is the section added after the person's own agentic prompt in
-    # their interview thread, with {cohort_about}, {founder_name} and
-    # {invitation_letter} filled in when the thread starts; the thread's
+    # their interview thread, with {cohort_name}, {cohort_about},
+    # {founder_name} and {invitation_letter} filled in when the thread
+    # starts; the thread's
     # prompt node shows the whole text.
     'cohort_interview': {
         'title': 'Interview',

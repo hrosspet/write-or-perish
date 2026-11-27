@@ -1370,6 +1370,10 @@ class CohortInvitation(db.Model):
     # and a task acts only for the request that queued it.
     report_task_started_at = db.Column(db.DateTime, nullable=True)
     intro_task_started_at = db.Column(db.DateTime, nullable=True)
+    # The report node now on the invitation was written by a model (True),
+    # or is the headings the person writes under themselves (False): the
+    # page says "Loore wrote this draft" only for the first.
+    report_written_by_model = db.Column(db.Boolean, nullable=True)
     __table_args__ = (
         db.UniqueConstraint("cohort_id", "x_handle",
                             name="uq_cohort_invitation_cohort_handle"),
