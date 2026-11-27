@@ -1502,7 +1502,17 @@ def test_an_interview_with_nothing_of_hers_has_nothing_to_draft(app, _stubs):
     _db.session.commit()
     report = _report(app)
     assert report["task_status"] == "nothing_to_draft"
+    assert report["nothing_reason"] == "empty"   # she said nothing
     assert _stubs == []                      # no call for "Nothing said."
+    # Her only answer set to No AI: that is the reason, and it is named.
+    _answer(app, "mara", opening.id, "Not for the model.", ai_usage="none")
+    r = _client(app, "mara").post("/api/cohort/report/draft",
+                                  json={"regenerate": True})
+    assert r.status_code in (200, 202), r.get_json()
+    report = _client(app, "mara").get("/api/cohort/report").get_json()["report"]
+    assert report["task_status"] == "nothing_to_draft"
+    assert report["nothing_reason"] == "no_ai"
+    assert _stubs == []
 
 
 def test_a_failed_reply_shows_on_me_and_start_asks_for_it_again(app):
@@ -1521,6 +1531,14 @@ def test_a_failed_reply_shows_on_me_and_start_asks_for_it_again(app):
     assert interview["tip_status"] == "failed"
     assert interview["tip_is_opening"] is True
     assert interview["tip_error"] == "Loore couldn't write this reply. Try again."
+    # The generic failure text is not a reason: /cohort's sentence says it.
+    from backend.utils.error_privacy import REPLY_FAILED_TEXT
+    opening.llm_task_error = REPLY_FAILED_TEXT
+    _db.session.commit()
+    assert _client(app, "mara").get("/api/cohort/me").get_json()[
+        "invitation"]["interview"]["tip_error"] is None
+    opening.llm_task_error = "Loore couldn't write this reply. Try again."
+    _db.session.commit()
     # Try again: a new opening under the root, opened where it is written.
     again = _start(app)
     new_id = again["opening_node_id"]
@@ -1581,3 +1599,33 @@ def test_a_note_about_a_group_share_names_the_group(app):
     assert notes[0]["group"] == "First Eight"
     assert notes[0]["title"] == "@mara shared an entry with First Eight."
     assert ch.group_of_share(nid, _user("mara").id, _user("chidi").id) is None
+
+
+def test_a_closed_members_group_entries_go_back_to_only_me(app):
+    """After Close, what Ben shared with the group is read by nobody but
+    him, and says so: Only me, not "circles" with no circle behind it.
+    An entry also shared with someone else keeps that audience."""
+    cid, codes = _admitted_group(app)
+    ben_circle, _ = _members_of("ben", cid)
+    ben = _client(app, "ben")
+    only_group = ben.post("/api/nodes/", json={
+        "content": "For the group only", "privacy_level": "circles",
+        "ai_usage": "chat", "circle_ids": [ben_circle.id]}).get_json()["id"]
+    also_chidi = ben.post("/api/nodes/", json={
+        "content": "For the group and Chidi", "privacy_level": "circles",
+        "ai_usage": "chat", "circle_ids": [ben_circle.id],
+        "circle_usernames": "chidi"})
+    assert also_chidi.status_code == 201, also_chidi.get_json()
+    also_chidi = also_chidi.get_json()["id"]
+    assert _can_read(app, "mara", only_group)
+    iid = _inv(codes["ben"]).id
+    r = _client(app, "peter").post(
+        f"/api/admin/cohorts/{cid}/invitations/{iid}/close")
+    assert r.status_code == 200
+    node = _db.session.get(Node, only_group)
+    assert node.privacy_level == "private"
+    assert not _can_read(app, "mara", only_group)
+    assert not _can_read(app, "peter", only_group)
+    kept = _db.session.get(Node, also_chidi)
+    assert kept.privacy_level == "circles"
+    assert not _can_read(app, "mara", also_chidi)

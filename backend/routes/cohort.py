@@ -132,6 +132,19 @@ def _failed_reply(tip):
             and tip.llm_task_status in _REPLY_FAILED)
 
 
+def _reply_failure_reason(tip):
+    """Why *tip* (a failed reply) did not come, when its stored text says
+    something of its own (a spend limit, the provider not answering); None
+    for the generic "couldn't write this reply", which /cohort's own
+    sentence already says."""
+    from backend.utils.error_privacy import (
+        REPLY_FAILED_TEXT, REPLY_NOT_STARTED_TEXT)
+    text = (tip.llm_task_error or "").strip()
+    if not text or text in (REPLY_FAILED_TEXT, REPLY_NOT_STARTED_TEXT):
+        return None
+    return text
+
+
 def _interview_json(inv, user_id):
     root = ch.interview_root(inv, user_id)
     if root is None:
@@ -148,8 +161,9 @@ def _interview_json(inv, user_id):
         "tip_is_ai": (tip.node_type == "llm") if tip else None,
         "tip_status": tip.llm_task_status if tip else None,
         # Why the last reply (the opening, or a later one) did not come:
-        # the text written for its owner (llm_completion.reply_error_text).
-        "tip_error": (tip.llm_task_error or None) if failed else None,
+        # the text written for its owner (llm_completion.reply_error_text),
+        # when it is more than the generic failure.
+        "tip_error": _reply_failure_reason(tip) if failed else None,
         "tip_is_opening": (tip.parent_id == root.id) if tip else None,
         "open": _open_paths(tip),
     }
@@ -168,6 +182,11 @@ def _report_json(inv, user_id):
         # of "Write it myself").
         "written_by_loore": bool(node is not None
                                  and inv.report_written_by_model),
+        # Why there was nothing to draft: "no_ai" (the person's messages
+        # are all set to No AI) or "empty" (they said nothing yet).
+        "nothing_reason": (ch.nothing_reason(inv, user_id)
+                           if inv.report_task_status == ch.NOTHING
+                           else None),
     }
 
 

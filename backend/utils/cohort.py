@@ -665,6 +665,22 @@ def draft_output_cap(model_id):
                DEFAULT_MAX_OUTPUT_TOKENS)
 
 
+def nothing_reason(inv, user_id):
+    """Why the report had nothing to draft: "no_ai" when the person's
+    own messages in the interview are there but all set to No AI, else
+    "empty" (they said nothing yet). Reads no text."""
+    from backend.utils.privacy import AI_ALLOWED
+    root = interview_root(inv, user_id)
+    if root is None:
+        return "empty"
+    _tip, path = thread_path(root.id, user_id)
+    mine = [n for n in Node.query.filter(Node.id.in_(path))
+            if own_node(n, user_id) and not _is_ai(n)] if path else []
+    if mine and all(n.ai_usage not in AI_ALLOWED for n in mine):
+        return "no_ai"
+    return "empty"
+
+
 def has_own_words(nodes):
     """*nodes* (a transcript's) hold at least one message of the
     person's, not only the interviewer's."""
@@ -736,8 +752,8 @@ def sync_cohort_circles(cohort, now=None):
     the cohort and named after it, whose people are exactly all the other
     members and the founder. A person added also reads what was shared
     with it before (NEW_MEMBERS_READ_EARLIER_ENTRIES). The circle
-    of someone who left the group is deleted, and they leave everyone
-    else's. Members are added and removed through the Circles functions
+    of someone who left the group is deleted (their entries that only the
+    group read go back to Only me), and they leave everyone else's. Members are added and removed through the Circles functions
     (circles.add_circle_member / remove_circle_member), so their side
     effects stay what an owner's own add or remove does. The caller
     commits."""
@@ -769,8 +785,34 @@ def sync_cohort_circles(cohort, now=None):
                                  NEW_MEMBERS_READ_EARLIER_ENTRIES, now=now)
     for uid, circle in existing.items():
         if uid not in members:
-            cz.delete_circle(circle)
+            _release_group_entries(circle)
     db.session.flush()
+
+
+def _release_group_entries(circle):
+    """Delete the group circle of someone who left the group, and give
+    back to them, as Only me, each entry of theirs that nobody else reads
+    then: its audience was the group (decided by the coordinator: what a
+    closed member shared with the group is no longer read by it). An entry
+    also shared with someone else keeps that audience. The same steps as
+    the author's own take-back (an edit to Only me)."""
+    from backend.models import NodeReader
+    from backend.utils import circles as cz
+    from backend.utils.privacy import PrivacyLevel
+    node_ids = [nid for (nid,) in db.session.query(NodeCircle.node_id)
+                .filter(NodeCircle.circle_id == circle.id)]
+    cz.delete_circle(circle)
+    db.session.flush()
+    for node in (Node.query.filter(Node.id.in_(node_ids)).all()
+                 if node_ids else []):
+        if not cz.is_shared_entry(node):
+            continue
+        if (NodeCircle.query.filter_by(node_id=node.id).first() is not None
+                or NodeReader.query.filter_by(node_id=node.id).first()
+                is not None):
+            continue
+        node.set_privacy_level(PrivacyLevel.PRIVATE.value)
+        cz.leave_audience(node)
 
 
 def close_for_deleted_account(user_id, now=None):
