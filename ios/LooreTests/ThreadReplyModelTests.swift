@@ -61,7 +61,7 @@ final class ThreadReplyModelTests: StubbedAppTestCase {
     private func pressLLMResponse(_ model: ThreadModel) async -> [String: Any]? {
         let settled = await eventually { !NodePrefetch.shared.isPending }
         XCTAssertTrue(settled)
-        model.llmResponsePressed()
+        model.aiReplyPressed()   // LLM Response (the Circles side names it so)
         let asked = await eventually { self.calls.contains("POST /api/nodes/10/llm") }
         XCTAssertTrue(asked)
         return body(of: "POST /api/nodes/10/llm")
