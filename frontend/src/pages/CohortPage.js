@@ -11,8 +11,9 @@ import {
   StepList, pageStyle, h1Style, textStyle, smallStyle, errorStyle, linkStyle,
 } from '../components/cohort/cohortUi';
 import {
-  STEP, cohortStep, claimRefusalIsFinal, errorSentence, forgetCohortCode,
-  isLiveInvitation, markCohortShown, pendingCohortCode, rememberCohortCode,
+  STEP, cohortStep, claimRefusalIsFinal, dayText, errorSentence,
+  forgetCohortCode, forgetCohortOnSignOut, isLiveInvitation, markCohortShown,
+  pendingCohortCode, rememberCohortCode,
 } from '../utils/cohort';
 import { rememberSubscription } from '../utils/subscription';
 
@@ -37,6 +38,24 @@ export const COHORT_TEXT = {
 // The claim refusals that a sign-in with another X account can answer.
 const SIGN_IN_AGAIN = new Set(['cohort_sign_in_with_x', 'cohort_wrong_account']);
 
+/**
+ * Why an account that accepted its invitation is still not let in
+ * (payments on): one sentence above the subscribe page, from the cohort's
+ * free period. Null when there is nothing to explain.
+ */
+export function notLetInSentence(inv, today = new Date()) {
+  if (!isLiveInvitation(inv) || !inv.cohort) return null;
+  const { name, founder, free_until: freeUntil } = inv.cohort;
+  if (!freeUntil) {
+    return `You accepted the invitation to ${name}, but its free period is not set yet, so for now Loore asks for a subscription. Reply to ${founder}'s message on X to ask about it.`;
+  }
+  const todayDay = today.toISOString().slice(0, 10);
+  if (freeUntil < todayDay) {
+    return `You accepted the invitation to ${name}. Its free period ended on ${dayText(freeUntil)}, so Loore now asks for a subscription.`;
+  }
+  return `You accepted the invitation to ${name}, but this account is not let in yet. Reload the page; if this stays, reply to ${founder}'s message on X.`;
+}
+
 export default function CohortPage({ bare = false }) {
   const { user, setUser } = useUser();
   const location = useLocation();
@@ -55,6 +74,11 @@ export default function CohortPage({ bare = false }) {
   const [loadError, setLoadError] = useState('');
   const [claimError, setClaimError] = useState(null);
   const claimedCode = useRef(null);
+  // The call step opened the report's editor to send it after all.
+  const [reviewing, setReviewing] = useState(false);
+  // Why opening the interview failed: kept here, because the step changes
+  // once the thread exists (StartStep → InterviewStep).
+  const [openError, setOpenError] = useState('');
 
   useEffect(() => { markCohortShown(); }, []);
 
@@ -92,17 +116,19 @@ export default function CohortPage({ bare = false }) {
     api.post('/cohort/claim', { code: pendingCode })
       .then(async (res) => {
         forgetCohortCode();
+        // The user first ("Opening your invitation…" stays meanwhile): an
+        // account let in by the claim leaves the subscribe page behind.
+        await refreshUser();
         setPendingCode(null);
         if (urlCode) navigate('/cohort', { replace: true });
         setMe((current) => ({
           owner_of: [], ...(current || {}), invitation: res.data.invitation,
         }));
-        await refreshUser();
       })
       .catch((err) => {
         const status = err.response && err.response.status;
         const code = err.response && err.response.data && err.response.data.code;
-        if (claimRefusalIsFinal(status, code)) forgetCohortCode();
+        if (claimRefusalIsFinal(status)) forgetCohortCode();
         setPendingCode(null);
         if (urlCode) navigate('/cohort', { replace: true });
         setClaimError({
@@ -123,7 +149,17 @@ export default function CohortPage({ bare = false }) {
   }, [load, refreshUser]);
 
   if (bare && step !== STEP.CLAIM && step !== STEP.LOADING && !claimError && !loadError) {
-    return <SubscribePage />;
+    const why = notLetInSentence(inv);
+    return (
+      <>
+        {why && (
+          <div style={{ ...pageStyle, paddingBottom: 0 }}>
+            <p role="status" style={{ ...textStyle, color: 'var(--text-primary)' }}>{why}</p>
+          </div>
+        )}
+        <SubscribePage />
+      </>
+    );
   }
 
   const claimErrorBlock = claimError && (
@@ -131,7 +167,8 @@ export default function CohortPage({ bare = false }) {
       <p role="alert" style={{ ...textStyle, color: 'var(--text-primary)' }}>{claimError.text}</p>
       {claimError.signInAgain && (
         <p style={smallStyle}>
-          <a href={`${backendUrl}/auth/logout`} style={linkStyle}>Sign out</a>, then open the
+          <a href={`${backendUrl}/auth/logout`} style={linkStyle}
+            onClick={forgetCohortOnSignOut}>Sign out</a>, then open the
           invitation link again and sign in with the X account it names.
         </p>
       )}
@@ -160,19 +197,24 @@ export default function CohortPage({ bare = false }) {
       </>
     );
   } else {
+    const shown = reviewing && step === STEP.CALL ? STEP.REPORT : step;
     const Step = {
       [STEP.START]: StartStep,
       [STEP.INTERVIEW]: InterviewStep,
       [STEP.REPORT]: ReportStep,
       [STEP.CALL]: CallStep,
-    }[step];
+    }[shown];
     body = (
       <>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
           <h1 style={h1Style}>{inv.cohort.name}</h1>
-          <StepList step={step} />
+          <StepList step={shown} />
         </div>
-        <Step inv={inv} user={user} onChanged={onChanged} />
+        <Step inv={inv} user={user} onChanged={onChanged}
+          openError={openError} onOpenFailed={setOpenError}
+          onReview={() => setReviewing(true)}
+          onSent={() => setReviewing(false)}
+          onBack={reviewing ? () => setReviewing(false) : null} />
       </>
     );
   }

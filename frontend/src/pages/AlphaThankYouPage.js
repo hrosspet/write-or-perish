@@ -6,6 +6,8 @@ import api from "../api";
 import PrefillConsentCard from "../components/PrefillConsentCard";
 import { emailState } from "../utils/emailState";
 import DeleteAccountDialog from "../components/DeleteAccountDialog";
+import { forgetCohortOnSignOut } from "../utils/cohort";
+import CohortWaitingNote from "../components/cohort/CohortWaitingNote";
 
 export default function AlphaThankYouPage() {
   const { user, setUser, loading: userLoading } = useUser();
@@ -121,6 +123,9 @@ export default function AlphaThankYouPage() {
           they deserve as they begin.
         </p>
       </Fade>
+
+      {/* The first cohort: an invitation this account can't accept. */}
+      <CohortWaitingNote />
 
       {/* Email form for users without email */}
       {showForm && (
@@ -398,7 +403,8 @@ function AccountNotActive({ user }) {
             Manage or cancel your subscription
           </button>
         )}
-        <a href={`${process.env.REACT_APP_BACKEND_URL || ""}/auth/logout`} style={action}>
+        <a href={`${process.env.REACT_APP_BACKEND_URL || ""}/auth/logout`} style={action}
+          onClick={forgetCohortOnSignOut}>
           Sign out
         </a>
       </div>

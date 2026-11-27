@@ -50,6 +50,7 @@ import SharedWithYouPage from "./pages/SharedWithYouPage";
 import InvitationPage from "./pages/InvitationPage";
 import CohortPage from "./pages/CohortPage";
 import CohortArrival from "./components/cohort/CohortArrival";
+import InterviewBackLink from "./components/cohort/InterviewBackLink";
 import BothProvidersDialog from "./components/BothProvidersDialog";
 import PromptsPage from "./pages/PromptsPage";
 import PromptDetailPage from "./pages/PromptDetailPage";
@@ -306,6 +307,7 @@ function App() {
         <ProfileGenerationWatcher />
         <PendingDestination />
         <CohortArrival />
+        <InterviewBackLink />
         <Routes>
           <Route path="/" element={<RootRoute />} />
           <Route path="/landing" element={<LandingPage />} />

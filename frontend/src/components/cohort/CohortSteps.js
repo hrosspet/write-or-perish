@@ -9,7 +9,9 @@ import {
   textStyle, smallStyle, errorStyle, readersStyle, rowStyle, accentLinkStyle,
   linkStyle,
 } from './cohortUi';
-import { DRAFTING, errorSentence, onDayText } from '../../utils/cohort';
+import {
+  DRAFTING, errorSentence, markInterviewOpen, onDayText,
+} from '../../utils/cohort';
 
 // The invited person's steps before the group (docs/experiments/
 // FIRST-COHORT.md, "Mara's side"): start the interview, continue it or
@@ -69,16 +71,31 @@ function NoAiChoices({ founder, onChanged }) {
   );
 }
 
-// Start (or continue) the interview in the existing Voice or Text page.
-function useOpenInterview(onChanged) {
+export const INTERVIEW_TEXT = {
+  openFailed: 'Loore could not start the interview. Try again in a moment.',
+  // After the reason: the buttons above are the way to try again.
+  tryAgain: 'You can try again with the buttons above.',
+  comeBack: (name) => `When you are done, come back to this page with the "${name}" link at the top of the page, and press "I'm done: write the report".`,
+};
+
+// Start (or continue) the interview in the existing Voice or Text page,
+// which then shows a link back here (InterviewBackLink). Why an opening
+// failed is handed to the page (`onFailed`), because the step changes
+// once the thread exists, and it must stay on screen.
+function useOpenInterview(onChanged, cohortName, onFailed) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(null);
   const [error, setError] = useState('');
   const [noAi, setNoAi] = useState(false);
+  const go = (path) => {
+    markInterviewOpen(cohortName);
+    navigate(path);
+  };
   const open = async (mode, knownPath) => {
     setError('');
+    if (onFailed) onFailed('');
     if (knownPath) {
-      navigate(knownPath);
+      go(knownPath);
       return;
     }
     setBusy(mode);
@@ -86,11 +103,12 @@ function useOpenInterview(onChanged) {
       const res = await api.post('/cohort/interview/start', { mode });
       const paths = res.data && res.data.open;
       if (paths && paths[mode]) {
-        navigate(paths[mode]);
+        go(paths[mode]);
         return;
       }
-      setError((res.data && res.data.llm_error)
-        || 'Loore could not start the interview. Try again in a moment.');
+      const reason = (res.data && res.data.llm_error) || INTERVIEW_TEXT.openFailed;
+      setError(reason);
+      if (onFailed) onFailed(reason);
       await onChanged();
     } catch (err) {
       const data = err.response && err.response.data;
@@ -100,6 +118,11 @@ function useOpenInterview(onChanged) {
     setBusy(null);
   };
   return { open, busy, error, noAi };
+}
+
+function OpenError({ text }) {
+  if (!text) return null;
+  return <p role="alert" style={errorStyle}>{text} {INTERVIEW_TEXT.tryAgain}</p>;
 }
 
 function ModeButtons({ verb, voice, busy, onOpen, primary }) {
@@ -119,9 +142,9 @@ function ModeButtons({ verb, voice, busy, onOpen, primary }) {
   );
 }
 
-export function StartStep({ inv, user, onChanged }) {
+export function StartStep({ inv, user, onChanged, openError, onOpenFailed }) {
   const founder = inv.cohort.founder;
-  const { open, busy, error, noAi } = useOpenInterview(onChanged);
+  const { open, busy, error, noAi } = useOpenInterview(onChanged, inv.cohort.name, onOpenFailed);
   return (
     <>
       <Section title="The interview" labelledBy="cohort-start">
@@ -134,9 +157,11 @@ export function StartStep({ inv, user, onChanged }) {
           When you are done, Loore drafts a report for {founder}. You can change
           it or empty it, and nothing is sent until you choose to send it.
         </p>
+        <p style={textStyle}>{INTERVIEW_TEXT.comeBack(inv.cohort.name)}</p>
         <ModeButtons verb="Start" voice={!!user?.voice_mode_enabled} busy={busy}
           primary onOpen={(mode) => open(mode)} />
-        {error && <p role="alert" style={errorStyle}>{error}</p>}
+        {noAi ? <p role="alert" style={errorStyle}>{error}</p>
+          : <OpenError text={error || openError} />}
         {noAi && <NoAiChoices founder={founder} onChanged={onChanged} />}
       </Section>
       <FoldedLetter founder={founder} letter={inv.letter} />
@@ -144,10 +169,10 @@ export function StartStep({ inv, user, onChanged }) {
   );
 }
 
-export function InterviewStep({ inv, user, onChanged }) {
+export function InterviewStep({ inv, user, onChanged, openError, onOpenFailed }) {
   const founder = inv.cohort.founder;
   const interview = inv.interview || {};
-  const { open, busy, error, noAi } = useOpenInterview(onChanged);
+  const { open, busy, error, noAi } = useOpenInterview(onChanged, inv.cohort.name, onOpenFailed);
   const [drafting, setDrafting] = useState(false);
   const [draftError, setDraftError] = useState('');
   const paths = interview.open;
@@ -175,7 +200,8 @@ export function InterviewStep({ inv, user, onChanged }) {
         </p>
         <ModeButtons verb="Continue" voice={!!user?.voice_mode_enabled} busy={busy}
           onOpen={(mode) => open(mode, paths && paths[mode])} />
-        {error && <p role="alert" style={errorStyle}>{error}</p>}
+        {noAi ? <p role="alert" style={errorStyle}>{error}</p>
+          : <OpenError text={error || openError} />}
         {noAi && <NoAiChoices founder={founder} onChanged={onChanged} />}
       </Section>
       <Section labelledBy="cohort-done">
@@ -200,12 +226,37 @@ export const REPORT_TEXT = {
   drafting: 'Loore is writing your report from the interview. It appears here when it is ready, usually within a minute or two.',
   failed: 'Loore could not write the report.',
   failedAgain: 'Loore could not write a new draft. This is your earlier one.',
-  nothing: 'The interview holds nothing Loore may read for a report.',
+  nothing: 'Loore found nothing in the interview it may use (parts set to No AI are left out). You can write the report yourself, or send nothing.',
+  // Only over a draft a model wrote (report.written_by_loore).
   intro: 'Loore wrote this draft from your interview. It is your document: change anything, empty a section, or empty all of it.',
+  own: (founder) => `This is your report. Write what you want ${founder} to know; leave any part empty.`,
+  more: 'More to say? Continue the interview, then ask Loore for a new draft.',
   readers: (founder) => `Only ${founder} will be able to read this. You can take it back later.`,
 };
 
-export function ReportStep({ inv, onChanged }) {
+// The interview can go on from the report step: more said, then a new
+// draft asked for.
+function MoreToSay({ inv, user, onChanged, openError, onOpenFailed }) {
+  const { open, busy, error } = useOpenInterview(onChanged, inv.cohort.name, onOpenFailed);
+  const paths = inv.interview && inv.interview.open;
+  if (!inv.interview || !inv.interview.node_id) return null;
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', borderTop: '1px solid var(--border)', paddingTop: '16px' }}>
+      <p style={smallStyle}>{REPORT_TEXT.more}</p>
+      <ModeButtons verb="Continue the interview" voice={!!user?.voice_mode_enabled} busy={busy}
+        onOpen={(mode) => open(mode, paths && paths[mode])} />
+      <OpenError text={error || openError} />
+    </div>
+  );
+}
+
+/**
+ * The report: being written, failed, or in the editor with Send and Send
+ * nothing. Sending happens only here, with the text on screen. `onSent`
+ * runs after Send or Send nothing; `onBack` (when the call step opened
+ * this editor to send a report after all) goes back without doing either.
+ */
+export function ReportStep({ inv, user, onChanged, onSent, onBack, openError, onOpenFailed }) {
   const founder = inv.cohort.founder;
   const report = inv.report || {};
   const status = report.task_status;
@@ -234,10 +285,14 @@ export function ReportStep({ inv, onChanged }) {
   const skip = () => run(async () => {
     if (nodeText.dirty) await nodeText.save();
     await api.post('/cohort/report/skip');
+    if (onSent) onSent();
   });
+  // A save the server refuses (a newer text elsewhere) stops the send:
+  // nothing leaves that this editor did not show.
   const send = () => run(async () => {
     await nodeText.save();
     await api.post('/cohort/report/send');
+    if (onSent) onSent();
   });
   const save = () => run(() => nodeText.save());
   const regenerate = () => {
@@ -256,13 +311,24 @@ export function ReportStep({ inv, onChanged }) {
     );
   }
 
+  const more = (
+    <MoreToSay inv={inv} user={user} onChanged={onChanged}
+      openError={openError} onOpenFailed={onOpenFailed} />
+  );
+  const back = onBack && (
+    <button type="button" style={{ ...quietButton, alignSelf: 'flex-start' }}
+      disabled={busy} onClick={onBack}>
+      Back
+    </button>
+  );
+
   if (!report.node_id) {
     const nothing = status === 'nothing_to_draft';
     return (
       <Section title="Your report" labelledBy="cohort-report">
         <p style={textStyle}>{nothing ? REPORT_TEXT.nothing : REPORT_TEXT.failed}</p>
         <div style={rowStyle}>
-          {!nothing && (
+          {inv.interview && inv.interview.node_id && (
             <button type="button" style={accentButton} disabled={busy} onClick={() => draft({})}>
               Ask again
             </button>
@@ -276,13 +342,17 @@ export function ReportStep({ inv, onChanged }) {
           </button>
         </div>
         {error && <p role="alert" style={errorStyle}>{error}</p>}
+        {back}
+        {more}
       </Section>
     );
   }
 
   return (
     <Section title="Your report" labelledBy="cohort-report">
-      <p style={textStyle}>{REPORT_TEXT.intro}</p>
+      <p style={textStyle}>
+        {report.written_by_loore ? REPORT_TEXT.intro : REPORT_TEXT.own(founder)}
+      </p>
       {status === 'failed' && <p style={smallStyle}>{REPORT_TEXT.failedAgain}</p>}
       {nodeText.loadError && <p role="alert" style={errorStyle}>{nodeText.loadError}</p>}
       {nodeText.loaded && (
@@ -328,13 +398,15 @@ export function ReportStep({ inv, onChanged }) {
         onClose={() => setAskNew(false)}
         onConfirm={regenerate}
       />
+      {back}
+      {more}
     </Section>
   );
 }
 
 // ── The call ────────────────────────────────────────────────────────────
 
-export function CallStep({ inv, onChanged }) {
+export function CallStep({ inv, onChanged, onReview }) {
   const founder = inv.cohort.founder;
   const report = inv.report || {};
   const [busy, setBusy] = useState(false);
@@ -364,13 +436,11 @@ export function CallStep({ inv, onChanged }) {
       });
     });
   };
-  const sendNow = () => run(() => api.post('/cohort/report/send'));
-
   let reportLine;
   if (report.shared_with_founder) {
     reportLine = `Only ${founder} can read your report.`;
   } else if (report.node_id) {
-    reportLine = `${founder} can't read your report. If you want, you can still send it: only ${founder} will be able to read it.`;
+    reportLine = `${founder} can't read your report.`;
   } else {
     reportLine = `You sent no report.`;
   }
@@ -395,7 +465,7 @@ export function CallStep({ inv, onChanged }) {
               </>
             ) : (
               <p style={textStyle}>
-                {founder} has not added a calendar yet. Ask {founder} for a time.
+                Reply to {founder}'s message on X to find a time.
               </p>
             )}
             <p style={textStyle}>
@@ -418,8 +488,9 @@ export function CallStep({ inv, onChanged }) {
                 Take it back
               </button>
             ) : (
-              <button type="button" style={quietButton} disabled={busy} onClick={sendNow}>
-                Send to {founder}
+              // Sent only from the report's editor, with the text on screen.
+              <button type="button" style={quietButton} disabled={busy} onClick={onReview}>
+                Read and send the report
               </button>
             )}
           </div>

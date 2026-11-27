@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../../api';
 import MarkdownBody from '../MarkdownBody';
@@ -22,7 +22,7 @@ import { atName } from '../../utils/circles';
 // without an introduction is offered one drafted from their report.
 
 export const laterReadersSentence = (name) =>
-  `Everyone in ${name} can read it, also people who join the group later.`;
+  `Everyone in ${name} can read it, including people who join the group later.`;
 
 // ── The introduction ────────────────────────────────────────────────────
 
@@ -31,6 +31,9 @@ export function IntroStep({ cohortName, user, onShared }) {
   const [loadError, setLoadError] = useState('');
   // Writing one without a draft: the text lives here until it is shared.
   const [own, setOwn] = useState(null);
+  // The private entry made for it on a first try ({ id, text }): a retry
+  // after a refused share updates it instead of making another.
+  const ownEntry = useRef(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const nodeText = useNodeText(intro && intro.node_id);
@@ -71,17 +74,27 @@ export function IntroStep({ cohortName, user, onShared }) {
 
   const share = () => run(async () => {
     let nodeId = intro && intro.node_id;
-    if (own !== null) {
+    if (own !== null && ownEntry.current) {
+      // A second try: the entry exists; it gets the text as it is now.
+      const made = ownEntry.current;
+      if (made.text !== own) {
+        await api.put(`/nodes/${made.id}`, { content: own, base_content: made.text });
+        ownEntry.current = { id: made.id, text: own };
+      }
+      nodeId = made.id;
+    } else if (own !== null) {
       const res = await api.post('/nodes/', {
         content: own,
         privacy_level: 'private',
         ai_usage: (user && user.default_ai_usage) || 'none',
       });
       nodeId = res.data.id;
+      ownEntry.current = { id: nodeId, text: own };
     } else {
       await nodeText.save();
     }
     const res = await api.post('/cohort/intro', { node_id: nodeId, share: true });
+    ownEntry.current = null;
     setOwn(null);
     setIntro(res.data.intro);
     onShared();

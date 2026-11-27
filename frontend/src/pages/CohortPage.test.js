@@ -23,8 +23,8 @@ jest.mock('./SubscribePage', () => () => <div>SUBSCRIBE PAGE</div>);
 import React from 'react';
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
-import CohortPage, { COHORT_TEXT } from './CohortPage';
-import { REPORT_TEXT } from '../components/cohort/CohortSteps';
+import CohortPage, { COHORT_TEXT, notLetInSentence } from './CohortPage';
+import { INTERVIEW_TEXT, REPORT_TEXT } from '../components/cohort/CohortSteps';
 import { pendingCohortCode, rememberCohortCode } from '../utils/cohort';
 
 const CODE = 'Q2xvY2tfY29kZV9mb3JfdGVzdGluZzEy';
@@ -275,7 +275,7 @@ test('admitted: the group page with members, the question, the call and the entr
   expect(screen.getByRole('link', { name: 'Introduction' })).toHaveAttribute('href', '/node/151');
   expect(screen.getByRole('link', { name: /My week/ })).toHaveAttribute('href', '/node/160');
   // People who join later read what is shared with the group.
-  expect(screen.getAllByText(/also people who join the group later/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/including people who join the group later/).length).toBeGreaterThan(0);
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Draft my introduction from my report' }));
   });
@@ -298,7 +298,7 @@ test('an introduction written by hand is saved as a private entry and shared wit
   await renderPage();
   fireEvent.click(screen.getByRole('button', { name: 'Write it myself' }));
   fireEvent.change(screen.getByRole('textbox', { name: 'Your introduction' }), { target: { value: 'I am Mara.' } });
-  expect(screen.getByText('Everyone in First Eight can read it, also people who join the group later.'))
+  expect(screen.getByText('Everyone in First Eight can read it, including people who join the group later.'))
     .toBeInTheDocument();
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Share with the group' }));
@@ -335,7 +335,7 @@ test('a kept code is claimed, forgotten, and the next step shows', async () => {
   expect(mockSetUser).toHaveBeenCalled();
 });
 
-test('a claim with the wrong X account keeps the code and says how to fix it', async () => {
+test('a claim with the wrong X account drops the code and says how to fix it', async () => {
   rememberCohortCode(CODE);
   setMe(null);
   routes.post['/cohort/claim'] = {
@@ -344,7 +344,9 @@ test('a claim with the wrong X account keeps the code and says how to fix it', a
   await renderPage();
   expect(screen.getByRole('alert')).toHaveTextContent('This invitation is for @mara.');
   expect(screen.getByRole('link', { name: 'Sign out' })).toBeInTheDocument();
-  expect(pendingCohortCode()).toBe(CODE);
+  // Another account signing in on this browser is not sent to /cohort for
+  // it; opening the link again keeps it anew.
+  expect(pendingCohortCode()).toBeNull();
 });
 
 test('a claim of a closed invitation drops the code', async () => {
@@ -370,8 +372,214 @@ test('declined: one sentence', async () => {
   expect(screen.getByText(COHORT_TEXT.declined)).toBeInTheDocument();
 });
 
-test('not let in yet (bare): claims a kept code, otherwise it is the subscribe page', async () => {
+test('not let in yet (bare), no code: the subscribe page', async () => {
   setMe(null);
   await renderPage({ bare: true });
   expect(screen.getByText('SUBSCRIBE PAGE')).toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+});
+
+test('not let in yet (bare): a kept code is claimed, and the user read again before anything else shows', async () => {
+  rememberCohortCode(CODE);
+  setMe(null);
+  routes.post['/cohort/claim'] = { invitation: invitation({ cohort: { ...COHORT, free_until: null } }) };
+  await renderPage({ bare: true });
+  expect(mockPost).toHaveBeenCalledWith('/cohort/claim', { code: CODE });
+  expect(mockGet).toHaveBeenCalledWith('/dashboard', { params: { profile: 0 } });
+  expect(mockSetUser).toHaveBeenCalled();
+  expect(pendingCohortCode()).toBeNull();
+  // Still not let in (no free period set): one sentence says why, over the
+  // subscribe page.
+  expect(screen.getByRole('status')).toHaveTextContent(
+    "You accepted the invitation to First Eight, but its free period is not set yet");
+  expect(screen.getByText('SUBSCRIBE PAGE')).toBeInTheDocument();
+});
+
+test('notLetInSentence says why an accepted invitation does not let the account in', () => {
+  const today = new Date('2027-01-10T12:00:00Z');
+  expect(notLetInSentence(invitation({ cohort: { ...COHORT, free_until: '2027-01-08' } }), today))
+    .toBe('You accepted the invitation to First Eight. Its free period ended on 8 January 2027, so Loore now asks for a subscription.');
+  expect(notLetInSentence(invitation({ state: 'closed' }), today)).toBeNull();
+  expect(notLetInSentence(null, today)).toBeNull();
+});
+
+// ── From the frontend review ────────────────────────────────────────────
+
+const drafted = (report = {}) => invitation({
+  state: 'report_drafted',
+  interview: { node_id: 123, open: { text: '/node/130', voice: '/voice?parent=130' } },
+  report: { node_id: 140, task_status: 'done', sent_at: null, skipped_at: null, shared_with_founder: false, written_by_loore: true, ...report },
+});
+
+test('the call step never sends: "Read and send the report" opens the editor, and Send there sends', async () => {
+  // After Send nothing: the report exists and Peter can't read it.
+  setMe(invitation({
+    state: 'report_skipped', booking_url: 'https://cal.example/peter',
+    interview: { node_id: 123, open: null },
+    report: { node_id: 140, task_status: 'done', skipped_at: '2026-11-27T11:00:00Z', shared_with_founder: false, written_by_loore: true },
+  }));
+  routes.get['/nodes/140'] = { id: 140, content: 'The draft she never read' };
+  routes.post['/cohort/report/send'] = { report: {}, booking_url: null };
+  await renderPage();
+  expect(screen.getByText("Peter can't read your report.")).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Send to Peter' })).toBeNull();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Read and send the report' }));
+  });
+  expect(mockPost).not.toHaveBeenCalled();
+  // The text is on screen, with its only reader named.
+  expect(screen.getByRole('textbox', { name: 'Report' }).value).toBe('The draft she never read');
+  expect(screen.getByText('Only Peter will be able to read this. You can take it back later.')).toBeInTheDocument();
+  // Back without sending.
+  fireEvent.click(screen.getByRole('button', { name: 'Back' }));
+  expect(screen.getByRole('heading', { name: 'A call with Peter' })).toBeInTheDocument();
+  expect(mockPost).not.toHaveBeenCalled();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Read and send the report' }));
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Send to Peter' }));
+  });
+  expect(mockPost).toHaveBeenCalledWith('/cohort/report/send');
+});
+
+test('a save refused because the text changed elsewhere stops Send', async () => {
+  setMe(drafted());
+  routes.get['/nodes/140'] = { id: 140, content: 'Draft' };
+  routes.put['/nodes/140'] = {
+    response: { status: 409, data: { error: "There's a newer version of this text, so this change wasn't saved. Reload the page before continuing.", code: 'content_changed' } },
+  };
+  routes.post['/cohort/report/send'] = { report: {} };
+  await renderPage();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Report' }), { target: { value: 'Draft, edited' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Send to Peter' }));
+  });
+  expect(mockPut).toHaveBeenCalled();
+  expect(mockPost).not.toHaveBeenCalledWith('/cohort/report/send');
+  expect(screen.getByRole('alert')).toHaveTextContent("There's a newer version of this text");
+});
+
+test('"Loore wrote this draft" only over a draft a model wrote', async () => {
+  setMe(drafted({ written_by_loore: true }));
+  routes.get['/nodes/140'] = { id: 140, content: 'Draft' };
+  await renderPage();
+  expect(screen.getByText(REPORT_TEXT.intro)).toBeInTheDocument();
+});
+
+test('a report written by hand (or blank) does not say Loore wrote it', async () => {
+  setMe(invitation({
+    state: 'report_drafted', interview: { node_id: null, open: null },
+    report: { node_id: 140, task_status: 'done', written_by_loore: false },
+  }));
+  routes.get['/nodes/140'] = { id: 140, content: '# My report for Peter' };
+  await renderPage();
+  expect(screen.queryByText(REPORT_TEXT.intro)).toBeNull();
+  expect(screen.getByText(REPORT_TEXT.own('Peter'))).toBeInTheDocument();
+  // No interview: nothing to continue.
+  expect(screen.queryByRole('button', { name: /Continue the interview/ })).toBeNull();
+});
+
+test('the report step offers continuing the interview', async () => {
+  setMe(drafted());
+  routes.get['/nodes/140'] = { id: 140, content: 'Draft' };
+  await renderPage();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Continue the interview in text' }));
+  });
+  expect(screen.getByTestId('where')).toHaveTextContent('/node/130');
+});
+
+test('nothing to draft: continue the interview, ask again, write it, or send nothing', async () => {
+  setMe(invitation({
+    state: 'interview_started', interview: { node_id: 123, open: { text: '/node/130', voice: '/voice?parent=130' } },
+    report: { node_id: null, task_status: 'nothing_to_draft' },
+  }));
+  await renderPage();
+  expect(screen.getByText(REPORT_TEXT.nothing)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Continue the interview in text' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Ask again' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Write it myself' })).toBeInTheDocument();
+});
+
+test('the start step says how to come back, and opening the interview marks it for the link back', async () => {
+  setMe(invitation());
+  routes.post['/cohort/interview/start'] = {
+    created: true, interview_node_id: 123, opening_node_id: 124,
+    open: { text: '/node/124?awaitLlm=124', voice: '/voice?resume=124' },
+  };
+  await renderPage();
+  expect(screen.getByText(INTERVIEW_TEXT.comeBack('First Eight'))).toBeInTheDocument();
+  expect(INTERVIEW_TEXT.comeBack('First Eight')).toBe(
+    'When you are done, come back to this page with the "First Eight" link at the top of the page, and press "I\'m done: write the report".');
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Start in text' }));
+  });
+  expect(window.sessionStorage.getItem('loore:cohortInterview')).toBe('First Eight');
+});
+
+test('why the opening failed stays on screen after the step changes, with the way to try again', async () => {
+  let calls = 0;
+  routes.get['/cohort/me'] = () => {
+    calls += 1;
+    return {
+      invitation: calls === 1 ? invitation() : invitation({
+        state: 'interview_started', interview: { node_id: 123, open: null },
+      }),
+      owner_of: [],
+    };
+  };
+  routes.post['/cohort/interview/start'] = {
+    created: true, interview_node_id: 123, opening_node_id: null, open: null,
+    llm_error: 'This thread is too long for a reply.',
+  };
+  await renderPage();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Start in text' }));
+  });
+  // Now the interview step, and the reason is still there.
+  expect(screen.getByRole('button', { name: 'Continue in text' })).toBeInTheDocument();
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    'This thread is too long for a reply. You can try again with the buttons above.');
+  // Continue tries again (no thread tip to open: the start route).
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Continue in text' }));
+  });
+  expect(mockPost.mock.calls.filter(([u]) => u === '/cohort/interview/start')).toHaveLength(2);
+});
+
+test('retrying "Write it myself" after a refused share makes no second entry', async () => {
+  mockUser = { ...mockUser, default_ai_usage: 'chat' };
+  setMe(invitation({ state: 'admitted', admitted_at: '2026-11-29T10:00:00Z', report: { node_id: 140 } }));
+  routes.get['/cohort/page'] = {
+    cohort: { ...COHORT, id: 1, question: null, next_call_at: null, call_url: null },
+    is_founder: false, circle_id: 33,
+    members: [{ username: 'mara', intro_node_id: null, is_founder: false }],
+    entries: [],
+  };
+  routes.get['/cohort/intro'] = { intro: { node_id: null, task_status: null, shared_with_group: false } };
+  routes.post['/nodes/'] = { id: 170 };
+  routes.put['/nodes/170'] = { id: 170 };
+  let tries = 0;
+  routes.post['/cohort/intro'] = () => {
+    tries += 1;
+    return tries === 1
+      ? { response: { status: 409, data: { error: 'The entry quotes something the group can\'t read.', code: 'quotes_not_shared' } } }
+      : { intro: { node_id: 170, task_status: null, shared_with_group: true } };
+  };
+  await renderPage();
+  fireEvent.click(screen.getByRole('button', { name: 'Write it myself' }));
+  const box = screen.getByRole('textbox', { name: 'Your introduction' });
+  fireEvent.change(box, { target: { value: 'I am Mara.' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Share with the group' }));
+  });
+  expect(screen.getByRole('alert')).toHaveTextContent("can't read");
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your introduction' }), { target: { value: 'I am Mara, again.' } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Share with the group' }));
+  });
+  expect(mockPost.mock.calls.filter(([u]) => u === '/nodes/')).toHaveLength(1);
+  expect(mockPut).toHaveBeenCalledWith('/nodes/170', { content: 'I am Mara, again.', base_content: 'I am Mara.' });
+  expect(mockPost).toHaveBeenLastCalledWith('/cohort/intro', { node_id: 170, share: true });
 });

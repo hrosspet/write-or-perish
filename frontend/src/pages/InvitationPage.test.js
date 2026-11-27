@@ -108,6 +108,18 @@ test('Not for me declines and asks nothing more', async () => {
   expect(screen.queryByRole('button', { name: 'Start the interview' })).toBeNull();
 });
 
+test('Not for me forgets a code kept by an earlier Start the interview', async () => {
+  window.localStorage.setItem('loore:cohortInvitation', JSON.stringify({ code: CODE, at: Date.now() }));
+  expect(pendingCohortCode()).toBe(CODE);
+  mockGet.mockResolvedValue({ data: OPEN });
+  mockPost.mockResolvedValue({ data: { state: 'declined' } });
+  await renderPage();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Not for me' }));
+  });
+  expect(pendingCohortCode()).toBeNull();
+});
+
 test('a refused decline shows the server\'s sentence', async () => {
   mockGet.mockResolvedValue({ data: OPEN });
   mockPost.mockRejectedValue({

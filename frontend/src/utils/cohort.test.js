@@ -5,7 +5,8 @@ import {
   STEP, cohortStep, stepIndex, claimRefusalIsFinal, shouldShowCohort,
   reportStepOpen, rememberCohortCode, pendingCohortCode, forgetCohortCode,
   COHORT_CODE_MAX_AGE_DAYS, callTimeText, fromLocalInput, toLocalInput,
-  dayText, errorSentence,
+  dayText, errorSentence, markInterviewOpen, forgetCohortOnSignOut,
+  interviewBackLinkName, isInterviewPage,
 } from './cohort';
 
 const CODE = 'Q2xvY2tfY29kZV9mb3JfdGVzdGluZzEy';
@@ -137,15 +138,20 @@ describe('the kept code', () => {
     expect(pendingCohortCode(COHORT_CODE_MAX_AGE_DAYS * 86400000 + 1)).toBeNull();
   });
 
-  test('only refusals that cannot change drop it', () => {
-    expect(claimRefusalIsFinal(404, undefined)).toBe(true);
-    expect(claimRefusalIsFinal(409, 'cohort_not_open')).toBe(true);
-    expect(claimRefusalIsFinal(409, 'cohort_taken')).toBe(true);
-    expect(claimRefusalIsFinal(409, 'cohort_other')).toBe(true);
-    expect(claimRefusalIsFinal(409, 'cohort_owner')).toBe(true);
-    expect(claimRefusalIsFinal(403, 'cohort_wrong_account')).toBe(false);
-    expect(claimRefusalIsFinal(403, 'cohort_sign_in_with_x')).toBe(false);
-    expect(claimRefusalIsFinal(undefined, undefined)).toBe(false);
+  test('every refusal drops it (it can\'t succeed for this account); a server or network error keeps it', () => {
+    expect(claimRefusalIsFinal(404)).toBe(true);
+    expect(claimRefusalIsFinal(409)).toBe(true);
+    expect(claimRefusalIsFinal(403)).toBe(true);
+    expect(claimRefusalIsFinal(500)).toBe(false);
+    expect(claimRefusalIsFinal(undefined)).toBe(false);
+  });
+
+  test('signing out forgets the code and the way back to the interview', () => {
+    rememberCohortCode(CODE);
+    markInterviewOpen('First Eight');
+    forgetCohortOnSignOut();
+    expect(pendingCohortCode()).toBeNull();
+    expect(interviewBackLinkName('/node/1', { cohort: { name: 'First Eight' } })).toBeNull();
   });
 });
 
@@ -234,4 +240,22 @@ test('errorSentence shows the server\'s sentence, never an app-wide code', () =>
   expect(errorSentence(err({ error: 'subscription_required', message: 'Loore needs a subscription.' })))
     .toBe('Loore needs a subscription.');
   expect(errorSentence({})).toBe('That did not work. Try again.');
+});
+
+describe('the link back from the interview', () => {
+  beforeEach(() => window.sessionStorage.clear());
+  const user = { cohort: { name: 'First Eight' } };
+
+  test('only on a thread or Voice, after /cohort opened the interview, for a cohort person', () => {
+    expect(isInterviewPage('/node/124')).toBe(true);
+    expect(isInterviewPage('/voice')).toBe(true);
+    expect(isInterviewPage('/log')).toBe(false);
+    expect(isInterviewPage('/node/124/edit')).toBe(false);
+    expect(interviewBackLinkName('/node/124', user)).toBeNull();
+    markInterviewOpen('First Eight');
+    expect(interviewBackLinkName('/node/124', user)).toBe('First Eight');
+    expect(interviewBackLinkName('/voice', user)).toBe('First Eight');
+    expect(interviewBackLinkName('/log', user)).toBeNull();
+    expect(interviewBackLinkName('/node/124', { cohort: null })).toBeNull();
+  });
 });

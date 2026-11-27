@@ -188,7 +188,7 @@ function CircleCard({ circle, open, onToggle, onChanged, onDeleted }) {
       {kept && (
         <div style={{ ...hintStyle, fontSize: '0.875rem' }}>
           Loore keeps this circle for {circle.cohort.name}: its name and its
-          people follow the group.
+          members change only with the group.
         </div>
       )}
 

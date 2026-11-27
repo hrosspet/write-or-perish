@@ -138,6 +138,11 @@ function viewerZone() {
   }
 }
 
+// What Admit does, for its dialog.
+export function admitBody(inv, cohortName) {
+  return `${personOf(inv)} joins ${cohortName} and can at once read everything the group has shared so far, introductions included. They get a note in Loore about the newest entries.`;
+}
+
 function personOf(inv) {
   if (inv.x_handle && inv.username && inv.username.toLowerCase() !== inv.x_handle) {
     return `@${inv.x_handle} (Loore: @${inv.username})`;
@@ -185,7 +190,7 @@ function CohortForm({ cohort, onSaved }) {
       <h2 style={h2Style}>{cohort ? cohort.name : 'New cohort'}</h2>
       {cohort && (
         <p style={hintStyle}>
-          Address of the group: {cohort.slug}.{' '}
+          Short name: {cohort.slug}.{' '}
           {Object.keys(cohort.state_counts || {}).length > 0
             ? Object.entries(cohort.state_counts)
               .map(([state, n]) => `${n} ${(STATE_LABELS[state] || state).toLowerCase()}`)
@@ -383,6 +388,9 @@ function InvitationTable({ cohort, invitations, onChanged }) {
   const [busyId, setBusyId] = useState(null);
   const [error, setError] = useState('');
   const [closeAsk, setCloseAsk] = useState(null);
+  // Admit can't be undone without Close (which also ends the free period),
+  // and the person reads the group's earlier entries at once: asked first.
+  const [admitAsk, setAdmitAsk] = useState(null);
   const [editing, setEditing] = useState(null);
 
   const act = async (inv, action) => {
@@ -451,7 +459,7 @@ function InvitationTable({ cohort, invitations, onChanged }) {
                       )}
                       {can.admit && (
                         <button type="button" style={smallButton} disabled={busy}
-                          onClick={() => act(inv, 'admit')}>
+                          onClick={() => setAdmitAsk(inv)}>
                           Admit
                         </button>
                       )}
@@ -484,6 +492,20 @@ function InvitationTable({ cohort, invitations, onChanged }) {
           })}
         </tbody>
       </table>
+      <CircleConfirmDialog
+        open={!!admitAsk}
+        title={`Admit ${admitAsk ? personOf(admitAsk) : ''} to ${cohort.name}?`}
+        body={admitAsk ? admitBody(admitAsk, cohort.name) : ''}
+        note="This can't be undone from this page except by Close, which also ends their free period."
+        confirmLabel="Admit"
+        busy={!!busyId}
+        onClose={() => setAdmitAsk(null)}
+        onConfirm={async () => {
+          const inv = admitAsk;
+          setAdmitAsk(null);
+          await act(inv, 'admit');
+        }}
+      />
       <CircleConfirmDialog
         open={!!closeAsk}
         title={`Close the invitation for ${closeAsk ? personOf(closeAsk) : ''}?`}

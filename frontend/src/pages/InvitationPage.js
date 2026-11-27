@@ -4,7 +4,7 @@ import api from '../api';
 import { useUser } from '../contexts/UserContext';
 import MarkdownBody from '../components/MarkdownBody';
 import { signInPath } from '../utils/destination';
-import { errorSentence, rememberCohortCode } from '../utils/cohort';
+import { errorSentence, forgetCohortCode, rememberCohortCode } from '../utils/cohort';
 
 // /invitation/<code>: the founder's letter to one invited person (the
 // first cohort, docs/experiments/FIRST-COHORT.md). Public, no navigation
@@ -24,8 +24,8 @@ export const INVITATION_TEXT = {
   claimedSignedOut: 'If you accepted it, sign in to continue.',
   declined: 'This invitation was declined.',
   closed: 'This invitation is closed.',
-  justDeclined: 'You declined the invitation. Loore asks nothing more.',
-  startNote: 'You sign in with your X account, then Loore starts the interview.',
+  justDeclined: 'You declined the invitation. Nothing more is needed from you.',
+  startNote: 'Next you sign in with your X account and choose whether to talk or type.',
 };
 
 const styles = `
@@ -233,6 +233,9 @@ export default function InvitationPage() {
     setError('');
     try {
       await api.post(`/invitation/${encodeURIComponent(code)}/decline`);
+      // A code kept by an earlier "Start the interview" has nothing left
+      // to do: no sign-in on this browser is sent to /cohort for it.
+      forgetCohortCode();
       setDeclined(true);
     } catch (err) {
       setError(errorSentence(err));

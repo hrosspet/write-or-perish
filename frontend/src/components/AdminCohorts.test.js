@@ -111,3 +111,56 @@ test('Reopen undoes a "Not for me" given before anyone accepted', async () => {
   expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
 });
+
+test('Admit asks in a dialog that says the person reads the group at once, then admits', async () => {
+  const confirmSpy = jest.spyOn(window, 'confirm').mockImplementation(() => true);
+  const claimed = row({ username: 'ben', x_handle: 'ben', claimed_at: '2026-11-27T10:00:00Z', call_done_at: '2026-11-28T10:00:00Z', state: 'call_done' });
+  mockGet.mockImplementation((url) => {
+    if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+    if (url === '/admin/cohorts/1/invitations') return Promise.resolve({ data: { invitations: [claimed] } });
+    return Promise.reject(new Error(url));
+  });
+  mockPost.mockReset();
+  mockPost.mockResolvedValue({ data: { invitation: { ...claimed, admitted_at: 'x', state: 'admitted' } } });
+  await act(async () => { render(<AdminCohorts />); });
+  fireEvent.click(screen.getByRole('button', { name: 'Admit' }));
+  expect(mockPost).not.toHaveBeenCalled();
+  expect(confirmSpy).not.toHaveBeenCalled();
+  const dialog = screen.getByRole('dialog');
+  expect(within(dialog).getByRole('heading', { name: 'Admit @ben to First Eight?' })).toBeInTheDocument();
+  expect(within(dialog).getByText(
+    '@ben joins First Eight and can at once read everything the group has shared so far, introductions included. They get a note in Loore about the newest entries.',
+  )).toBeInTheDocument();
+  // Cancel does nothing.
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(mockPost).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Admit' }));
+  await act(async () => {
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Admit' }));
+  });
+  expect(mockPost).toHaveBeenCalledWith('/admin/cohorts/1/invitations/7/admit');
+  confirmSpy.mockRestore();
+});
+
+test('Call done acts at once, and the copy-link button holds the full link', async () => {
+  const claimed = row({ username: 'ben', x_handle: 'ben', claimed_at: '2026-11-27T10:00:00Z', state: 'report_sent' });
+  mockGet.mockImplementation((url) => {
+    if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+    if (url === '/admin/cohorts/1/invitations') return Promise.resolve({ data: { invitations: [claimed] } });
+    return Promise.reject(new Error(url));
+  });
+  mockPost.mockReset();
+  mockPost.mockResolvedValue({ data: { invitation: claimed } });
+  const writeText = jest.fn(() => Promise.resolve());
+  Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+  await act(async () => { render(<AdminCohorts />); });
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }));
+  });
+  expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/invitation/Q2x`);
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Call done' }));
+  });
+  expect(mockPost).toHaveBeenCalledWith('/admin/cohorts/1/invitations/7/call_done');
+});

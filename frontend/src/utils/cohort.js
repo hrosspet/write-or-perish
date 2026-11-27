@@ -12,7 +12,9 @@ import { parseTimestamp } from './date';
 // "Start the interview" on /invitation/<code> keeps the code here, the way
 // a referral invite code is kept (utils/invite.js), and /cohort claims it
 // once the person is signed in. Unlike the referral code, a sign-in does
-// not drop it: only the claim, or a refusal that will not change, does.
+// not drop it. The claim drops it, and so do every refusal of the claim,
+// "Not for me", and signing out: a code never follows another account
+// that signs in on the same browser.
 export const COHORT_CODE_MAX_AGE_DAYS = 30;
 const cohortCodes = codeStore('loore:cohortInvitation', COHORT_CODE_MAX_AGE_DAYS);
 
@@ -28,15 +30,67 @@ export function forgetCohortCode() {
   cohortCodes.forget();
 }
 
-// Claim refusals after which the same code can never be claimed by this
-// account: the code is dropped. The two X refusals keep it, so signing in
-// with the right X account claims it without opening the link again.
-export const FINAL_CLAIM_CODES = new Set([
-  'cohort_not_open', 'cohort_taken', 'cohort_owner', 'cohort_other',
-]);
+// A refused claim (4xx) can't succeed for this account, whatever the
+// reason: the code is dropped. For the wrong X account the page says to
+// sign out and open the link again, which keeps the code anew. A server
+// or network error keeps it, to be tried again.
+export function claimRefusalIsFinal(status) {
+  return typeof status === 'number' && status >= 400 && status < 500;
+}
 
-export function claimRefusalIsFinal(status, code) {
-  return status === 404 || FINAL_CLAIM_CODES.has(code);
+// ── On the way to the interview ─────────────────────────────────────────
+
+// Set when /cohort opens the interview in the Text or Voice page, with the
+// cohort's name: those pages then show a link back to /cohort. Dropped when
+// the person is back on /cohort, or goes to any page other than a thread
+// or Voice (utils: interviewBackLinkName).
+const INTERVIEW_KEY = 'loore:cohortInterview';
+
+export function markInterviewOpen(cohortName) {
+  try {
+    window.sessionStorage.setItem(INTERVIEW_KEY, cohortName || '');
+  } catch (e) {
+    // Ignore — storage unavailable: no link back.
+  }
+}
+
+export function forgetInterviewOpen() {
+  try {
+    window.sessionStorage.removeItem(INTERVIEW_KEY);
+  } catch (e) {
+    // Ignore — storage unavailable.
+  }
+}
+
+function interviewOpenName() {
+  try {
+    return window.sessionStorage.getItem(INTERVIEW_KEY);
+  } catch (e) {
+    return null;
+  }
+}
+
+// The pages the interview runs on: the thread page and Voice.
+export function isInterviewPage(pathname) {
+  return pathname === '/voice' || /^\/node\/\d+$/.test(pathname);
+}
+
+/**
+ * The cohort name for the "Back to …" link on the interview's page, or
+ * null: only on a thread or Voice page, after /cohort opened the
+ * interview, for an account with a cohort.
+ */
+export function interviewBackLinkName(pathname, user) {
+  const name = interviewOpenName();
+  if (name === null || !isInterviewPage(pathname)) return null;
+  if (!user || !user.cohort) return null;
+  return name || user.cohort.name || null;
+}
+
+// Signing out: nothing of this account's invitation stays in the browser.
+export function forgetCohortOnSignOut() {
+  forgetCohortCode();
+  forgetInterviewOpen();
 }
 
 // ── Which step /cohort shows ────────────────────────────────────────────

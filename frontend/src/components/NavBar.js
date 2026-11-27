@@ -9,6 +9,7 @@ import { useToast } from "../contexts/ToastContext";
 import api from "../api";
 import { here, signInPath, signInPathFrom } from "../utils/destination";
 import { downloadAccountData, EXPORT_FAILED_MESSAGE } from "../utils/dataExport";
+import { forgetCohortOnSignOut } from "../utils/cohort";
 
 const backendUrl = process.env.REACT_APP_BACKEND_URL;
 
@@ -552,7 +553,8 @@ function NavBar({ onNewEntryClick }) {
                 </Link>
 
                 <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-                <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}>
+                <a href={`${backendUrl}/auth/logout`} style={dropdownItemStyle}
+                  onClick={forgetCohortOnSignOut}>
                   Logout
                 </a>
               </div>
