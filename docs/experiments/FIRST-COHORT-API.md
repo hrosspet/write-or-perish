@@ -19,7 +19,7 @@ One state per invitation, from its timestamps (`utils/cohort.invitation_state`),
 
 The page at the link has its own, coarser state: `open` | `claimed` | `declined` | `closed`.
 
-Draft task statuses (`report.task_status`, `intro.task_status`): `null` (never asked) | `"pending"` | `"processing"` | `"done"` | `"failed"` (refused, empty, an error, or AI switched off meanwhile: offer to ask again) | `"nothing_to_draft"` (the interview has nothing the model may read, or the report is empty). Poll the GET route while it is `pending` or `processing`. A draft still `pending` or `processing` ten minutes after it was asked for (its worker died) is answered as `"failed"`, and asking again, `regenerate` and `blank` work again.
+Draft task statuses (`report.task_status`, `intro.task_status`): `null` (never asked) | `"pending"` | `"processing"` | `"done"` | `"failed"` (refused, empty, cut off at the output cap, an error, or AI switched off meanwhile: offer to ask again; a cut-off text is never saved) | `"nothing_to_draft"` (the interview has nothing of the person's that the model may read, or the report is empty). Poll the GET route while it is `pending` or `processing`. A draft still `pending` or `processing` ten minutes after it was asked for (its worker died) is answered as `"failed"`, and asking again, `regenerate` and `blank` work again.
 
 ---
 
@@ -102,6 +102,8 @@ The account must be signed in. Before the claim, `POST /api/cohort/claim` and `G
     "tip_node_id": 130,
     "tip_is_ai": true,
     "tip_status": "completed",
+    "tip_error": null,
+    "tip_is_opening": false,
     "open": {"text": "/node/130", "voice": "/voice?parent=130"}
   },
   "report": {
@@ -118,7 +120,7 @@ The account must be signed in. Before the claim, `POST /api/cohort/claim` and `G
 ```
 
 - `booking_url`: the founder's calendar link, only once the report was sent or skipped; else `null`.
-- `interview.node_id`: the interview thread's prompt node (root), or `null` before it starts. `tip_node_id`: the newest node of the person's own in that thread (`null` when there is none). `tip_is_ai`: the tip is an AI reply. `tip_status`: its `llm_task_status` (`"pending"`, `"processing"`, `"completed"`, `"failed"`), `null` for a person's message. `open`: where to send the person to continue (see section 5), or `null`.
+- `interview.node_id`: the interview thread's prompt node (root), or `null` before it starts. `tip_node_id`: the newest node of the person's own in that thread (`null` when there is none). `tip_is_ai`: the tip is an AI reply. `tip_status`: its `llm_task_status` (`"pending"`, `"processing"`, `"completed"`, `"failed"`, `"cancelled"`), `null` for a person's message. `tip_error`: for a failed or cancelled AI tip, why (the text written for its owner), else `null`. `tip_is_opening`: the tip is the thread's first message (its parent is the root). `open`: where to send the person to continue (see section 5), or `null`. When the tip is a failed or cancelled AI reply, offer "Try again" through `POST /api/cohort/interview/start`, which asks for it again; do not send the person to the failed node.
 - `report.node_id` / `intro.node_id`: the person's own node, `null` when there is none (or it was deleted).
 - `report.shared_with_founder`: the founder can read the report right now (sent and not taken back).
 - `report.written_by_loore`: the report now on the invitation is a draft a model wrote (`false` for the headings of `{"blank": true}`, and when there is no report). Pages say "Loore wrote this draft" only when it is `true`.
@@ -147,7 +149,7 @@ To send someone to X sign-in and back to `/cohort`: `GET /auth/login?next=/cohor
 
 Body: `{"mode": "text" | "voice"}` (default `"text"`).
 
-Starts the interview: a private thread of the person's own whose root is a prompt node with key `cohort_interview` (their own Voice or Text agentic prompt, then the interview section with the cohort's name, its about, the founder's name and their letter filled in; the name is how the interviewer points to the web app's link back to `/cohort` at the end), and the AI writes the first message on the person's own model. Idempotent: once the thread has anything below its root, it answers that thread and writes nothing.
+Starts the interview: a private thread of the person's own whose root is a prompt node with key `cohort_interview` (their own Voice or Text agentic prompt, then the interview section with the cohort's name, its about, the founder's name and their letter filled in; the name is how the interviewer points to the web app's link back to `/cohort` at the end), and the AI writes the first message on the person's own model. Idempotent: once the thread has anything below its root, it answers that thread and writes nothing, except when the thread ends in an AI reply that failed or was cancelled (the opening, or a later reply): then a new reply is written under the same parent (202, `opening_node_id` is the new reply's id, `open` points at it). The interview section also gets `{profile_note}`: whether a profile the model may read was prepared for the person.
 
 202 (started now, or a failed opening asked again):
 
@@ -422,6 +424,7 @@ Errors: 409 `{"error": "Only an invitation declined before anyone accepted it ca
 - `GET /api/dashboard/` → `user.cohort` (the key is there for every account while the flag is on, so `"cohort" in user` tells the web app the flag is on): `null`, or `{"name", "slug", "role": "invited" | "member" | "founder", "state": <invitation state or null for a founder>, "report_step_done": bool}`. Present for an account with a live invitation, or a founder. Use it for the NavBar link (named after the cohort) and for the once-per-session redirect from Home to `/cohort` while `role` is `"invited"` or `"member"` and `report_step_done` is `false`.
 - `user.subscription.cohort_free_until` (payments on): the free period's last day, or `null` (also for an account with a subscription of its own, which keeps applying unchanged). During it `user.subscription.state` is `"set_by_hand"`, so `notLetIn` already lets the account in; no separate frontend rule is needed.
 - `user.circles_enabled` is `true` for a founder and for every account bound to a live invitation.
+- `GET /api/updates`: a note about an entry shared through a group's circle with a member has `"group": "<cohort name>"` and the title "@mara shared an entry with First Eight."; the web app then offers "Read it" only (no "Don't show"). Other notes have `"group": null`.
 - `GET /api/circles`: a circle Loore keeps for a group has `"cohort": {"name", "slug"}`. Renaming or deleting it, adding or removing its people (and the add preview) answer `409 {"error": "Loore keeps this circle for First Eight: its name and its people follow the group.", "code": "cohort_circle"}`. Hide those controls.
 - `POST /api/circles/leave` and `/leave/preview`, for an entry read through a group circle: `409 {"error": "You read this as a member of First Eight. To stop seeing someone's entries, hide them. To leave the group, tell Peter.", "code": "cohort_circle"}`.
 - `GET /api/prompts/` and `GET /api/prompts/<key>`: every prompt now has `"editable": bool`. The keys `cohort_interview` ("Interview"), `cohort_report` ("Interview report"), `cohort_intro` ("Group introduction") are listed for a founder and invited people only, with `"editable": false`; `PUT`, revert and acknowledge answer `403 {"error": "This prompt can't be changed."}`. A person's `cohort_interview` version (made when their interview starts) has `"generated_by": "cohort"` and holds their whole interview prompt.
