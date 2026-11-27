@@ -11,6 +11,20 @@ import {
 
 const CODE = 'Q2xvY2tfY29kZV9mb3JfdGVzdGluZzEy';
 
+// The wall-clock time ("YYYY-MM-DDTHH:MM") of an instant in the zone this
+// test runs in, worked out with Intl rather than the Date getters the code
+// uses. The tests hold in any zone: CI runs in UTC, this machine in Prague,
+// and a founder or member can be anywhere.
+const RUNNER_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+function wallClock(iso) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: RUNNER_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(iso));
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+}
+
 function invitation(overrides = {}) {
   return {
     id: 7,
@@ -212,19 +226,20 @@ describe('times', () => {
     expect(toLocalInput(null)).toBe('');
   });
 
-  test('a founder in Prague typing 19:00 sends 18:00 UTC (the server stores UTC)', () => {
-    const before = process.env.TZ;
-    process.env.TZ = 'Europe/Prague';
-    try {
-      expect(fromLocalInput('2026-12-03T19:00')).toBe('2026-12-03T18:00:00.000Z');
-      expect(toLocalInput('2026-12-03T18:00:00Z')).toBe('2026-12-03T19:00');
-      // A time the server sent without a zone marker is read as UTC.
-      expect(toLocalInput('2026-12-03T18:00:00')).toBe('2026-12-03T19:00');
-      // Summer time.
-      expect(fromLocalInput('2027-06-03T19:00')).toBe('2027-06-03T17:00:00.000Z');
-    } finally {
-      process.env.TZ = before;
+  test('a founder\'s typed local time goes to the server as that instant in UTC, in any zone', () => {
+    // Winter and summer time.
+    for (const typed of ['2026-12-03T19:00', '2027-06-03T19:00']) {
+      const sent = fromLocalInput(typed);
+      expect(sent).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:00\.000Z$/);
+      // That instant, read on the founder's clock, is what they typed...
+      expect(wallClock(sent)).toBe(typed);
+      // ...and it shows back as typed.
+      expect(toLocalInput(sent)).toBe(typed);
     }
+    // What the server sends (UTC) shows on the viewer's own clock; a time
+    // without a zone marker is read as UTC.
+    expect(toLocalInput('2026-12-03T18:00:00Z')).toBe(wallClock('2026-12-03T18:00:00Z'));
+    expect(toLocalInput('2026-12-03T18:00:00')).toBe(wallClock('2026-12-03T18:00:00Z'));
   });
 
   test('a day reads as that calendar day', () => {

@@ -27,6 +27,20 @@ const COHORT = {
   state_counts: { claimed: 1, invited: 1 },
 };
 
+// The wall-clock time ("YYYY-MM-DDTHH:MM") of an instant in the zone this
+// test runs in, worked out with Intl rather than the Date getters the code
+// uses. The tests hold in any zone: CI runs in UTC, this machine in Prague,
+// and a founder or member can be anywhere.
+const RUNNER_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone;
+function wallClock(iso) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: RUNNER_ZONE, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+  }).formatToParts(new Date(iso));
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}`;
+}
+
 const row = (overrides) => ({
   id: 7, x_handle: 'mara', username: null, state: 'invited', link: '/invitation/Q2x',
   letter: 'Dear Mara', created_at: '2026-11-27T09:00:00Z', first_opened_at: null,
@@ -35,20 +49,15 @@ const row = (overrides) => ({
   admitted_at: null, declined_at: null, closed_at: null, ...overrides,
 });
 
-test('the next call is sent as UTC with a Z, and shown back in local time', () => {
-  const before = process.env.TZ;
-  process.env.TZ = 'Europe/Prague';
-  try {
-    const form = formFromCohort(COHORT);
-    expect(form.next_call_at).toBe('2026-12-03T19:00');
-    expect(cohortBody({ ...form, next_call_at: '2026-12-10T19:30' }).next_call_at)
-      .toBe('2026-12-10T18:30:00.000Z');
-    // Emptied fields clear.
-    expect(cohortBody({ ...form, next_call_at: '', free_until: '' }))
-      .toMatchObject({ next_call_at: null, free_until: null });
-  } finally {
-    process.env.TZ = before;
-  }
+test('the next call is sent as UTC with a Z, and shown back in local time, in any zone', () => {
+  const form = formFromCohort(COHORT);   // next_call_at 2026-12-03T18:00:00Z
+  expect(form.next_call_at).toBe(wallClock('2026-12-03T18:00:00Z'));
+  const sent = cohortBody({ ...form, next_call_at: '2026-12-10T19:30' }).next_call_at;
+  expect(sent).toMatch(/Z$/);
+  expect(wallClock(sent)).toBe('2026-12-10T19:30');
+  // Emptied fields clear.
+  expect(cohortBody({ ...form, next_call_at: '', free_until: '' }))
+    .toMatchObject({ next_call_at: null, free_until: null });
 });
 
 test('each state offers its own actions', () => {
