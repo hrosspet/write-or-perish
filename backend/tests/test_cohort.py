@@ -753,8 +753,8 @@ def test_admit_makes_circles_both_ways_and_close_removes(app):
     assert _members_of("mara", cid)[1] == ["ben", "peter"]
     circle, members = _members_of("ben", cid)
     assert members == ["mara", "peter"] and circle.name == "First Eight"
-    # Only what is shared from now on.
-    assert all(m.entries_from is not None for m in CircleMember.query)
+    # A member reads also what the group shared before they joined.
+    assert all(m.entries_from is None for m in CircleMember.query)
     assert Circle.query.filter_by(user_id=_user("chidi").id).count() == 0
     # A renamed group renames its circles.
     _client(app, "peter").put(f"/api/admin/cohorts/{cid}",
@@ -863,6 +863,48 @@ def test_an_introduction_from_the_report_shared_with_the_group(app, _stubs):
     # Not a member: no introduction.
     assert _client(app, "chidi").post("/api/cohort/intro/draft"
                                       ).status_code == 403
+
+
+def test_a_member_admitted_later_reads_what_the_group_shared_before(app):
+    """Mara is admitted on Monday and shares her introduction on Tuesday;
+    Chidi is admitted on Thursday and reads it, on the group page too.
+    Ordinary circles keep their default: a person their owner adds reads
+    new entries only."""
+    cid, codes = _admitted_group(app)
+    mara_circle, _ = _members_of("mara", cid)
+    r = _client(app, "mara").post("/api/nodes/", json={
+        "content": "Hello, I am Mara", "privacy_level": "private",
+        "ai_usage": "chat"})
+    intro_id = r.get_json()["id"]
+    r = _client(app, "mara").post("/api/cohort/intro", json={
+        "node_id": intro_id, "share": True})
+    assert r.status_code == 200, r.get_json()
+    assert not _can_read(app, "chidi", intro_id)
+
+    iid = _inv(codes["chidi"]).id
+    p = _client(app, "peter")
+    assert p.post(f"/api/admin/cohorts/{cid}/invitations/{iid}/call_done"
+                  ).status_code == 200
+    assert p.post(f"/api/admin/cohorts/{cid}/invitations/{iid}/admit"
+                  ).status_code == 200
+    assert _can_read(app, "chidi", intro_id)
+    page = _client(app, "chidi").get("/api/cohort/page").get_json()
+    assert [e["node_id"] for e in page["entries"]] == [intro_id]
+    intros = {m["username"]: m["intro_node_id"] for m in page["members"]}
+    assert intros["mara"] == intro_id
+
+    # An ordinary circle of Mara's: Ben, added by her, reads new entries
+    # only, as before.
+    own = _client(app, "mara").post("/api/circles", json={"name": "Friends"})
+    assert own.status_code in (200, 201), own.get_json()
+    friends = Circle.query.filter_by(user_id=_user("mara").id,
+                                     name="Friends").one()
+    r = _client(app, "mara").post(f"/api/circles/{friends.id}/members",
+                                  json={"username": "ben",
+                                        "include_existing": False})
+    assert r.status_code in (200, 201), r.get_json()
+    member = CircleMember.query.filter_by(circle_id=friends.id).one()
+    assert member.entries_from is not None
 
 
 def test_leaving_a_group_circle_is_refused_with_the_way_out(app):

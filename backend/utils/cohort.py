@@ -43,11 +43,15 @@ INTRO_KEY = "cohort_intro"
 # ── Heuristics (named in docs/experiments/FIRST-COHORT-PR.md) ───────────
 # Entries the group page lists (the spec's number).
 PAGE_ENTRIES = 50
-# A member admitted later reads only what is shared with the group from
-# then on (spec: "only entries shared from now on"; Peter's Circles
-# default, 2026-11-11). True would also open what was shared before, the
-# earlier members' introductions included. Needs Peter.
-NEW_MEMBERS_READ_EARLIER_ENTRIES = False
+# A member admitted later also reads what members shared with the group
+# before, the earlier members' introductions included: the group is the
+# audience its members chose when they shared (decided by the
+# coordinator for Peter to object to; the spec and Peter's Circles
+# default of 2026-11-11 said only entries shared from then on). Only the
+# circles Loore keeps for a cohort use this; a person added to an
+# ordinary circle by its owner still reads new entries only unless the
+# owner chooses otherwise.
+NEW_MEMBERS_READ_EARLIER_ENTRIES = True
 # Output caps of the two drafts, in tokens. They include a reasoning
 # model's thinking, which counts against the same cap (#366): the
 # prompts themselves ask for at most 500 words (report) and 150 words
@@ -616,8 +620,8 @@ def _circle_name(cohort, owner_id, circle_id=None):
 def sync_cohort_circles(cohort, now=None):
     """For every member and the founder, a circle of their own marked with
     the cohort and named after it, whose people are exactly all the other
-    members and the founder. A person added reads only what is shared
-    with it from then on (NEW_MEMBERS_READ_EARLIER_ENTRIES). The circle
+    members and the founder. A person added also reads what was shared
+    with it before (NEW_MEMBERS_READ_EARLIER_ENTRIES). The circle
     of someone who left the group is deleted, and they leave everyone
     else's. Members are added and removed through the Circles functions
     (circles.add_circle_member / remove_circle_member), so their side
