@@ -52,13 +52,18 @@ test('the next call is sent as UTC with a Z, and shown back in local time', () =
 });
 
 test('each state offers its own actions', () => {
-  expect(invitationActions(row())).toEqual({ callDone: false, admit: false, close: true, editLetter: true });
+  expect(invitationActions(row())).toEqual({ callDone: false, admit: false, close: true, editLetter: true, reopen: false });
   const claimed = row({ username: 'mara', claimed_at: '2026-11-27T10:00:00Z', state: 'report_sent' });
-  expect(invitationActions(claimed)).toEqual({ callDone: true, admit: true, close: true, editLetter: false });
+  expect(invitationActions(claimed)).toEqual({ callDone: true, admit: true, close: true, editLetter: false, reopen: false });
   expect(invitationActions({ ...claimed, admitted_at: 'x', call_done_at: 'x' }))
-    .toEqual({ callDone: false, admit: false, close: true, editLetter: false });
+    .toEqual({ callDone: false, admit: false, close: true, editLetter: false, reopen: false });
   expect(invitationActions({ ...claimed, closed_at: 'x' }))
-    .toEqual({ callDone: false, admit: false, close: false, editLetter: false });
+    .toEqual({ callDone: false, admit: false, close: false, editLetter: false, reopen: false });
+  // Declined before anyone accepted it: only Reopen. Declined by the
+  // person who had accepted it: nothing.
+  expect(invitationActions(row({ declined_at: 'x', state: 'declined' })))
+    .toEqual({ callDone: false, admit: false, close: false, editLetter: false, reopen: true });
+  expect(invitationActions({ ...claimed, declined_at: 'x', state: 'declined' }).reopen).toBe(false);
 });
 
 test('Close asks in a dialog, then closes', async () => {
@@ -82,4 +87,27 @@ test('Close asks in a dialog, then closes', async () => {
   });
   expect(mockPost).toHaveBeenCalledWith('/admin/cohorts/1/invitations/7/close');
   confirmSpy.mockRestore();
+});
+
+test('Reopen undoes a "Not for me" given before anyone accepted', async () => {
+  const declined = row({ declined_at: '2026-11-27T11:00:00Z', state: 'declined' });
+  let invitations = [declined];
+  mockGet.mockImplementation((url) => {
+    if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+    if (url === '/admin/cohorts/1/invitations') return Promise.resolve({ data: { invitations } });
+    return Promise.reject(new Error(url));
+  });
+  mockPost.mockReset();
+  mockPost.mockImplementation(() => {
+    invitations = [{ ...declined, declined_at: null, state: 'opened' }];
+    return Promise.resolve({ data: { invitation: invitations[0] } });
+  });
+  await act(async () => { render(<AdminCohorts />); });
+  expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Reopen' }));
+  });
+  expect(mockPost).toHaveBeenCalledWith('/admin/cohorts/1/invitations/7/reopen');
+  expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
 });

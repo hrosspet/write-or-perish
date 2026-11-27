@@ -24,7 +24,7 @@ usernames and timestamps, except where a function says it reads text.
 import logging
 import re
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import event, func
 
@@ -62,10 +62,19 @@ INTRO_MAX_TOKENS = 1000
 # about twenty minutes has a few dozen).
 MAX_THREAD_NODES = 2000
 
+# A draft still "pending" or "processing" this long after it was asked
+# for reads as failed: the worker died (a deploy restarts the workers, and
+# a task is not run again), and the person can ask again. The model call
+# takes up to about a minute; ten covers a queue behind other replies.
+DRAFT_STALE_AFTER = timedelta(minutes=10)
+
 # Task statuses of the two drafts (report_task_status, intro_task_status).
 PENDING, PROCESSING, DONE, FAILED = "pending", "processing", "done", "failed"
 NOTHING = "nothing_to_draft"
 RUNNING = (PENDING, PROCESSING)
+# Each status column and the column holding when its draft was asked for.
+STARTED_AT = {"report_task_status": "report_task_started_at",
+              "intro_task_status": "intro_task_started_at"}
 
 # ── Plain sentences the routes answer with ──────────────────────────────
 NOT_FOUND = "Not found"
@@ -194,6 +203,13 @@ def invitation_state(inv):
     return "invited"
 
 
+def is_claimed(inv):
+    """Accepted once, by an account that may no longer exist: an
+    invitation is never accepted twice (its letter, admission and states
+    were the first person's)."""
+    return inv.user_id is not None or inv.claimed_at is not None
+
+
 def public_state(inv):
     """What the page at the link may say: open, claimed, declined or
     closed."""
@@ -201,9 +217,56 @@ def public_state(inv):
         return "declined"
     if inv.closed_at:
         return "closed"
-    if inv.user_id:
+    if is_claimed(inv):
         return "claimed"
     return "open"
+
+
+# ── The two drafts' statuses ────────────────────────────────────────────
+
+def _stale(started_at, now=None):
+    return (started_at is None
+            or (now or datetime.utcnow()) - started_at > DRAFT_STALE_AFTER)
+
+
+def task_status(inv, field):
+    """The draft status *field* as the person should see it: a running
+    status older than DRAFT_STALE_AFTER is "failed"."""
+    status = getattr(inv, field)
+    if status in RUNNING and _stale(getattr(inv, STARTED_AT[field])):
+        return FAILED
+    return status
+
+
+def expire_stale_task(inv, field):
+    """Write "failed" over a running status that is stale. Returns True
+    when it changed (the caller commits)."""
+    if getattr(inv, field) in RUNNING and task_status(inv, field) == FAILED:
+        setattr(inv, field, FAILED)
+        return True
+    return False
+
+
+def start_task(inv, field):
+    """Mark the draft *field* pending, in one conditional update, unless
+    one is running already: of two requests at once (a double click) one
+    queues the draft. Returns the stamp the task is queued with (its
+    started-at time), or None when another request was first. Commits."""
+    from sqlalchemy import or_
+    now = datetime.utcnow()
+    status_col = getattr(CohortInvitation, field)
+    started_col = getattr(CohortInvitation, STARTED_AT[field])
+    claimed = CohortInvitation.query.filter(
+        CohortInvitation.id == inv.id,
+        or_(status_col.is_(None), status_col.notin_(RUNNING))).update(
+        {status_col: PENDING, started_col: now}, synchronize_session=False)
+    db.session.commit()
+    db.session.refresh(inv)
+    return now if claimed else None
+
+
+def stamp_of(when):
+    return when.isoformat() if when is not None else None
 
 
 def report_step_done(inv):
@@ -257,6 +320,12 @@ def free_access(user):
     query."""
     if not cohort_enabled() or user is None or getattr(user, "id", None) is None:
         return False
+    # An account with its own active subscription (or an alpha tester's
+    # free month) keeps it unchanged: its ceiling and its paid period stay
+    # its own. The free period is for accounts with none.
+    if (getattr(user, "subscription_grants_access", False)
+            or getattr(user, "alpha_free_month_active", False)):
+        return False
     cache = _cache().setdefault("free", {})
     if user.id not in cache:
         today = datetime.utcnow().date()
@@ -288,7 +357,11 @@ def free_access_user_ids():
 
 
 def free_until_of(user):
-    """The free period's last day (a date) for *user*, or None."""
+    """The free period's last day (a date) for *user*, or None (also for
+    an account whose own subscription applies, free_access)."""
+    if (getattr(user, "subscription_grants_access", False)
+            or getattr(user, "alpha_free_month_active", False)):
+        return None
     inv = invitation_for_user(user.id)
     if not is_live(inv):
         return None
@@ -423,8 +496,8 @@ def claim_refusal(inv, user):
     """Why *user* may not accept *inv*, as a CohortError, or None."""
     if not is_live(inv):
         return CohortError(NOT_OPEN, 409, code="cohort_not_open")
-    if inv.user_id is not None:
-        if inv.user_id == user.id:
+    if is_claimed(inv):
+        if inv.user_id is not None and inv.user_id == user.id:
             return None
         return CohortError(TAKEN, 409, code="cohort_taken")
     cohort = db.session.get(Cohort, inv.cohort_id)
@@ -657,6 +730,29 @@ def sync_cohort_circles(cohort, now=None):
         if uid not in members:
             cz.delete_circle(circle)
     db.session.flush()
+
+
+def close_for_deleted_account(user_id, now=None):
+    """The account bound to these invitations is being deleted
+    (account_deletion.delete_identity): each live one is closed, so it can
+    never be accepted again, and a member leaves the group's circles.
+    Returns how many were closed. The caller commits."""
+    now = now or datetime.utcnow()
+    closed, cohorts = 0, set()
+    for inv in CohortInvitation.query.filter(
+            CohortInvitation.user_id == user_id,
+            CohortInvitation.declined_at.is_(None),
+            CohortInvitation.closed_at.is_(None)):
+        inv.closed_at = now
+        closed += 1
+        if inv.admitted_at:
+            cohorts.add(inv.cohort_id)
+    db.session.flush()
+    for cohort_id in sorted(cohorts):
+        cohort = db.session.get(Cohort, cohort_id)
+        if cohort is not None:
+            sync_cohort_circles(cohort, now=now)
+    return closed
 
 
 def cohort_of_circle(circle):

@@ -74,11 +74,28 @@ def _save_node(user, text, sources):
     return node
 
 
-def _start(invitation_id, field):
+def _ours(inv, field, stamp):
+    """*inv*'s draft in *field* is still the one this task was queued for:
+    running, asked for at *stamp*, and not stale. A task that comes late
+    (its draft read as failed and was asked for again) does nothing."""
+    started = getattr(inv, ch.STARTED_AT[field])
+    return (getattr(inv, field) in ch.RUNNING
+            and ch.task_status(inv, field) != ch.FAILED
+            and (stamp is None or ch.stamp_of(started) == stamp))
+
+
+def _start(invitation_id, field, stamp=None):
     """The invitation and its person when the draft in *field* is still
-    asked for, with the status moved to processing; else (None, None)."""
+    the one asked for at *stamp*, with the status moved to processing;
+    else (None, None). A stale one is marked failed."""
     inv = db.session.get(CohortInvitation, invitation_id)
-    if inv is None or getattr(inv, field) not in ch.RUNNING:
+    if inv is None:
+        return None, None
+    if not _ours(inv, field, stamp):
+        if (stamp is None or ch.stamp_of(
+                getattr(inv, ch.STARTED_AT[field])) == stamp) \
+                and ch.expire_stale_task(inv, field):
+            db.session.commit()
         return None, None
     user = db.session.get(User, inv.user_id) if inv.user_id else None
     if user is None or not ch.is_live(inv) or user.deleted_at is not None:
@@ -98,18 +115,33 @@ def _may_call(user):
     return account_allows_ai(user) and ai_replies_allowed(user)
 
 
-def _fail(invitation_id, field):
+def _fail(invitation_id, field, stamp=None):
     db.session.rollback()
     inv = db.session.get(CohortInvitation, invitation_id)
-    if inv is not None and getattr(inv, field) in ch.RUNNING:
+    if inv is not None and getattr(inv, field) in ch.RUNNING and (
+            stamp is None
+            or ch.stamp_of(getattr(inv, ch.STARTED_AT[field])) == stamp):
         setattr(inv, field, ch.FAILED)
         db.session.commit()
 
 
-def run_report_draft(invitation_id):
+def _still_ours(inv, field, stamp):
+    """Before saving: the draft was not given up on (stale) or asked for
+    again meanwhile. The call was billed either way; only the node is not
+    made."""
+    db.session.refresh(inv)
+    if _ours(inv, field, stamp):
+        return True
+    logger.warning("Cohort draft %s for invitation %s not saved: asked "
+                   "for again or given up on while it was written", field,
+                   inv.id)
+    return False
+
+
+def run_report_draft(invitation_id, stamp=None):
     """Core of draft_cohort_report (a plain function the tests call)."""
     from backend.utils.llm_nodes import pick_model_for_generation
-    inv, user = _start(invitation_id, "report_task_status")
+    inv, user = _start(invitation_id, "report_task_status", stamp)
     if inv is None:
         return None
     try:
@@ -127,6 +159,9 @@ def run_report_draft(invitation_id):
         response = _call(model_id, ch.report_prompt(cohort), text,
                          ch.REPORT_MAX_TOKENS, user.id)
         _log_cost(user.id, model_id, response, "cohort_report", inv.id)
+        db.session.commit()
+        if not _still_ours(inv, "report_task_status", stamp):
+            return None
         draft = _usable_text(response)
         if draft is None:
             logger.warning("Cohort report for invitation %s not saved: "
@@ -143,15 +178,15 @@ def run_report_draft(invitation_id):
     except Exception:
         logger.exception("Cohort report draft failed for invitation %s",
                          invitation_id)
-        _fail(invitation_id, "report_task_status")
+        _fail(invitation_id, "report_task_status", stamp)
         return None
 
 
-def run_intro_draft(invitation_id):
+def run_intro_draft(invitation_id, stamp=None):
     """Core of draft_cohort_intro (a plain function the tests call)."""
     from backend.utils.llm_nodes import pick_model_for_generation
     from backend.utils.privacy import AI_ALLOWED
-    inv, user = _start(invitation_id, "intro_task_status")
+    inv, user = _start(invitation_id, "intro_task_status", stamp)
     if inv is None:
         return None
     try:
@@ -173,6 +208,9 @@ def run_intro_draft(invitation_id):
         response = _call(model_id, ch.intro_prompt(), text,
                          ch.INTRO_MAX_TOKENS, user.id)
         _log_cost(user.id, model_id, response, "cohort_intro", inv.id)
+        db.session.commit()
+        if not _still_ours(inv, "intro_task_status", stamp):
+            return None
         draft = _usable_text(response)
         if draft is None:
             logger.warning("Cohort introduction for invitation %s not "
@@ -189,17 +227,19 @@ def run_intro_draft(invitation_id):
     except Exception:
         logger.exception("Cohort introduction draft failed for invitation "
                          "%s", invitation_id)
-        _fail(invitation_id, "intro_task_status")
+        _fail(invitation_id, "intro_task_status", stamp)
         return None
 
 
 @celery.task
-def draft_cohort_report(invitation_id):
+def draft_cohort_report(invitation_id, stamp=None):
+    """*stamp*: when the draft was asked for (ch.start_task); the task acts
+    only while the invitation's draft is still that one."""
     with flask_app.app_context():
-        return run_report_draft(invitation_id)
+        return run_report_draft(invitation_id, stamp)
 
 
 @celery.task
-def draft_cohort_intro(invitation_id):
+def draft_cohort_intro(invitation_id, stamp=None):
     with flask_app.app_context():
-        return run_intro_draft(invitation_id)
+        return run_intro_draft(invitation_id, stamp)

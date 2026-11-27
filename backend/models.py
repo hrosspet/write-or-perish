@@ -1365,6 +1365,11 @@ class CohortInvitation(db.Model):
     intro_node_id = db.Column(db.Integer, nullable=True)
     report_task_status = db.Column(db.String(32), nullable=True)
     intro_task_status = db.Column(db.String(32), nullable=True)
+    # When the running draft was asked for: a status still running after
+    # utils/cohort.DRAFT_STALE_AFTER reads as failed (a worker that died),
+    # and a task acts only for the request that queued it.
+    report_task_started_at = db.Column(db.DateTime, nullable=True)
+    intro_task_started_at = db.Column(db.DateTime, nullable=True)
     __table_args__ = (
         db.UniqueConstraint("cohort_id", "x_handle",
                             name="uq_cohort_invitation_cohort_handle"),

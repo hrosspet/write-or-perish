@@ -124,6 +124,9 @@ export function invitationActions(inv) {
     admit: live && claimed && !inv.admitted_at,
     close: live,
     editLetter: live && !claimed,
+    // A "Not for me" given before anyone accepted the invitation can be
+    // undone: the link shows the letter again.
+    reopen: !!inv.declined_at && !inv.closed_at && !claimed,
   };
 }
 
@@ -301,8 +304,9 @@ function NewInvitation({ cohort, onAdded }) {
           onChange={(e) => setHandle(e.target.value)} style={{ ...inputStyle, maxWidth: '320px' }} />
         <p style={hintStyle}>
           Approves the handle as the whitelist does; only that X account can accept
-          the invitation. Without a handle, any signed-in account holding the link can
-          (for trying it locally).
+          the invitation. An invitation without a handle, which any signed-in account
+          holding the link can accept, is made only where COHORT_ALLOW_OPEN_INVITATIONS
+          is on (for trying it locally).
         </p>
       </div>
       <MarkdownEditor id="invitation-letter" label="Letter"
@@ -455,6 +459,12 @@ function InvitationTable({ cohort, invitations, onChanged }) {
                         <button type="button" style={smallButton} disabled={busy}
                           onClick={() => setCloseAsk(inv)}>
                           Close
+                        </button>
+                      )}
+                      {can.reopen && (
+                        <button type="button" style={smallButton} disabled={busy}
+                          onClick={() => act(inv, 'reopen')}>
+                          Reopen
                         </button>
                       )}
                     </div>

@@ -159,6 +159,9 @@ def app():
         app.config["CIRCLES_V1"] = False
         app.config["CIRCLES_USER_IDS"] = set()
         app.config["COHORT_V1"] = True
+        # Invitations without a handle, as for trying it locally (W6 has
+        # its own test with the setting off).
+        app.config["COHORT_ALLOW_OPEN_INVITATIONS"] = True
         app.config["PAYMENTS_ENABLED"] = False
         yield app
         _db.session.remove()
@@ -211,8 +214,8 @@ def _stubs(monkeypatch):
         def __init__(self, fn):
             self.fn = fn
 
-        def delay(self, invitation_id):
-            self.fn(invitation_id)
+        def delay(self, invitation_id, stamp=None):
+            self.fn(invitation_id, stamp)
     monkeypatch.setattr(cohort_tasks, "draft_cohort_report",
                         _Inline(cohort_tasks.run_report_draft))
     monkeypatch.setattr(cohort_tasks, "draft_cohort_intro",
@@ -697,6 +700,7 @@ def test_the_report_task_refuses_a_thread_that_is_not_hers(app, _stubs):
     _db.session.add(child)
     inv.interview_node_id = other.id
     inv.report_task_status = ch.PENDING
+    inv.report_task_started_at = datetime.utcnow()
     _db.session.commit()
     cohort_tasks.run_report_draft(inv.id)
     assert CohortInvitation.query.one().report_task_status == ch.NOTHING
@@ -713,6 +717,7 @@ def test_the_report_task_respects_an_account_set_to_none(app, _stubs):
     assert r.status_code == 403 and r.get_json()["code"] == "ai_usage_none"
     # Switched after the click: the task checks again and calls nothing.
     inv.report_task_status = ch.PENDING
+    inv.report_task_started_at = datetime.utcnow()
     _db.session.commit()
     cohort_tasks.run_report_draft(inv.id)
     assert CohortInvitation.query.one().report_task_status == ch.FAILED
@@ -1045,9 +1050,15 @@ def test_a_deleted_account_leaves_the_invitation_without_it(app):
                                      reserve_handles=False)
     _db.session.commit()
     assert counts["cohort_invitation.user_id"] == 1
+    assert counts["cohort_invitation.closed"] == 1
     assert _db.session.get(User, mara_id) is None
     inv = _inv(code)
     assert inv.user_id is None and inv.claimed_at is not None
+    assert inv.closed_at is not None
+    # The link stays closed: no letter, and nobody accepts it again.
+    body = app.test_client().get(f"/api/invitation/{code}").get_json()
+    assert body["state"] == "closed" and "letter" not in body
+    assert _claim(app, "chidi", code).status_code == 409
     assert NodeCircle.query.count() == 0
 
 
@@ -1115,3 +1126,302 @@ def test_an_introduction_cannot_share_an_ai_reply_from_anothers_thread(app):
     assert NodeCircle.query.filter_by(node_id=answer.id).count() == 0
     assert CohortInvitation.query.filter_by(
         user_id=_user("mara").id).one().intro_node_id is None
+
+
+# ── The review's findings (M1, M2, W2, W3, W5, W6) and its missing tests ─
+
+def _delete_account(name):
+    """The purge's Circles rows, then the account itself, as the account
+    deletion runs them (#269)."""
+    from backend.utils.account_deletion import delete_identity
+    from backend.utils.circles import user_rows_filters
+    uid = _user(name).id
+    for model, cond, _key in user_rows_filters(uid, everything=True):
+        model.query.filter(cond).delete(synchronize_session=False)
+    _db.session.commit()
+    delete_identity(uid, notify=False, reserve_handles=False)
+    _db.session.commit()
+
+
+def test_a_deleted_members_invitation_is_never_accepted_again(app):
+    """M1: eve was admitted and deleted her account. Her link stays
+    closed: no letter, chidi can't take her place in the group, and she
+    has left every group circle."""
+    cid = _cohort(app)
+    code = _invite(app, cid, handle=None)
+    assert _claim(app, "eve", code).status_code == 200
+    ben_code = _invite(app, cid, handle="ben")
+    assert _claim(app, "ben", ben_code).status_code == 200
+    p = _client(app, "peter")
+    for c in (code, ben_code):
+        assert p.post(f"/api/admin/cohorts/{cid}/invitations/"
+                      f"{_inv(c).id}/admit").status_code == 200
+    assert _members_of("peter", cid)[1] == ["ben", "eve"]
+    _delete_account("eve")
+    body = app.test_client().get(f"/api/invitation/{code}").get_json()
+    assert body["state"] == "closed" and "letter" not in body
+    assert ch.invitation_state(_inv(code)) == "closed"
+    assert _claim(app, "chidi", code).status_code == 409
+    assert _client(app, "chidi").get("/api/cohort/page").status_code == 403
+    assert _members_of("peter", cid)[1] == ["ben"]
+    assert _members_of("ben", cid)[1] == ["peter"]
+
+
+def test_an_invitation_accepted_once_is_claimed_without_its_account(app):
+    """M1, the rule itself: claimed_at alone makes it claimed."""
+    cid = _cohort(app)
+    code = _invite(app, cid, handle=None)
+    inv = _inv(code)
+    inv.claimed_at = datetime.utcnow()
+    _db.session.commit()
+    body = app.test_client().get(f"/api/invitation/{code}").get_json()
+    assert body["state"] == "claimed" and "letter" not in body
+    r = _claim(app, "chidi", code)
+    assert r.status_code == 409 and r.get_json()["code"] == "cohort_taken"
+    assert _inv(code).user_id is None
+
+
+def test_a_draft_whose_worker_died_can_be_asked_for_again(app, _stubs):
+    """M2: a status left running past DRAFT_STALE_AFTER reads as failed,
+    and writing the report by hand or a new draft works again."""
+    _interviewed(app)
+    inv = CohortInvitation.query.one()
+    c = _client(app, "mara")
+    # Still within the time: running, nothing new queued.
+    inv.report_task_status = ch.PROCESSING
+    inv.report_task_started_at = datetime.utcnow() - timedelta(minutes=1)
+    _db.session.commit()
+    r = c.post("/api/cohort/report/draft", json={"blank": True})
+    assert r.status_code == 202
+    assert r.get_json()["report"]["task_status"] == "processing"
+    # The worker died long ago.
+    inv = CohortInvitation.query.one()
+    inv.report_task_started_at = (datetime.utcnow() - ch.DRAFT_STALE_AFTER
+                                  - timedelta(minutes=1))
+    _db.session.commit()
+    assert c.get("/api/cohort/report").get_json()["report"][
+        "task_status"] == "failed"
+    r = c.post("/api/cohort/report/draft", json={"blank": True})
+    assert r.status_code == 201, r.get_json()
+    assert r.get_json()["report"]["node_id"] is not None
+    # The same for a model draft.
+    inv = CohortInvitation.query.one()
+    inv.report_task_status = ch.PENDING
+    inv.report_task_started_at = datetime(2026, 1, 1)
+    _db.session.commit()
+    r = c.post("/api/cohort/report/draft", json={"regenerate": True})
+    assert r.status_code == 202
+    assert r.get_json()["report"]["task_status"] == "done"
+    assert len(_stubs) == 1
+
+
+def test_a_task_acts_only_for_the_draft_it_was_queued_for(app, _stubs):
+    """M2: a task that comes after its draft was given up on, or after a
+    new one was asked for, calls nothing and saves nothing; one whose
+    model call fails ends at failed."""
+    _interviewed(app)
+    inv = CohortInvitation.query.one()
+    now = datetime.utcnow()
+    inv.report_task_status = ch.PENDING
+    inv.report_task_started_at = now
+    _db.session.commit()
+    older = ch.stamp_of(now - timedelta(seconds=30))
+    assert cohort_tasks.run_report_draft(inv.id, older) is None
+    assert _stubs == []
+    assert CohortInvitation.query.one().report_task_status == ch.PENDING
+    # Stale with its own stamp: given up on, marked failed.
+    inv = CohortInvitation.query.one()
+    old = datetime.utcnow() - ch.DRAFT_STALE_AFTER - timedelta(minutes=1)
+    inv.report_task_started_at = old
+    _db.session.commit()
+    assert cohort_tasks.run_report_draft(inv.id, ch.stamp_of(old)) is None
+    assert _stubs == []
+    assert CohortInvitation.query.one().report_task_status == ch.FAILED
+    # The call itself fails: failed, no node.
+    inv = CohortInvitation.query.one()
+    fresh = datetime.utcnow()
+    inv.report_task_status = ch.PENDING
+    inv.report_task_started_at = fresh
+    _db.session.commit()
+
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+    real = cohort_tasks._call
+    cohort_tasks._call = boom
+    try:
+        assert cohort_tasks.run_report_draft(inv.id,
+                                             ch.stamp_of(fresh)) is None
+    finally:
+        cohort_tasks._call = real
+    inv = CohortInvitation.query.one()
+    assert inv.report_task_status == ch.FAILED and inv.report_node_id is None
+
+
+def test_a_double_click_queues_one_draft(app, monkeypatch):
+    """W2: another request queued the draft between this one's check and
+    its own dispatch: one draft is queued, not two."""
+    _interviewed(app)
+    from backend.routes import cohort as routes
+    queued = []
+
+    class _Record:
+        def delay(self, invitation_id, stamp=None):
+            queued.append(stamp)
+    monkeypatch.setattr(cohort_tasks, "draft_cohort_report", _Record())
+    real = routes._billed_call_refusal
+
+    def the_other_request_was_first(user):
+        if not queued:
+            inv = CohortInvitation.query.one()
+            other = datetime.utcnow()
+            CohortInvitation.query.filter_by(id=inv.id).update({
+                CohortInvitation.report_task_status: ch.PENDING,
+                CohortInvitation.report_task_started_at: other})
+            _db.session.commit()
+            queued.append(ch.stamp_of(other))
+        return real(user)
+    monkeypatch.setattr(routes, "_billed_call_refusal",
+                        the_other_request_was_first)
+    r = _client(app, "mara").post("/api/cohort/report/draft", json={})
+    assert r.status_code == 202
+    assert r.get_json()["report"]["task_status"] == "pending"
+    assert len(queued) == 1
+
+
+def test_a_mistaken_not_for_me_can_be_reopened_by_the_founder(app):
+    """W3: "Not for me" stays one click; the founder can reopen an
+    invitation declined before anyone accepted it."""
+    cid = _cohort(app)
+    code = _invite(app, cid, handle="chidi")
+    iid = _inv(code).id
+    anon = app.test_client()
+    assert anon.post(f"/api/invitation/{code}/decline").status_code == 200
+    p = _client(app, "peter")
+    assert _client(app, "eve").post(
+        f"/api/admin/cohorts/{cid}/invitations/{iid}/reopen"
+    ).status_code == 403
+    r = p.post(f"/api/admin/cohorts/{cid}/invitations/{iid}/reopen")
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()["invitation"]["declined_at"] is None
+    body = anon.get(f"/api/invitation/{code}").get_json()
+    assert body["state"] == "open" and body["letter"] == LETTER
+    assert _claim(app, "chidi", code).status_code == 200
+    # Not declined, accepted once, or closed: nothing to reopen.
+    r = p.post(f"/api/admin/cohorts/{cid}/invitations/{iid}/reopen")
+    assert r.status_code == 409
+    assert r.get_json()["code"] == "cohort_not_reopenable"
+    assert _client(app, "chidi").post(
+        f"/api/invitation/{code}/decline").status_code == 200
+    r = p.post(f"/api/admin/cohorts/{cid}/invitations/{iid}/reopen")
+    assert r.status_code == 409
+
+
+def test_an_invitee_who_pays_keeps_their_own_subscription(app):
+    """W5: the free period counts as a plan set by hand only for an
+    account with no subscription of its own."""
+    app.config["PAYMENTS_ENABLED"] = True
+    cid = _cohort(app)
+    code = _invite(app, cid)
+    mara = _user("mara")
+    mara.plan = "free"
+    mara.subscription_level = "standard"
+    mara.subscription_status = "active"
+    _db.session.commit()
+    assert _claim(app, "mara", code).status_code == 200
+    mara = _user("mara")
+    assert mara.plan_set_by_hand is False
+    assert mara.cohort_free_access is False
+    sub = _client(app, "mara").get("/api/dashboard/").get_json()[
+        "user"]["subscription"]
+    assert sub["state"] == "active" and sub["cohort_free_until"] is None
+    # Its level's ceiling still applies.
+    app.config["SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD"] = 50.0
+    from backend.utils.subscriptions import subscription_spend_limit_usd
+    assert subscription_spend_limit_usd(mara) == 50.0
+    # Without a subscription the free period applies, as before.
+    mara.subscription_status = "ended"
+    _db.session.commit()
+    assert _user("mara").plan_set_by_hand is True
+
+
+def test_an_invitation_needs_a_handle_unless_the_dev_setting_is_on(app):
+    """W6: without a handle whoever opens the link first would accept it."""
+    app.config["COHORT_ALLOW_OPEN_INVITATIONS"] = False
+    cid = _cohort(app)
+    r = _client(app, "peter").post(
+        f"/api/admin/cohorts/{cid}/invitations", json={"letter": "Hi"})
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "cohort_handle_required"
+    assert CohortInvitation.query.count() == 0
+    _invite(app, cid, handle="mara")
+    assert CohortInvitation.query.count() == 1
+
+
+def test_declining_after_admission_leaves_the_group(app):
+    cid, codes = _admitted_group(app)
+    ben_circle, _ = _members_of("ben", cid)
+    r = _client(app, "ben").post("/api/nodes/", json={
+        "content": "BEN-BEFORE", "privacy_level": "circles",
+        "ai_usage": "chat", "circle_ids": [ben_circle.id]})
+    before = r.get_json()["id"]
+    assert _can_read(app, "mara", before)
+    assert _client(app, "mara").post(
+        f"/api/invitation/{codes['mara']}/decline").status_code == 200
+    assert _members_of("peter", cid)[1] == ["ben"]
+    assert _members_of("ben", cid)[1] == ["peter"]
+    assert Circle.query.filter_by(user_id=_user("mara").id,
+                                  cohort_id=cid).count() == 0
+    assert not _can_read(app, "mara", before)
+    assert _client(app, "mara").get("/api/cohort/page").status_code in (
+        403, 404)
+
+
+def test_a_closed_member_no_longer_opens_group_entries(app):
+    cid, codes = _admitted_group(app)
+    mara_circle, _ = _members_of("mara", cid)
+
+    def share(text):
+        r = _client(app, "mara").post("/api/nodes/", json={
+            "content": text, "privacy_level": "circles", "ai_usage": "chat",
+            "circle_ids": [_members_of("mara", cid)[0].id]})
+        assert r.status_code == 201, r.get_json()
+        return r.get_json()["id"]
+    before = share("MARA-BEFORE")
+    assert _can_read(app, "ben", before)
+    iid = _inv(codes["ben"]).id
+    assert _client(app, "peter").post(
+        f"/api/admin/cohorts/{cid}/invitations/{iid}/close"
+    ).status_code == 200
+    after = share("MARA-AFTER")
+    for nid in (before, after):
+        assert not _can_read(app, "ben", nid), nid
+        assert _can_read(app, "peter", nid), nid
+    assert _client(app, "ben").get("/api/cohort/page").status_code in (
+        403, 404)
+    # Circles is off for him with the invitation: nothing is shared with
+    # him any more.
+    assert _client(app, "ben").get(
+        "/api/circles/shared-with-me").status_code == 404
+
+
+def test_no_introduction_from_a_report_set_to_no_ai(app, _stubs):
+    cid, codes = _admitted_group(app)
+    mara = _client(app, "mara")
+    rid = mara.post("/api/cohort/report/draft",
+                    json={"blank": True}).get_json()["report"]["node_id"]
+    node = _db.session.get(Node, rid)
+    node.set_content("# My report\n\nWords.")
+    node.ai_usage = "none"
+    _db.session.commit()
+    r = mara.post("/api/cohort/intro/draft")
+    assert r.status_code == 403 and r.get_json()["code"] == "ai_usage_none"
+    assert "report is set to No AI" in r.get_json()["error"]
+    # Set to None after the click: the task reads the report's setting
+    # again and calls nothing.
+    inv = _inv(codes["mara"])
+    inv.intro_task_status = ch.PENDING
+    inv.intro_task_started_at = datetime.utcnow()
+    _db.session.commit()
+    cohort_tasks.run_intro_draft(inv.id)
+    assert _inv(codes["mara"]).intro_task_status == ch.FAILED
+    assert _stubs == []

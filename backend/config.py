@@ -525,6 +525,13 @@ class Config:
     # every account bound to a live invitation (utils/cohort.py).
     COHORT_V1 = os.environ.get(
         "COHORT_V1", "false").lower() in ("1", "true", "yes")
+    # For trying the cohort locally only: an invitation without an X handle,
+    # which any signed-in account holding the link may accept (local
+    # accounts sign in by email). Off, the founder's route requires a
+    # handle: such a link would give free access to whoever opens it first.
+    COHORT_ALLOW_OPEN_INVITATIONS = os.environ.get(
+        "COHORT_ALLOW_OPEN_INVITATIONS", "false").lower() in (
+        "1", "true", "yes")
 
     # --- Replies while they are written (#367) ---
     # STREAMING_REPLIES: an LLM reply's text shows on its node as it

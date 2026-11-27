@@ -15,7 +15,7 @@ step as any share), and leaves him with the person's normal take-back.
 """
 from datetime import date, datetime, timezone
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, current_app, jsonify, request
 from flask_login import current_user
 
 from backend.extensions import db
@@ -145,7 +145,7 @@ def _report_json(inv, user_id):
     node = _own_alive(inv.report_node_id, user_id)
     return {
         "node_id": node.id if node else None,
-        "task_status": inv.report_task_status,
+        "task_status": ch.task_status(inv, "report_task_status"),
         "drafted_at": iso_utc(inv.report_drafted_at),
         "sent_at": iso_utc(inv.report_sent_at),
         "skipped_at": iso_utc(inv.report_skipped_at),
@@ -157,7 +157,7 @@ def _intro_json(inv, user_id):
     node = _own_alive(inv.intro_node_id, user_id)
     return {
         "node_id": node.id if node else None,
-        "task_status": inv.intro_task_status,
+        "task_status": ch.task_status(inv, "intro_task_status"),
         "shared_with_group": _shared_with_group(inv, node),
     }
 
@@ -264,7 +264,7 @@ def decline_invitation(code):
     if inv.closed_at is not None:
         return _no_store(jsonify({"error": ch.NOT_OPEN,
                                   "code": "cohort_not_open"})), 409
-    if inv.user_id is not None and not (
+    if ch.is_claimed(inv) and not (
             current_user.is_authenticated and current_user.id == inv.user_id):
         return _no_store(jsonify({"error": ch.DECLINE_NOT_YOURS,
                                   "code": "cohort_not_yours"})), 403
@@ -300,11 +300,13 @@ def claim():
     if refused is not None:
         raise refused
     if inv.user_id is None:
-        # A conditional update: of two claims at once, one binds it.
+        # A conditional update: of two claims at once, one binds it, and
+        # an invitation accepted once is never accepted again.
         now = _now()
         bound = CohortInvitation.query.filter(
             CohortInvitation.id == inv.id,
-            CohortInvitation.user_id.is_(None)).update(
+            CohortInvitation.user_id.is_(None),
+            CohortInvitation.claimed_at.is_(None)).update(
             {CohortInvitation.user_id: current_user.id,
              CohortInvitation.claimed_at: now,
              CohortInvitation.first_opened_at: (
@@ -435,12 +437,16 @@ def _billed_call_refusal(user):
 
 
 def _dispatch(task, inv, field):
-    """Queue *task* for *inv* after its status is committed; a queue that
-    can't be reached fails the status loudly."""
-    setattr(inv, field, ch.PENDING)
-    db.session.commit()
+    """Queue *task* for *inv*: the status moves to pending in one
+    conditional update (ch.start_task), so a double click queues one
+    draft; the task gets the request's stamp and acts only for it. A
+    queue that can't be reached fails the status loudly. Returns None when
+    queued, or the answer to give."""
+    stamp = ch.start_task(inv, field)
+    if stamp is None:
+        return "running"
     try:
-        task.delay(inv.id)
+        task.delay(inv.id, ch.stamp_of(stamp))
     except Exception:  # noqa: BLE001 - reported to the person
         import logging
         logging.getLogger(__name__).exception(
@@ -467,6 +473,9 @@ def draft_report():
     data = request.get_json(silent=True) or {}
     regenerate = data.get("regenerate") is True
     blank = data.get("blank") is True
+    # A draft whose worker died reads as failed, so asking again works.
+    if ch.expire_stale_task(inv, "report_task_status"):
+        db.session.commit()
     report = _own_alive(inv.report_node_id, user.id)
     if report is not None and _shared_with_founder(inv, report):
         raise ch.CohortError(ch.REPORT_SENT, 409, code="cohort_report_sent")
@@ -494,7 +503,7 @@ def draft_report():
     if refused is not None:
         return refused
     failed = _dispatch(draft_cohort_report, inv, "report_task_status")
-    if failed is not None:
+    if failed is not None and failed != "running":
         return failed
     return jsonify({"report": _report_json(inv, user.id)}), 202
 
@@ -578,6 +587,8 @@ def draft_intro():
     from backend.utils.privacy import AI_ALLOWED
     inv = _admitted_invitation()
     user = current_user
+    if ch.expire_stale_task(inv, "intro_task_status"):
+        db.session.commit()
     intro = _own_alive(inv.intro_node_id, user.id)
     if intro is not None and _shared_with_group(inv, intro):
         raise ch.CohortError("Your introduction is already shared with the "
@@ -594,7 +605,7 @@ def draft_intro():
     if refused is not None:
         return refused
     failed = _dispatch(draft_cohort_intro, inv, "intro_task_status")
-    if failed is not None:
+    if failed is not None and failed != "running":
         return failed
     return jsonify({"intro": _intro_json(inv, user.id)}), 202
 
@@ -951,6 +962,12 @@ def admin_create_invitation(cohort_id):
         return jsonify({"error": str(e)}), 400
     handle = ch.clean_handle(data.get("x_handle")
                              if isinstance(data.get("x_handle"), str) else "")
+    if not handle and not current_app.config.get(
+            "COHORT_ALLOW_OPEN_INVITATIONS", False):
+        # Without a handle, whoever opens the link first would accept it.
+        return jsonify({"error": "An invitation needs the person's X "
+                                 "handle.",
+                        "code": "cohort_handle_required"}), 400
     x_id = None
     if handle:
         if CohortInvitation.query.filter_by(
@@ -984,7 +1001,7 @@ def admin_update_invitation(cohort_id, invitation_id):
     _cohort, inv = _owned_invitation_or_404(cohort_id, invitation_id)
     if not ch.is_live(inv):
         return jsonify({"error": ch.NOT_OPEN, "code": "cohort_not_open"}), 409
-    if inv.user_id is not None:
+    if ch.is_claimed(inv):
         return jsonify({"error": "The letter can't be changed after the "
                                  "invitation was accepted.",
                         "code": "cohort_claimed"}), 409
@@ -1038,6 +1055,26 @@ def admin_admit(cohort_id, invitation_id):
         db.session.flush()
         ch.sync_cohort_circles(cohort)
         db.session.commit()
+    return jsonify({"invitation": _admin_invitation_json(inv)}), 200
+
+
+@cohort_admin_bp.route(
+    "/<int:cohort_id>/invitations/<int:invitation_id>/reopen",
+    methods=["POST"])
+@_error_answers
+def admin_reopen(cohort_id, invitation_id):
+    """Undo a "Not for me" given before anyone accepted the invitation (a
+    click by mistake, or by someone the link was passed to): the link
+    shows the letter again. An invitation accepted once, or closed by the
+    founder, stays as it is. Loore tells nobody."""
+    _cohort, inv = _owned_invitation_or_404(cohort_id, invitation_id)
+    if inv.declined_at is None or inv.closed_at is not None \
+            or ch.is_claimed(inv):
+        return jsonify({"error": "Only an invitation declined before anyone "
+                                 "accepted it can be reopened.",
+                        "code": "cohort_not_reopenable"}), 409
+    inv.declined_at = None
+    db.session.commit()
     return jsonify({"invitation": _admin_invitation_json(inv)}), 200
 
 
