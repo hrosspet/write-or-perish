@@ -1128,11 +1128,14 @@ def update_node(node_id):
     base_content, bad_base = base_content_of(data)
     if bad_base is not None:
         return bad_base
+    # The form was opened on an older text than the entry's (#799).
+    stale_base = False
     if base_content is not None:
         node = Node.query.filter_by(id=node.id).populate_existing() \
             .with_for_update().one()
         stored = node.get_content()
-        if stored != base_content and (
+        stale_base = stored != base_content
+        if stale_base and (
                 new_content != base_content
                 or _widens_access(node, data)):
             # A text made on an older version, or a setting that lets more
@@ -1213,6 +1216,14 @@ def update_node(node_id):
         except cz.AudienceError as e:
             db.session.rollback()
             return e.response()
+        # Circles, with #799: a form opened on an older text may not
+        # widen who reads the newer one. At the same level "circles", an
+        # audience that gains a reader widens it, as a wider level does
+        # (_widens_access). Nothing is saved.
+        if (stale_base and node.privacy_level == "circles"
+                and circle_readers(node) - old_readers - {current_user.id}):
+            db.session.rollback()
+            return content_changed_response()
 
     if "ai_usage" in data:
         ai_usage = data["ai_usage"]
