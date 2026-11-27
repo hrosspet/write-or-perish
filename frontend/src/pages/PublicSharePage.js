@@ -21,13 +21,20 @@ export default function PublicSharePage({ usernameOverride }) {
   // 'loading' | 'ok' | 'notfound'
   const [status, setStatus] = useState('loading');
   const [data, setData] = useState(null);
+  // The API sends a page of entries at a time; older ones on request.
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setStatus('loading');
+    setPage(1);
+    setHasMore(false);
     api.get(`/share/public/${encodeURIComponent(username)}`)
       .then((res) => {
         if (cancelled) return;
+        setHasMore(!!res.data.has_more);
         // A former handle, or the current one in another case (#253):
         // keep the page, show the canonical URL (query and anchor kept).
         // In-app links (a legacy /dashboard/<old> redirect, a card) never
@@ -52,6 +59,26 @@ export default function PublicSharePage({ usernameOverride }) {
       document.title = 'Loore';
     };
   }, [username]);
+
+  const loadMore = () => {
+    const next = page + 1;
+    setLoadingMore(true);
+    api.get(`/share/public/${encodeURIComponent(username)}?page=${next}`)
+      .then((res) => {
+        // A piece published meanwhile shifts the pages: skip repeats.
+        setData((prev) => {
+          const seen = new Set(prev.shares.map((s) => s.id));
+          const older = res.data.shares.filter((s) => !seen.has(s.id));
+          return { ...prev, shares: [...prev.shares, ...older] };
+        });
+        setHasMore(!!res.data.has_more);
+        setPage(next);
+      })
+      .catch((err) => {
+        console.error(err);
+      })
+      .finally(() => setLoadingMore(false));
+  };
 
   const shell = (children) => (
     <div style={{
@@ -150,6 +177,20 @@ export default function PublicSharePage({ usernameOverride }) {
           </div>
         </div>
       ))}
+
+      {loadingMore && (
+        <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+          Loading more...
+        </div>
+      )}
+      {hasMore && !loadingMore && (
+        <div
+          style={{ padding: '20px', textAlign: 'center', cursor: 'pointer', color: 'var(--text-muted)' }}
+          onClick={loadMore}
+        >
+          Load more...
+        </div>
+      )}
     </>
   );
 }

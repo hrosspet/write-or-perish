@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import api from '../api';
 import MarkdownBody from './MarkdownBody';
 import CopyButton from './CopyButton';
-import { insertItemAfter } from '../utils/markdown';
+import { NEWER_ENTRY_MESSAGE, insertItemAfter, useChecklistEdits } from '../utils/markdown';
 
 export function stripInlineMarkdown(text) {
   return text.replace(/\*\*(.+?)\*\*/g, '$1').replace(/__(.+?)__/g, '$1');
@@ -54,6 +54,20 @@ export function parseShareBlocks(text) {
   const legacy = parseOrientResponse(text);
   if (legacy.share) return [{ content: legacy.share, type: legacy.shareType || '' }];
   return [];
+}
+
+// One key per block of parseShareBlocks: its type and text, and which
+// copy it is when the same block appears more than once. The card keeps
+// a block's Save state under it, so an edit that changes a block's text
+// drops the "Saved" it had, and one that moves a block keeps it (as the
+// server's saved_indexes do after an edit).
+export function shareBlockKeys(shares) {
+  const seen = {};
+  return shares.map(({ content, type }) => {
+    const base = `${type}\u0000${content}`;
+    seen[base] = (seen[base] || 0) + 1;
+    return `${base}\u0000${seen[base]}`;
+  });
 }
 
 export function parseTodoItems(text) {
@@ -644,39 +658,34 @@ export default function ProposalInline({
     && applyStatus !== 'completed'
     && applyStatus !== 'started';
 
+  // A tick moves a row between Completed and New Tasks in the reply's text;
+  // the hover "+" inserts a row. Both are shown at once and saved only over
+  // the text the card shows (#795), one after the other; when the reply
+  // changed elsewhere nothing is saved, the change is undone and a toast
+  // asks for a reload.
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const applyEdit = useChecklistEdits({
+    getContent: () => contentRef.current,
+    setContent: (_key, text) => onContentChange?.(text),
+    save: (key, text, base) => api.put(`/nodes/${key}`, { content: text, base_content: base }),
+    newerMessage: NEWER_ENTRY_MESSAGE,
+    notify: (message, ms) => onError?.(message, ms),
+  });
+
   const handleToggleItem = useCallback((itemText, fromSection, toSection, opts) => {
     if (!toggleable || !nodeId) return;
-    const newContent = moveProposalItem(content, itemText, fromSection, toSection, opts);
-    if (newContent === content) return;
-    const prevContent = content;
-    onContentChange(newContent);
-    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
-      console.error('Failed to toggle proposal item:', err);
-      onContentChange(prevContent);
-      if (onError) {
-        const reason = err.response?.data?.error || err.response?.statusText || err.message || 'Unknown error';
-        onError(`Couldn't save change — reverted (${reason})`);
-      }
-    });
-  }, [content, nodeId, onContentChange, onError, toggleable]);
+    applyEdit(nodeId, (text) => moveProposalItem(text, itemText, fromSection, toSection, opts),
+      "Couldn't save change");
+  }, [applyEdit, nodeId, toggleable]);
 
   // Insert a new task immediately below a given "New Tasks" row (the hover "+"),
-  // preserving the section's plain-bullet style. Same optimistic+revert path.
+  // preserving the section's plain-bullet style. Same path as a tick.
   const handleInsertAfter = useCallback((afterItem, newTask) => {
     const task = (newTask || '').trim();
     if (!toggleable || !nodeId || !task) return;
-    const newContent = insertItemAfter(content, afterItem, task);
-    if (newContent === content) return;
-    const prevContent = content;
-    onContentChange(newContent);
-    api.put(`/nodes/${nodeId}`, { content: newContent }).catch((err) => {
-      onContentChange(prevContent);
-      if (onError) {
-        const reason = err?.response?.data?.error || err?.message || 'Unknown error';
-        onError(`Couldn't add task — reverted (${reason})`);
-      }
-    });
-  }, [content, nodeId, onContentChange, onError, toggleable]);
+    applyEdit(nodeId, (text) => insertItemAfter(text, afterItem, task), "Couldn't add task");
+  }, [applyEdit, nodeId, toggleable]);
 
   useEffect(() => {
     if (!toolCallsMeta) return;
@@ -718,11 +727,13 @@ export default function ProposalInline({
     }
     const shareEntry = toolCallsMeta.find(tc => tc.name === 'propose_share');
     const applyShareCall = toolCallsMeta.find(tc => tc.name === 'apply_share');
+    // Read afresh each time: after an edit of the node the server says
+    // again which blocks are saved, and a changed block is not.
     if ((shareEntry && shareEntry.apply_status === 'completed')
-        || (applyShareCall && applyShareCall.status === 'success')) {
+        || (!shareEntry && applyShareCall && applyShareCall.status === 'success')) {
       setMetaSavedShares('all');
-    } else if (shareEntry?.saved_indexes?.length) {
-      setMetaSavedShares(shareEntry.saved_indexes);
+    } else {
+      setMetaSavedShares(shareEntry?.saved_indexes?.length ? shareEntry.saved_indexes : null);
     }
   }, [toolCallsMeta]);
 
@@ -844,13 +855,15 @@ export default function ProposalInline({
     }
   }, [nodeId, onApplied]);
 
-  const handleSaveShare = useCallback(async (idx) => {
+  // idx: the block's position, which the server takes; key: its
+  // shareBlockKeys entry, which this session's state is kept under.
+  const handleSaveShare = useCallback(async (idx, key) => {
     if (!nodeId) return;
-    setShareStates(s => ({ ...s, [idx]: 'started' }));
+    setShareStates(s => ({ ...s, [key]: 'started' }));
     try {
       const res = await api.post('/share/save-proposal',
         { node_id: nodeId, share_index: idx });
-      setShareStates(s => ({ ...s, [idx]: 'completed' }));
+      setShareStates(s => ({ ...s, [key]: 'completed' }));
       onApplied?.('propose_share', {
         apply_status: res.data?.status === 'completed' ? 'completed' : 'partial',
         share_id: res.data?.share?.id,
@@ -858,13 +871,15 @@ export default function ProposalInline({
       });
     } catch (err) {
       const msg = err?.response?.data?.error || 'Saving the share failed';
-      setShareStates(s => ({ ...s, [idx]: 'error' }));
-      setShareErrors(e => ({ ...e, [idx]: msg }));
+      setShareStates(s => ({ ...s, [key]: 'error' }));
+      setShareErrors(e => ({ ...e, [key]: msg }));
     }
   }, [nodeId, onApplied]);
 
-  // A block is saved if this session saved it, or the server meta says so.
-  const shareStateFor = (idx) => shareStates[idx]
+  // A block is saved if this session saved that block (its text and
+  // type, wherever an edit moved it), or the server meta says so.
+  const shareKeys = shareBlockKeys(shares);
+  const shareStateFor = (idx) => shareStates[shareKeys[idx]]
     || ((metaSavedShares === 'all'
       || (Array.isArray(metaSavedShares) && metaSavedShares.includes(idx)))
       ? 'completed' : null);
@@ -1131,7 +1146,7 @@ export default function ProposalInline({
             {canAct && (
             <div style={styles.issueButtonWrapper}>
               {!state && (
-                <button onClick={() => handleSaveShare(idx)} style={styles.button}>
+                <button onClick={() => handleSaveShare(idx, shareKeys[idx])} style={styles.button}>
                   {styles.roomy ? 'Save to your shares' : 'Save to shares'}
                 </button>
               )}
@@ -1151,7 +1166,7 @@ export default function ProposalInline({
               )}
               {state === 'error' && (
                 <StatusTag style={{ ...styles.statusText, color: 'var(--accent)' }}>
-                  {shareErrors[idx] || 'Saving the share failed'}
+                  {shareErrors[shareKeys[idx]] || 'Saving the share failed'}
                 </StatusTag>
               )}
             </div>

@@ -1,9 +1,11 @@
-// A tick on a stale Todo page must not overwrite a newer list (#430). The page
-// sends the revision of the list it edited; on a 409 it applies the same tick
-// to the newest list the server returned and saves that.
+// A tick on a stale Todo page must not overwrite a newer list (#430), nor land
+// on a version the page doesn't show (#795). The page sends the revision of
+// the list it shows; on a 409 the tick is undone and a toast says there is a
+// newer version. Quick-add is still applied to the newest list.
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import api from '../api';
 import TodoPage from './TodoPage';
+import { NEWER_TODO_MESSAGE, NEWER_TODO_SHOWN_MESSAGE } from '../utils/markdown';
 
 jest.mock('../components/MarkdownBody', () => ({ children }) =>
   require('react').createElement('span', null, children));
@@ -34,31 +36,34 @@ beforeEach(() => {
   jest.clearAllMocks();
 });
 
-test('a tick on a stale page is applied to the newest list, not over it', async () => {
+// Whether the round checkbox before the item's label shows a tick.
+const isTicked = (label) => checkboxOf(label).textContent.includes('✓');
+
+test('a tick on a stale page is undone, not applied to the newer list', async () => {
   api.get.mockResolvedValue({ data: { todo: todo(1, '## Today\n- [ ] call mom', 'r1') } });
   // A todo merge saved a new version after the page loaded.
   const merged = todo(2, '## Today\n- [ ] call mom\n- [ ] buy milk', 'r2');
-  api.patch
-    .mockRejectedValueOnce(conflict(merged))
-    .mockResolvedValueOnce({ data: { todo: todo(2, '## Today\n- [x] call mom\n- [ ] buy milk', 'r3', 2) } });
+  let refuse;
+  api.patch.mockReturnValueOnce(new Promise((resolve, reject) => { refuse = reject; }));
 
   render(<TodoPage />);
   await screen.findByText('call mom');
   fireEvent.click(checkboxOf('call mom'));
+  // Shown at once.
+  expect(isTicked('call mom')).toBe(true);
+  refuse(conflict(merged));
 
-  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(NEWER_TODO_MESSAGE, 8000));
+  expect(api.patch).toHaveBeenCalledTimes(1);
   expect(api.patch.mock.calls[0][1]).toEqual({
     content: '## Today\n- [x] call mom', base_revision: 'r1',
   });
-  expect(api.patch.mock.calls[1][1]).toEqual({
-    content: '## Today\n- [x] call mom\n- [ ] buy milk', base_revision: 'r2',
-  });
-  // The merged item stays on the page.
-  expect(await screen.findByText('buy milk')).toBeInTheDocument();
-  expect(mockAddToast).not.toHaveBeenCalled();
+  // Undone; the page keeps its list (no newer item appears by itself).
+  expect(isTicked('call mom')).toBe(false);
+  expect(screen.queryByText('buy milk')).not.toBeInTheDocument();
 });
 
-test('a tick whose item the newest list no longer has is not guessed', async () => {
+test('a tick on an item reworded elsewhere is undone the same way', async () => {
   api.get.mockResolvedValue({ data: { todo: todo(1, '## Today\n- [ ] call mom', 'r1') } });
   // The merge reworded the item.
   api.patch.mockRejectedValueOnce(conflict(todo(2, '## Today\n- [ ] call mum', 'r2')));
@@ -67,12 +72,104 @@ test('a tick whose item the newest list no longer has is not guessed', async () 
   await screen.findByText('call mom');
   fireEvent.click(checkboxOf('call mom'));
 
-  // The newest list is shown and nothing more is saved.
-  expect(await screen.findByText('call mum')).toBeInTheDocument();
-  expect(screen.queryByText('call mom')).not.toBeInTheDocument();
+  await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(NEWER_TODO_MESSAGE, 8000));
   expect(api.patch).toHaveBeenCalledTimes(1);
-  expect(mockAddToast).toHaveBeenCalledWith(
-    expect.stringContaining('changed since this page loaded'));
+  expect(screen.getByText('call mom')).toBeInTheDocument();
+  expect(screen.queryByText('call mum')).not.toBeInTheDocument();
+});
+
+test('ticks waiting behind a refused one are undone with it, with one toast', async () => {
+  api.get.mockResolvedValue({ data: { todo: todo(1, '## Today\n- [ ] a\n- [ ] b', 'r1') } });
+  let refuse;
+  api.patch.mockReturnValueOnce(new Promise((resolve, reject) => { refuse = reject; }));
+
+  render(<TodoPage />);
+  await screen.findByText('a');
+  fireEvent.click(checkboxOf('a'));
+  fireEvent.click(checkboxOf('b'));
+  expect(isTicked('a')).toBe(true);
+  expect(isTicked('b')).toBe(true);
+  refuse(conflict(todo(2, '## Today\n- [x] a\n- [ ] b', 'r2')));
+
+  await waitFor(() => expect(isTicked('b')).toBe(false));
+  expect(isTicked('a')).toBe(false);
+  expect(api.patch).toHaveBeenCalledTimes(1);
+  expect(mockAddToast).toHaveBeenCalledTimes(1);
+});
+
+test('quick-add on a stale page is still added to the newest list', async () => {
+  api.get.mockResolvedValue({ data: { todo: todo(1, '## Today\n- [ ] call mom', 'r1') } });
+  const merged = todo(2, '## Today\n- [ ] call mom\n- [ ] buy milk', 'r2');
+  api.patch
+    .mockRejectedValueOnce(conflict(merged))
+    .mockResolvedValueOnce({ data: { todo: todo(2, '## Today\n- [ ] call mom\n- [ ] buy milk\n- [ ] pay rent', 'r3', 2) } });
+
+  render(<TodoPage />);
+  await screen.findByText('call mom');
+  fireEvent.click(screen.getByLabelText('Quick-add task'));
+  const input = await screen.findByPlaceholderText('Add a task to Today and press Enter');
+  fireEvent.change(input, { target: { value: 'pay rent' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+  expect(api.patch.mock.calls[1][1]).toEqual({
+    content: '## Today\n- [ ] call mom\n- [ ] buy milk\n- [ ] pay rent', base_revision: 'r2',
+  });
+  expect(await screen.findByText('buy milk')).toBeInTheDocument();
+  expect(mockAddToast).not.toHaveBeenCalled();
+});
+
+// #799 review: a tick tapped while a quick-add is still saving waits for it.
+// The quick-add then lands on a newer list than the page showed (the phone
+// added a line): the tick, made on the older list, is undone with a toast
+// instead of being saved on a version the page never showed.
+test('a tick waiting behind a quick-add that landed on a newer list is undone', async () => {
+  api.get.mockResolvedValue({ data: { todo: todo(1, '## Today\n- [ ] call mom', 'r1') } });
+  const phone = todo(2, '## Today\n- [ ] call mom\n- [ ] from the phone', 'r2');
+  let refuse;
+  api.patch
+    .mockReturnValueOnce(new Promise((resolve, reject) => { refuse = reject; }))
+    .mockResolvedValueOnce({ data: { todo: todo(2, '## Today\n- [ ] call mom\n- [ ] from the phone\n- [ ] add me', 'r3', 2) } });
+
+  render(<TodoPage />);
+  await screen.findByText('call mom');
+  fireEvent.click(screen.getByLabelText('Quick-add task'));
+  const input = await screen.findByPlaceholderText('Add a task to Today and press Enter');
+  fireEvent.change(input, { target: { value: 'add me' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  // The tick, before the quick-add's first PATCH answered.
+  fireEvent.click(checkboxOf('call mom'));
+  expect(isTicked('call mom')).toBe(true);
+  refuse(conflict(phone));
+
+  await waitFor(() => expect(mockAddToast).toHaveBeenCalledWith(NEWER_TODO_SHOWN_MESSAGE, 8000));
+  // The quick-add was saved on the newest list; the tick was not sent.
+  expect(api.patch).toHaveBeenCalledTimes(2);
+  expect(api.patch.mock.calls[1][1].content).toContain('- [ ] add me');
+  expect(await screen.findByText('from the phone')).toBeInTheDocument();
+  expect(isTicked('call mom')).toBe(false);
+  expect(mockAddToast).toHaveBeenCalledTimes(1);
+});
+
+test('a tick waiting behind a quick-add saved without a conflict is saved after it', async () => {
+  api.get.mockResolvedValue({ data: { todo: todo(1, '## Today\n- [ ] call mom', 'r1') } });
+  api.patch
+    .mockResolvedValueOnce({ data: { todo: todo(1, '## Today\n- [ ] call mom\n- [ ] add me', 'r2', 1) } })
+    .mockResolvedValueOnce({ data: { todo: todo(1, '## Today\n- [x] call mom\n- [ ] add me', 'r3', 1) } });
+
+  render(<TodoPage />);
+  await screen.findByText('call mom');
+  fireEvent.click(screen.getByLabelText('Quick-add task'));
+  const input = await screen.findByPlaceholderText('Add a task to Today and press Enter');
+  fireEvent.change(input, { target: { value: 'add me' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  fireEvent.click(checkboxOf('call mom'));
+
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+  expect(api.patch.mock.calls[1][1]).toEqual({
+    content: '## Today\n- [x] call mom\n- [ ] add me', base_revision: 'r2',
+  });
+  expect(mockAddToast).not.toHaveBeenCalled();
 });
 
 test('quick ticks are saved in order, each on the list the previous save returned', async () => {

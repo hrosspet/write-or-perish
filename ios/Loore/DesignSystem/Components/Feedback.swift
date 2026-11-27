@@ -172,13 +172,16 @@ extension View {
 // MARK: - Toasts
 
 /// App-wide toasts (web `ToastContext`): plain strings, bottom-centre stack,
-/// tap to dismiss, 3 s by default.
+/// tap to dismiss, 3 s by default. A lasting toast (`showLasting`) has no time
+/// limit and a dismiss button.
 @MainActor
 @Observable
 final class ToastCenter {
     struct Toast: Identifiable, Equatable {
         let id: Int
         let message: String
+        /// Stays until the person dismisses it (`showLasting`).
+        var lasting = false
     }
 
     private(set) var toasts: [Toast] = []
@@ -198,6 +201,20 @@ final class ToastCenter {
         return id
     }
 
+    /// A message that stays until the person dismisses it, also while the app
+    /// is in the background (#736: what Voice mode says about a recording's
+    /// length, often with the screen off). A second, different one stacks under
+    /// it; the same message already showing is not added again (its id is
+    /// returned). Sign-out clears it with the rest.
+    @discardableResult
+    func showLasting(_ message: String) -> Int {
+        if let shown = toasts.first(where: { $0.lasting && $0.message == message }) { return shown.id }
+        nextId += 1
+        toasts.append(Toast(id: nextId, message: message, lasting: true))
+        UIAccessibility.post(notification: .announcement, argument: message)
+        return nextId
+    }
+
     func dismiss(_ id: Int) {
         toasts.removeAll { $0.id == id }
     }
@@ -215,24 +232,52 @@ struct ToastStack: View {
     var body: some View {
         VStack(spacing: 8) {
             ForEach(center.toasts) { toast in
-                Text(toast.message)
-                    .font(LooreFont.menu)
-                    .foregroundStyle(LooreColor.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.vertical, 10)
-                    .padding(.horizontal, 20)
-                    .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.small))
-                    .overlay(RoundedRectangle(cornerRadius: LooreRadius.small).strokeBorder(LooreColor.border))
-                    .shadow(color: LooreColor.shadow.opacity(0.3), radius: 10, y: 4)
-                    .onTapGesture { center.dismiss(toast.id) }
-                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
-                    .accessibilityAddTraits(.isStaticText)
-                    .accessibilityAction { center.dismiss(toast.id) }
-                    .accessibilityIdentifier("toast")
+                Group {
+                    if toast.lasting {
+                        lasting(toast)
+                    } else {
+                        Text(toast.message)
+                            .font(LooreFont.menu)
+                            .foregroundStyle(LooreColor.textSecondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 20)
+                            .accessibilityAddTraits(.isStaticText)
+                            .accessibilityAction { center.dismiss(toast.id) }
+                            .accessibilityIdentifier("toast")
+                    }
+                }
+                .background(LooreColor.bgCard, in: RoundedRectangle(cornerRadius: LooreRadius.small))
+                .overlay(RoundedRectangle(cornerRadius: LooreRadius.small).strokeBorder(LooreColor.border))
+                .shadow(color: LooreColor.shadow.opacity(0.3), radius: 10, y: 4)
+                .onTapGesture { center.dismiss(toast.id) }
+                .transition(reduceMotion ? .opacity : .opacity.combined(with: .offset(y: 8)))
             }
         }
         .padding(.horizontal, LooreSpacing.md)
         .animation(LooreMotion.quick, value: center.toasts)
+    }
+
+    /// The same toast with the spend-cap banner's ×: it does not go by itself.
+    /// VoiceOver reads the message, then a Dismiss button.
+    private func lasting(_ toast: ToastCenter.Toast) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(toast.message)
+                .font(LooreFont.menu)
+                .foregroundStyle(LooreColor.textSecondary)
+                .multilineTextAlignment(.center)
+                .accessibilityAddTraits(.isStaticText)
+                .accessibilityIdentifier("toast")
+            Button { center.dismiss(toast.id) } label: {
+                Text("×").font(LooreFont.sans(19, .light)).foregroundStyle(LooreColor.textMuted)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+            .accessibilityIdentifier("toast.dismiss")
+        }
+        .padding(.vertical, 10)
+        .padding(.leading, 20)
+        .padding(.trailing, 14)
     }
 }
 

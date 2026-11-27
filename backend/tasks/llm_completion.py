@@ -69,6 +69,7 @@ from backend.utils.llm_batch import (
 from backend.utils.ca_feed import (
     CA_CHAT_TURN_NOTE, CA_READ_AGAIN_TURN, CA_READ_OLDER_TURN,
     CA_TWEETS_CHAT_STUB, GLEAN_DAY_DONE_CODE, GLEAN_DAY_DONE_MESSAGE,
+    GLEAN_TOO_LONG_FOR_MODEL_CODE, glean_too_long_for_model,
     FEED_AI_USAGE, READ_FURTHER_MARKER,
     FeedReplyError, count_dropped_picks, read_reply_ids, record_feed_render,
     ca_turn as _ca_turn,
@@ -86,10 +87,12 @@ from backend.utils.text_edits import apply_text_edits
 from backend.utils.artifact_versions import (
     artifact_diff, parse_version, stored_version, version_number,
 )
+from backend.utils.artifact_copies import ArtifactCopies, edit_stamp
 from backend.utils.privacy import (
     AI_ALLOWED, CIRCLE_INPUT, account_allows_ai, chat_at_most,
     others_circle_writing,
 )
+from backend.utils.profile_providers import kept_from_embeddings
 from backend.utils.proposals import is_own_live_proposal
 from backend.utils.placeholders import (
     CA_TWEETS_PATTERN,
@@ -967,6 +970,14 @@ SEARCH_TOOL_ACCOUNT_NONE_ERROR = (
     "Search is off for this user: their Default AI usage is set to None, "
     "so nothing is sent to the search model. Nothing was searched.")
 
+# semantic_search for a user who keeps their writing with a provider
+# other than the embedding model's (profile_providers.kept_from_embeddings):
+# the search words would go to that model, so nothing is searched.
+SEARCH_TOOL_ONE_PROVIDER_ERROR = (
+    "Search of the archive is off for this user: search data would be "
+    "computed by another provider than the one they chose to keep their "
+    "background work with. Nothing was searched.")
+
 
 def _todo_index_line(user_id, pinned_node=None):
     """Index line for the user's todo list, or None if it's AI-blocked.
@@ -1157,7 +1168,10 @@ def _load_node_chain(parent_node, user_id, in_shared_thread=False):
     The chain holds only what *user_id* (the user the reply is for) can
     see: the walk stops below the first ancestor they cannot see (or
     could not see before it was deleted), so nothing above it reaches
-    the model. An ancestor hidden with its owner's deleted account
+    the model. One kind of node is passed through instead: a prompt
+    entry the user may not read whose owner also wrote the node under it
+    (Text mode continued inside a public thread). It is left out, never
+    read, and the walk goes on above it. An ancestor hidden with its owner's deleted account
     (#269) is passed through like a deleted one: the message builder
     sends a notice in its place, as it does after the purge. The node
     the reply is built on must itself be visible.
@@ -1179,7 +1193,10 @@ def _load_node_chain(parent_node, user_id, in_shared_thread=False):
     if user_id is None:
         raise ValueError("_load_node_chain needs the requesting user's id")
     # The same walk the agreement before a reply in a shared thread is
-    # worked out from (circles.ai_reply_reads).
+    # worked out from (circles.ai_reply_reads). A prompt entry the user
+    # may not read, with a node of its owner's under it in the chain, is
+    # left out there, and the walk goes on above it
+    # (utils/public_threads.passes_through).
     visible = reply_context_nodes(
         parent_node, user_id, in_shared_thread=in_shared_thread)
     if not visible:
@@ -1196,9 +1213,11 @@ def _load_node_chain(parent_node, user_id, in_shared_thread=False):
     if not node_chain:
         from backend.utils.llm_nodes import AIUsageRefused
         raise AIUsageRefused()
-    # Not the deleted nodes: their text is never read.
-    prefetch_deks(n.content for n in node_chain
-                  if not shown_as_deleted(n, user_id))
+    # Not the deleted nodes: their text is never read. The replies' tool
+    # records are read with the texts (the history's replays and notes).
+    from backend.utils.tool_record import sealed_parts
+    live = [n for n in node_chain if not shown_as_deleted(n, user_id)]
+    prefetch_deks([n.content for n in live] + sealed_parts(live))
     return node_chain
 
 
@@ -2054,7 +2073,11 @@ def _fit_read_list(messages, tweets_text, stats, refs, model_id, config,
     as LLMProvider.count_tokens counts it; on any other model the rest is
     *estimate*d as the thread limit estimates a prompt (a function
     messages -> thread_size.Size) and the tweets at the tweets prior, the
-    upper end of what was measured, so the list errs short."""
+    upper end of what was measured, so the list errs short. On Haiku 5.5
+    that estimate is what keeps a Glean under its 100k price step (the
+    budget there, #733): the claude_new prior counts a character of the
+    list at 0.775 tokens, 1.5 to 2.2 times what Claude's tokenizer is
+    expected to make of it (test_glean_price_step has the numbers)."""
     from backend.llm_providers import message_text
     from backend.utils import community_archive as ca
     from backend.utils.thread_size import CHARS_PER_UNIT
@@ -2567,13 +2590,13 @@ def _auto_create_drafts(llm_text, llm_node, node_chain, user_id):
 
 
 # Tool-input keys that carry free-text user content. These are stripped
-# before the input is persisted to the plaintext ``tool_calls_meta`` column:
-# the content is already stored encrypted in its own row (UserArtifact /
-# UserFeedback / Draft), and a plaintext copy on the node would defeat
-# encryption-at-rest. The cross-turn scan, the frontend and exports key on
-# other fields; the replay of an update_artifact call in later turns
-# (#604) shows its input without the redacted keys, and the answer to it
-# shows what the write changed, from the stored version ids.
+# before the input is persisted to the ``tool_calls_meta`` column: the
+# content is already stored encrypted in its own row (UserArtifact /
+# UserFeedback / Draft), and the node keeps no second copy of it. The
+# cross-turn scan, the frontend and exports key on other fields; the
+# replay of an update_artifact call in later turns (#604) shows its input
+# without the redacted keys, and the answer to it shows what the write
+# changed, from the stored version ids.
 _REDACTED_INPUT_KEYS = {"content", "updated_content", "edits"}
 _REDACTED = "[redacted]"
 
@@ -2616,6 +2639,41 @@ def _base_version_error(inp, kind, latest_number):
     return None
 
 
+def _read_copy_error(copies, previous, kind, number):
+    """Why an update_artifact call based on *previous* (the latest version,
+    v*number*, which its base_version names) may not save, judged by the
+    text the model was given (utils/artifact_copies), or None. A tick or a
+    "+" on the artifacts page edits that version in place and keeps its
+    number: a write based on the text from before would put that text
+    back. Edits are refused too, as for a changed number (Peter,
+    2026-11-06)."""
+    if copies is None or previous is None:
+        return None
+    if not copies.knows(previous):
+        return (f"You have not been given the text of '{kind}' "
+                f"v{number}. Nothing was saved.")
+    if copies.changed(previous):
+        return (f"'{kind}' v{number} was edited by the user since you "
+                "read it (an edit on the artifacts page, such as a ticked "
+                "box, keeps the version number). Nothing was saved.")
+    return None
+
+
+def _locked_latest(user_id, kind, row):
+    """*row* (the latest version of *kind*) read again and locked until the
+    turn's next commit, so a tick on the artifacts page (which locks the
+    row too) can't land between this check and the write; asked again
+    under the lock, for a version added in between."""
+    for _ in range(2):
+        row = UserArtifact.query.filter_by(id=row.id) \
+            .populate_existing().with_for_update().one()
+        newest = UserArtifact.latest_for(user_id, kind)
+        if newest is None or newest.id == row.id:
+            return newest
+        row = newest
+    return row
+
+
 def _resolve_artifact_write(inp, previous):
     """Resolve the new full text for an update_artifact call.
 
@@ -2649,7 +2707,7 @@ def _resolve_artifact_write(inp, previous):
 
 def _redact_tool_input(inp):
     """Return a copy of a tool-call input with free-text content removed,
-    safe to persist to the plaintext tool_calls_meta column."""
+    safe to persist to the tool_calls_meta column."""
     if not isinstance(inp, dict):
         return inp
     return {
@@ -2684,7 +2742,7 @@ def _written_from(licence, llm_node, node_chain, previous=None,
 
 def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         quote_labels=None, client=None, hold=None,
-                        licence=None):
+                        licence=None, copies=None):
     """Execute tool calls and return metadata list. *quote_labels* is the
     turn's label map ({label: ("node"|"external", id)}) so read_full can
     resolve a search-result label; None outside the retrieval loop.
@@ -2700,13 +2758,19 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
 
     *licence* (the turn's PayloadLicence): whether a write is marked as
     written from X API posts (_written_from, #689). None on approval: the
-    reply's own mark is used."""
+    reply's own mark is used.
+
+    *copies* (utils/artifact_copies.ArtifactCopies): the artifact texts
+    the model was given. An update_artifact call is then also refused when
+    the version it is based on was edited in place since (_read_copy_error),
+    and a saved write adds its version. None (callers outside a turn):
+    the version number alone decides, as before."""
     tool_results = []
 
     for tc in tool_calls:
         name = tc["name"]
         inp = tc.get("input", {})
-        # Persisted to plaintext tool_calls_meta — redact free-text content
+        # Persisted to tool_calls_meta — redact free-text content
         # (handlers below read the live ``inp``, which keeps the real values).
         result = {"name": name, "input": _redact_tool_input(inp)}
 
@@ -2796,6 +2860,8 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     )
                 else:
                     previous = UserArtifact.latest_for(user_id, kind)
+                    if previous is not None and copies is not None:
+                        previous = _locked_latest(user_id, kind, previous)
                     latest_number = 0
                     current_id = None
                     new_text = None
@@ -2808,6 +2874,9 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             latest_number = version_number(previous)
                         write_err = _base_version_error(
                             inp, kind, latest_number)
+                        if write_err is None:
+                            write_err = _read_copy_error(
+                                copies, previous, kind, latest_number)
                         if write_err is None:
                             new_text, write_err = _resolve_artifact_write(
                                 inp, previous)
@@ -2825,12 +2894,19 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     elif hold:
                         # Checked like a write: it names the version it is
                         # based on, which stays the latest until the user
-                        # decides (tool_approvals.decide writes it then).
+                        # decides (tool_approvals.decide writes it then),
+                        # and keeps that version's edit stamp: a tick in
+                        # place meanwhile makes approving it save nothing.
                         result.update(hold.hold(
                             name, inp, llm_node, user_id,
                             previous_artifact_id=(previous.id if previous
                                                   else None),
-                            kind=kind))
+                            kind=kind,
+                            stamped=(previous is not None
+                                     and copies is not None),
+                            base_edited_at=(edit_stamp(previous)
+                                            if previous is not None
+                                            else None)))
                         result["previous_artifact_id"] = (
                             previous.id if previous else None)
                         result["previous_version"] = latest_number or None
@@ -2883,7 +2959,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                             user_id=user_id,
                             kind=kind,
                             title=title[:128],
-                            description=description,
+                            # Cut like the page's own saves
+                            # (routes/artifacts.update_artifact).
+                            description=(description[:255]
+                                         if description else None),
                             generated_by=(llm_node.llm_model
                                           or "agentic_session"),
                             tokens_used=0,
@@ -2893,6 +2972,10 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                         artifact.set_content(new_text)
                         db.session.add(artifact)
                         db.session.flush()
+                        if copies is not None:
+                            # The answer shows the model what it wrote:
+                            # a later write in the turn may rest on it.
+                            copies.given(artifact)
                         result["status"] = "success"
                         result["artifact_id"] = artifact.id
                         result["kind"] = kind
@@ -2959,7 +3042,7 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                 # model's query, ranks NodeEmbedding rows (excluding nodes
                 # already in this thread), and stores only matched node ids +
                 # scores — snippet content is re-resolved at injection time
-                # (never in plaintext tool_calls_meta), like read_artifact.
+                # (never in tool_calls_meta), like read_artifact.
                 query = (inp.get("query") or "").strip()
                 if not query:
                     result["status"] = "error"
@@ -2971,6 +3054,12 @@ def _execute_tool_calls(tool_calls, llm_node, node_chain, user_id,
                     # (gated_voice_tools: the cache prefix).
                     result["status"] = "error"
                     result["error"] = SEARCH_TOOL_ACCOUNT_NONE_ERROR
+                elif kept_from_embeddings(User.query.get(user_id)):
+                    # The same for an account that keeps to a provider
+                    # other than the embedding model's. The tool stays
+                    # in the list here too.
+                    result["status"] = "error"
+                    result["error"] = SEARCH_TOOL_ONE_PROVIDER_ERROR
                 else:
                     from backend.utils.api_keys import get_openai_chat_key
                     from backend.utils.embeddings import (
@@ -4173,7 +4262,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
             )
             render_variant = _system_render_variant(system_node, user_id)
             cached = get_cached_render(
-                flask_app.config, system_node, render_variant)
+                flask_app.config, system_node, render_variant,
+                user_id=user_id)
             if cached is not None:
                 sys_text, unlicensed = cached.text, cached.unlicensed
             else:
@@ -4188,7 +4278,8 @@ def _prewarm_anthropic_cache(system_node_id, user_id, model_id,
                              render_variant, unlicensed=unlicensed,
                              rows=usage.rows(sys_content),
                              references=usage.named_references,
-                             inputs=usage.inputs(sys_content))
+                             inputs=usage.inputs(sys_content),
+                             user_id=user_id)
 
             key_type = determine_api_key_type([system_node], logger=logger)
             # The render carries the user's own rows, each licensed by
@@ -4350,7 +4441,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
             # and billed it (a batch still queued is withdrawn by the poll
             # instead, see _ca_batch_poll), and the finalize logs the cost
             # either way. The cap gates new requests: the submit below.
-            from backend.utils.spend import user_is_capped
+            # A new run first sets the block from the spend recorded so
+            # far: replies of the same account queued together then stop
+            # once the earlier ones reach the limit, instead of all
+            # running before the deferred check queued behind them.
+            from backend.utils.spend import refresh_user_cap, user_is_capped
+            if batch_resp is None:
+                refresh_user_cap(user_id, flask_app.config)
             if batch_resp is None and user_is_capped(user_id):
                 logger.warning(
                     "User %s is spend-capped; skipping LLM completion", user_id)
@@ -4482,6 +4579,10 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         'status': 'refused',
                         'reason': _cz.AI_READS_CHANGED_CODE,
                     }
+            # The artifact texts the model is given this turn, from the
+            # prompt built below on (utils/artifact_copies): a write based
+            # on a version edited in place since is refused.
+            artifact_copies = ArtifactCopies.at_turn_start(user_id)
 
             def _fills(n):
                 """*n*'s personal placeholders resolve in this reply:
@@ -4830,7 +4931,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     system_node, user_id, tools=chain_tools)
                 if system_render_cacheable:
                     _cached = get_cached_render(
-                        flask_app.config, system_node, render_variant)
+                        flask_app.config, system_node, render_variant,
+                        user_id=user_id)
                     if _cached is not None:
                         cached_system_render = _cached.text
                         cached_system_unlicensed = _cached.unlicensed
@@ -5233,7 +5335,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     **diag_fields,
                 ))
 
-            def _refuse_thread_too_long(size):
+            def _refuse_thread_too_long(size, message=None, code=None):
                 """The assembled prompt is over THREAD_PROMPT_TOKEN_LIMIT
                 (#648): the reply fails with the limit's message (for
                 its reason) before any generation call, and the
@@ -5243,25 +5345,29 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                 certain (a count, or the thread's own ratio), else the
                 row is never a base and the next request measures again.
                 The marker gives the clients the code (llm-status
-                ``error_code``)."""
+                ``error_code``). *message* and *code* replace the limit's
+                for a Glean refused by its model's price step (#733)."""
                 from backend.utils.thread_size import (
                     THREAD_TOO_LONG_CODE, prompt_limit, record_refusal,
                     refusal_message,
                 )
+                code = code or THREAD_TOO_LONG_CODE
                 logger.warning(
                     "Node %s: prompt ~%d tokens >= limit %d (%s, %s); "
-                    "reply refused before any generation call",
+                    "reply refused before any generation call (%s)",
                     llm_node_id, size.tokens, prompt_limit(flask_app.config),
-                    size.reason, "certain" if size.certain else "estimate")
+                    size.reason, "certain" if size.certain else "estimate",
+                    code)
                 record_refusal(user_id, model_id, parent_node_id,
                                size.tokens,
                                size.chars if size.certain else None)
                 llm_node.llm_task_status = 'failed'
-                llm_node.llm_task_error = refusal_message(size.reason)
+                llm_node.llm_task_error = (message
+                                           or refusal_message(size.reason))
                 llm_node.llm_task_progress = 100
                 llm_node.streaming_content = None
                 update_tool_meta(llm_node, REFUSED_MARKER,
-                                 {"code": THREAD_TOO_LONG_CODE},
+                                 {"code": code},
                                  append_if_missing=True)
                 db.session.commit()
                 if speech_turn is not None:
@@ -5270,7 +5376,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'parent_node_id': parent_node_id,
                     'llm_node_id': llm_node_id,
                     'status': 'refused',
-                    'reason': THREAD_TOO_LONG_CODE,
+                    'reason': code,
                 }
 
             def _read_on_hold():
@@ -5787,7 +5893,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                     context_usage.named_references
                                     if USER_RECENT_RAW_PLACEHOLDER
                                     in _verdict_text else ()),
-                                inputs=context_usage.inputs(_verdict_text))
+                                inputs=context_usage.inputs(_verdict_text),
+                                user_id=user_id)
                     if role == "assistant":
                         last_assistant_index = len(messages)
                     messages.append({
@@ -5950,7 +6057,18 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             reads=ca_reply_ids, whole=True))
                     if fit.text is None:
                         # The rest of the prompt leaves no room for even
-                        # one tweet: the thread itself is too long.
+                        # one tweet: the thread itself is too long, or,
+                        # where the model's price step sets the budget
+                        # and the thread limit would leave room, too long
+                        # for a Glean on this model (#733), which the
+                        # sentence says so as not to send the person away
+                        # from a thread that works with another model.
+                        too_long_here = glean_too_long_for_model(
+                            model_id, flask_app.config, fit.rest.tokens)
+                        if too_long_here:
+                            return _refuse_thread_too_long(
+                                fit.rest, message=too_long_here,
+                                code=GLEAN_TOO_LONG_FOR_MODEL_CODE)
                         return _refuse_thread_too_long(fit.rest)
                     if fit.text is not ca_tweets_content:
                         logger.info(
@@ -6251,6 +6369,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         f_tool_calls, target_node, node_chain, user_id,
                         quote_labels=quote_labels, client=client,
                         hold=write_hold, licence=licence,
+                        copies=artifact_copies,
                     )
                     if f_truncated:
                         for tr in tool_results:
@@ -6335,7 +6454,13 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                     'total_tokens': f_total_tokens,
                 }
                 if f_tool_meta:
-                    f_result['tool_calls_meta'] = f_tool_meta
+                    # The task's result is kept by the result backend for
+                    # a day; the record itself is on the node. Nothing
+                    # reads this copy: it names the actions only.
+                    from backend.utils.tool_meta import SHARED_TOOL_FIELDS
+                    f_result['tool_calls_meta'] = [
+                        {k: m[k] for k in SHARED_TOOL_FIELDS if k in m}
+                        for m in f_tool_meta if isinstance(m, dict)]
                 return f_result
 
             # ── Within-turn retrieval loop gating (#158) ───────────────────
@@ -6437,6 +6562,7 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                         response_tool_calls, current_node, node_chain,
                         user_id, quote_labels=quote_labels, client=client,
                         hold=write_hold, licence=licence,
+                        copies=artifact_copies,
                     )
                     if interim_truncated:
                         for tr in tool_results:
@@ -6502,6 +6628,8 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                             if current is not None:
                                 injection_strings.append(current)
                                 _pin_shown("user_artifact", current_row.id)
+                                if artifact_copies is not None:
+                                    artifact_copies.given(current_row)
                         elif tr.get("name") not in RETRIEVAL_TOOLS:
                             injection_strings.append(_action_result_text(tr))
                         elif tr.get("status") == "success":
@@ -6513,6 +6641,12 @@ def generate_llm_response(self, parent_node_id: int, llm_node_id: int, model_id:
                                 a_type, a_id = _retrieval_pin(tr)
                                 if a_type and a_id:
                                     _pin_shown(a_type, a_id)
+                                if (a_type == "user_artifact"
+                                        and artifact_copies is not None):
+                                    # The row the text was just read from
+                                    # (the session's own copy of it).
+                                    artifact_copies.given(
+                                        stored_version(a_id, user_id))
                             else:
                                 injection_strings.append(
                                     f"[{tr.get('name')}: the requested item "

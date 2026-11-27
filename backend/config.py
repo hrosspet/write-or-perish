@@ -29,8 +29,14 @@ def stripe_key_from_env(name, sandbox_name, environ=None):
     return value or None
 
 
+# What SECRET_KEY is when the environment has none. Development and the
+# tests may run on it; production and staging do not start on it
+# (validate_keys in backend/__init__.py).
+PLACEHOLDER_SECRET_KEY = "this-should-be-changed"
+
+
 class Config:
-    SECRET_KEY = os.environ.get("SECRET_KEY", "this-should-be-changed")
+    SECRET_KEY = os.environ.get("SECRET_KEY", PLACEHOLDER_SECRET_KEY)
     # Make sure your DATABASE_URL looks something like
     # "postgresql://username:password@localhost/writeorperish"
     SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL", "postgresql://localhost/writeorperish")
@@ -75,9 +81,16 @@ class Config:
     # here applies only while LLM_NAME is another provider's model. Each
     # must be an active chat model of its own provider (checked at boot,
     # validate_default_model).
+    # OpenAI's is GPT-6.2 Astra since 2026-11-23 (Peter: "Astra 6.2 should
+    # become the new OpenAI chat default"; it was GPT-6 Astra). Moving it
+    # rewrites no saved value. GPT-6 Astra itself is retired since
+    # 2026-11-24 (its entry's "replaced_by"): an account or a thread on it
+    # gets GPT-6.2 Astra. A Voice turn runs on the account's model, as for
+    # every account (#784).
     CHAT_MODEL_ANTHROPIC = (os.environ.get("CHAT_MODEL_ANTHROPIC")
                             or "claude-opus-5.5")
-    CHAT_MODEL_OPENAI = os.environ.get("CHAT_MODEL_OPENAI") or "gpt-6-astra"
+    CHAT_MODEL_OPENAI = (os.environ.get("CHAT_MODEL_OPENAI")
+                         or "gpt-6.2-astra")
 
     # The model a read (routes/read.py) runs on when neither the request
     # nor an earlier read reply in the thread names one. Reads run only on
@@ -221,7 +234,10 @@ class Config:
     # Monthly model-cost ceiling of a subscribed account, in USD (Peter,
     # 2026-11-12): the per-user spend cap for an account whose access
     # comes from its subscription. An admin's per-user limit still wins;
-    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD.
+    # accounts set by hand keep PER_USER_MONTHLY_LIMIT_USD. It is counted
+    # over the subscription's paid period, not the calendar month
+    # (utils/spend.ceiling_period_start); an admin's limit and
+    # PER_USER_MONTHLY_LIMIT_USD are counted over the calendar month.
     SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD = float_from_env(
         "SUBSCRIPTION_SPEND_LIMIT_USD_STANDARD", 50.0)
     SUBSCRIPTION_SPEND_LIMIT_USD_SUPPORTER = float_from_env(
@@ -230,14 +246,27 @@ class Config:
         "SUBSCRIPTION_SPEND_LIMIT_USD_DISCOUNTED", 50.0)
     # Model cost a trial may use in all, whatever the level: nothing has
     # been paid yet. Counted from the trial's start, not per month. From
-    # the first successful payment the level's monthly ceiling applies, and
-    # it counts the whole calendar month, trial usage in that month
+    # the first successful payment the level's ceiling applies, and the
+    # first paid period counts from the trial's start, trial usage
     # included. 0: no separate trial ceiling. Peter, 2026-11-12: "let's go
     # with $30 for the free trial period, and if the user pays, extend
     # this to the subscription's cap" — a starting value, to be checked
     # with the prices before the switch is turned on.
     SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD = float_from_env(
         "SUBSCRIPTION_TRIAL_SPEND_LIMIT_USD", 30.0)
+    # Trials of accounts that were not prepared in advance, per 24 hours
+    # (backend/utils/trial_alerts.py; Peter, 2026-11-23: "One -> email me.
+    # A higher one -> hard stop, put them on a waiting list as it was in
+    # Alpha"). HEURISTICS, both: 10 for the email is Peter's number
+    # (2026-11-23); 20 for the waiting list was proposed to him with it.
+    # More than the first: one email to the admin a day, nothing stopped.
+    # From the second: a new such account waits for the admin's approval
+    # instead of going on to the trial. 0 turns a level off. Only while
+    # PAYMENTS_ENABLED is on.
+    OUTSIDE_TRIALS_EMAIL_PER_DAY = int(
+        float_from_env("OUTSIDE_TRIALS_EMAIL_PER_DAY", 10))
+    OUTSIDE_TRIALS_HOLD_PER_DAY = int(
+        float_from_env("OUTSIDE_TRIALS_HOLD_PER_DAY", 20))
     # Wrong discount codes one account may try per hour before the code
     # field answers "try again later". 10: a typo or two is never
     # refused, guessing an 8-character code is out of reach.
@@ -253,6 +282,11 @@ class Config:
         os.environ.get("CHECKOUT_STARTS_PER_HOUR") or "10")
     BILLING_SYNCS_PER_HOUR = int(
         os.environ.get("BILLING_SYNCS_PER_HOUR") or "20")
+    # INTRODUCED HEURISTIC: Stripe's billing page (the portal) opened per
+    # account per hour; each press makes a session there. A person
+    # changing a card or cancelling opens it a few times.
+    BILLING_PORTALS_PER_HOUR = int(
+        os.environ.get("BILLING_PORTALS_PER_HOUR") or "20")
     # One trial per card (#697, utils/trial_cards): the key of the card
     # fingerprint's hash. Unset: SECRET_KEY. Changing it (or SECRET_KEY
     # while it is unset) forgets every card that had a trial.
@@ -408,6 +442,43 @@ class Config:
     PROFILE_WINDOW_RENDER_SECONDS = int(
         os.environ.get("PROFILE_WINDOW_RENDER_SECONDS") or "600")
 
+    # --- Saved References Digest (backend/tasks/external_digest.py) ---
+    # The digest's model (Peter, 2026-11-24: "pls make Sol 6.2 default for
+    # digests for users who either use OAI models or who allowed to use
+    # both providers. For anthropic only users use Sonnet 5.5"; Haiku 5.5
+    # and Luna are not used for it). DIGEST_MODEL_OPENAI for an account
+    # whose own model (llm_nodes.default_model_for) is OpenAI's, and for
+    # one that answered "both providers" (User.profile_both_providers);
+    # DIGEST_MODEL_ANTHROPIC for an account on an Anthropic model that
+    # answered "one provider" or never answered. Each must be an active
+    # model of THAT provider (checked at boot, validate_digest_settings).
+    # On a failure the digest never falls back to another provider or
+    # model. Before 2026-11-24 the digest ran on the account's own chat
+    # model.
+    DIGEST_MODEL_ANTHROPIC = (
+        os.environ.get("DIGEST_MODEL_ANTHROPIC") or "claude-sonnet-5.5")
+    DIGEST_MODEL_OPENAI = (
+        os.environ.get("DIGEST_MODEL_OPENAI") or "gpt-6.2-sol")
+    # Heuristic: the most one digest request may hold, in o200k tokens
+    # (OpenAI's tokenizer, counted on this machine), the whole request:
+    # instructions, corpus header, message framing and the listed lines.
+    # The saved list is listed newest-saved first until the next line
+    # would pass it; the rest is left out and counted in the header.
+    # Peter, 2026-11-24: "The cap should be based on OAI's price hike. Use
+    # the same for Sonnet 5.5, even though there is no hike": GPT-6.2 Sol
+    # bills the whole request at 2x input and 1.5x output above 272,000
+    # input tokens, and the same list goes to Sonnet 5.5 (flat pricing,
+    # a 1M window, 3.9 times the cap; on the owner's list Claude's
+    # tokenizer made 1.44 tokens per o200k token). 258,400 = 272,000 less
+    # a 5 % margin (the planner's CAP_MARGIN, utils/chunk_plan): the
+    # tokens Sol bills can differ from tiktoken's count. Counted in
+    # tokens, not characters: text dense in tokens crosses the step far
+    # sooner (o200k tokens per 4 characters, synthetic lists, 2026-11-24:
+    # English 0.93 to 1.17, Czech 1.43, Korean 1.98, Japanese 3.10).
+    # Before 2026-11-24: 300,000 characters and 1,500 items.
+    DIGEST_MAX_PROMPT_TOKENS = int(
+        os.environ.get("DIGEST_MAX_PROMPT_TOKENS") or "258400")
+
     # --- Agentic semantic search (#155/#208/#329) ---
     # Manual Cmd+K semantic search is always on. Own-archive semantic_search
     # as a within-turn LLM tool (and the read_full / {quote:ID} pull it
@@ -477,12 +548,9 @@ class Config:
     DEV_UPDATES_V1 = os.environ.get(
         "DEV_UPDATES_V1", "true").lower() in ("1", "true", "yes")
 
-    # Community Archive pre-fill (admin): accounts with at least this many
-    # tweets are read from the nightly parquet snapshot (downloaded once per
-    # export to COMMUNITY_ARCHIVE_SNAPSHOT_DIR, ~1 GB) instead of the REST
-    # API. Env vars reach containers as empty strings when unset — guard.
-    COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS = int(
-        os.environ.get("COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS") or "5000")
+    # Where the nightly parquet snapshot of the archive (downloaded once per
+    # export, ~1 GB) is kept. Env vars reach containers as empty strings
+    # when unset — guard.
     COMMUNITY_ARCHIVE_SNAPSHOT_DIR = (
         os.environ.get("COMMUNITY_ARCHIVE_SNAPSHOT_DIR") or None)
     # Where tiktoken keeps o200k_base (#717: a Glean's list is fitted with
@@ -491,10 +559,10 @@ class Config:
     # on a machine downloads the file there once (~3.6 MB).
     TIKTOKEN_CACHE_DIR = os.environ.get("TIKTOKEN_CACHE_DIR") or None
     # Personal key for the Community Archive API v1 (#688; created at
-    # community-archive.org, settings, API keys). Set: the pre-fill and
-    # archive lookups use API v1, and Glean reads the last day from it
-    # while the bulk export is stale. Unset: the Supabase REST API, which
-    # the archive retires on 2026-11-19. A secret: never logged.
+    # community-archive.org, settings, API keys). The pre-fill, the archive
+    # lookups and Glean's last-day fetch use API v1 with it. Unset: each
+    # says the key is missing (the old REST API is gone, #721). A secret:
+    # never logged.
     COMMUNITY_ARCHIVE_API_KEY = (
         os.environ.get("COMMUNITY_ARCHIVE_API_KEY") or "").strip() or None
 
@@ -517,8 +585,8 @@ class Config:
     # Sources:
     #   Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
     #   OpenAI:    https://developers.openai.com/api/docs/pricing
-    PRICING_VERSION = "9"
-    PRICING_UPDATED_AT = "2026-10-08"
+    PRICING_VERSION = "11"
+    PRICING_UPDATED_AT = "2026-11-24"
 
     # Supported models configuration (single source of truth for all model metadata)
     #
@@ -546,7 +614,11 @@ class Config:
     #   cache_diagnostics — OpenAI Prompt Cache Diagnostics (GPT-5.6 and later,
     #                       #348): conversation calls pass the previous call's
     #                       response id and record why the cache missed. Older
-    #                       models must not get the option.
+    #                       models must not get the option. The flag also
+    #                       marks the models that take prompt_cache_options
+    #                       at all: a one-shot request (a digest, a profile
+    #                       build, ...) on them asks for no prompt cache and
+    #                       pays no cache write (#803, utils/one_shot_cache).
     #
     # Model picker keys (#355):
     #   deprecated — hidden from every picker and never inherited from a
@@ -555,7 +627,26 @@ class Config:
     #                of the same provider (#487): the user's own model of
     #                that provider, else CHAT_MODEL_<PROVIDER> /
     #                LLM_NAME. Deprecate a model rather than remove its
-    #                entry: the entry is how its provider is known.
+    #                entry: the entry is how its provider is known, and
+    #                its prices price the replies that ran on it (cost
+    #                rows of a batch collected after the deprecation).
+    #   replaced_by — on a deprecated model: the newer model of the same
+    #                provider and line that takes its place (GPT-6 Astra →
+    #                GPT-6.2 Astra). It comes first, before the thread's
+    #                and the user's own models: a preference, a thread, a
+    #                request or a user's own earlier read on the retired
+    #                model moves to it, while it is an active chat model
+    #                (for a read: an active read model). A replacement
+    #                retired in turn is followed to its own replacement.
+    #                Checked at boot (validate_model_successors): it leads
+    #                to an active model of the same provider. Without it
+    #                the rule above applies. A server setting that names
+    #                the retired model (LLM_NAME, CHAT_MODEL_*,
+    #                GLEAN_MODEL_*, PROFILE_*_MODEL_*, DIGEST_MODEL_*)
+    #                runs on the
+    #                replacement, with one warning line at boot
+    #                (replace_retired_settings); without a replacement it
+    #                is refused at boot.
     #   featured   — in the picker's short list (with the selected model);
     #                the rest sit behind "More models…". Set by hand.
     #   read       — a read (Community Archive picks) may run on it; the
@@ -571,6 +662,70 @@ class Config:
     # The picker's full list follows this dict's order: newest first
     # within each provider.
     SUPPORTED_MODELS = {
+        "gpt-6.2-astra": {
+            # ASSUMED o200k, as for gpt-6-sol: OpenAI names no tokenizer.
+            # Only selects the cap-check prior until the user's first chunk
+            # is measured.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6.2-astra",
+            # OpenAI's diagnostics guide: "GPT-5.6 and later" (2026-11-23).
+            "cache_diagnostics": True,
+            # Model page (2026-11-23): 1.05M window, 922k max input, 128k
+            # max output (above DEFAULT_MAX_OUTPUT_TOKENS, so no
+            # max_output_tokens entry). Reasoning effort "none" is
+            # rejected; Loore sends no effort on a live call.
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6.2 Astra",
+            # Added at Peter's request (2026-11-23: "we should add Astra
+            # 6.2 to Loore"); featured. OpenAI's chat default
+            # (CHAT_MODEL_OPENAI) since the same day, and GPT-6 Astra's
+            # replacement since 2026-11-24.
+            "featured": True,
+            "context_window": 1050000,
+            # Verified 2026-11-23 on the OpenAI pricing + model pages:
+            # $8.00 / $40.00, cached input $0.40 (0.05x, where gpt-6-astra
+            # is 0.1x), 30-minute cache writes $10.00 (the default 1.25x;
+            # Loore sets no 12-hour ttl, which bills 2.5x); >272k input:
+            # $16.00 / $60.00, cached $0.80, writes $20.00 (2x input and
+            # cache, 1.5x output for the whole request); batch half.
+            "input_price_per_mtok": 8.00,
+            "output_price_per_mtok": 40.00,
+            "cached_input_multiplier": 0.05,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
+        "gpt-6.2-sol": {
+            # ASSUMED o200k, as for gpt-6-sol: OpenAI names no tokenizer.
+            "tokenizer_family": "o200k",
+            "provider": "openai",
+            "api_model": "gpt-6.2-sol",
+            # OpenAI's diagnostics guide: "GPT-5.6 and later" (2026-11-24).
+            "cache_diagnostics": True,
+            # Model page (2026-11-24): 1.05M window, 922k max input, 128k
+            # max output; reasoning effort "none" is rejected (Loore sends
+            # no effort on a live call).
+            "max_input_tokens": 922000,
+            "display_name": "GPT-6.2 Sol",
+            # Added at Peter's request (2026-11-24: "we should also
+            # deprecate Sol 6, and add Sol 6.2"), in GPT-6 Sol's place
+            # and with its flags: chat and Read, not featured.
+            "read": True,
+            "context_window": 1050000,
+            # Verified 2026-11-24 on the OpenAI pricing + model pages:
+            # $2.00 / $10.00, cached input $0.10 (0.05x, where gpt-6-sol
+            # is 0.1x), 30-minute cache writes $2.50 (the default 1.25x);
+            # >272k input: $4.00 / $15.00, cached $0.20, writes $5.00 (2x
+            # input and cache, 1.5x output for the whole request); batch
+            # half. The same prices as gpt-6.1-sol.
+            "input_price_per_mtok": 2.00,
+            "output_price_per_mtok": 10.00,
+            "cached_input_multiplier": 0.05,
+            "long_context_threshold": 272000,
+            "long_context_input_multiplier": 2.0,
+            "long_context_output_multiplier": 1.5,
+        },
         "gpt-6.1-sol": {
             # ASSUMED o200k, as for gpt-6-sol.
             "tokenizer_family": "o200k",
@@ -602,7 +757,6 @@ class Config:
             "cache_diagnostics": True,
             "max_input_tokens": 922000,
             "display_name": "GPT-6 Astra",
-            "featured": True,
             "context_window": 1050000,
             # Verified 2026-09-03 on the OpenAI pricing page.
             "input_price_per_mtok": 10.00,
@@ -618,6 +772,11 @@ class Config:
             # after the first chunk, so a wrong guess costs at most one
             # mis-sized chunk.
             "token_multiplier": 2.0,
+            # Retired 2026-11-24 (Peter: "we should make Astra 6 deprecated,
+            # this will shift user's preferred model to Astra 6.2"). OpenAI
+            # still serves it; the entry stays for its replies' prices.
+            "deprecated": True,
+            "replaced_by": "gpt-6.2-astra",
         },
         "gpt-6-sol": {
             # ASSUMED o200k like GPT-5.x (also the provider default); not
@@ -641,6 +800,11 @@ class Config:
             "long_context_threshold": 272000,
             "long_context_input_multiplier": 2.0,
             "long_context_output_multiplier": 1.5,
+            # Retired 2026-11-24 (Peter: "we should also deprecate Sol 6,
+            # and add Sol 6.2"). OpenAI still serves it; the entry stays for
+            # its replies' prices.
+            "deprecated": True,
+            "replaced_by": "gpt-6.2-sol",
         },
         "gpt-6-luna": {
             # ASSUMED o200k, as for gpt-6-sol.
@@ -1026,7 +1190,11 @@ class Config:
     # GCP Cloud KMS configuration for content encryption at rest
     # Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
     GCP_KMS_KEY_NAME = os.environ.get("GCP_KMS_KEY_NAME")
-    # Set to "true" to disable encryption (for local development without GCP)
+    # "true" is the only thing that turns encryption off (local
+    # development, staging, tests), with or without a key name above.
+    # Without it the app starts only with the key name: see
+    # encryption_choice() in backend/utils/encryption.py, which reads
+    # the environment itself.
     ENCRYPTION_DISABLED = os.environ.get("ENCRYPTION_DISABLED", "false").lower() in ("true", "1", "yes")
 
     # Production Security Settings

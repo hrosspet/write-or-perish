@@ -17,6 +17,8 @@ const ERROR_MESSAGES = {
   // Back from X without a sign-in (#704): Cancel on X's page, or an error.
   x_cancelled: "Sign in with X was cancelled.",
   x_failed: "Sign in with X did not finish. Please try again.",
+  // Sign in with X was started many times from this network (backend/oauth.py).
+  x_wait: "Sign in with X was started many times from this network. Please wait a few minutes, then try again.",
 };
 
 const loginStyles = `

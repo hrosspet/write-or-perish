@@ -14,6 +14,10 @@ services:
     environment:
       - FLASK_ENV=development
       - FLASK_DEBUG=1
+      # The local stack runs without encryption, and every service says
+      # so: this line is the only thing that turns encryption off, and
+      # the app does not start without it or a KMS key name.
+      - ENCRYPTION_DISABLED=true
       # Dev runs plain http; without this, browsers on LAN devices
       # (http://<desktop-ip>:3001) reject the Secure session cookie and
       # login silently fails. localhost is exempt, which is why desktop
@@ -37,6 +41,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py interactive --loglevel=info --concurrency=2
+    environment:
+      # As the backend: no encryption locally.
+      - ENCRYPTION_DISABLED=true
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data
@@ -49,6 +56,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- python backend/celery_queues.py background --loglevel=info --concurrency=1
+    environment:
+      # As the backend: no encryption locally.
+      - ENCRYPTION_DISABLED=true
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data
@@ -68,6 +78,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     command: watchmedo auto-restart --directory=/app/backend --pattern="*.py" --recursive -- celery -A backend.celery_app.celery beat --loglevel=info
+    environment:
+      # As the backend: no encryption locally.
+      - ENCRYPTION_DISABLED=true
     volumes:
       - ./backend:/app/backend
       - media_data:/app/data

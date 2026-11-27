@@ -87,6 +87,7 @@ from backend.models import (
     User, UserArtifact, UserDataPurge, UserDataPurgeHidden, UserFeedback,
     UserNotification, UserProfile, UserPrompt, UserRecentContext, UserTodo,
 )
+from backend.utils import tool_record
 from backend.utils.hidden_rows import (
     hidden_ids, including_hidden_rows, item_read_at,
 )
@@ -836,7 +837,8 @@ def _node_batch_entries(plan=None, job_id=None):
                 *conds, Node.llm_task_status.in_(IN_FLIGHT_STATUSES),
                 Node.tool_calls_meta.like('%"_batch"%')):
             try:
-                entries = json.loads(meta) or []
+                # The column as selected is the stored value.
+                entries = json.loads(tool_record.read(meta)) or []
             except (TypeError, ValueError):
                 continue
             for m in entries:
@@ -1187,10 +1189,14 @@ def _clear_references_to(ids, plan, counts):
     through the embedding sweep)."""
     scope = plan.scope
     for model, col, key in _REF_COLUMNS:
+        values = {col: None, model.updated_at: model.updated_at}
+        if col is Draft.node_id:
+            # An edit draft's copy of the entry's text (#799) goes with
+            # the entry.
+            values[Draft.base_content] = None
         counts[key] += model.query.filter(
             col.in_(ids), scope.other_rows(model),
-        ).update({col: None, model.updated_at: model.updated_at},
-                 synchronize_session=False)
+        ).update(values, synchronize_session=False)
         # The user's own rows written since the first step of the round.
         table_key = "draft" if model is Draft else "share_draft"
         counts[table_key] += _delete(model, col.in_(ids), scope.rows(model))

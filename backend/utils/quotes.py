@@ -72,6 +72,18 @@ def find_ext_quote_ids(content: str) -> List[int]:
     return [int(item_id) for item_id in matches]
 
 
+def _web_link(url) -> bool:
+    """True for an http(s) link with a host."""
+    from urllib.parse import urlsplit
+    if not isinstance(url, str):
+        return False
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme.lower() in ("http", "https") and bool(parts.netloc)
+
+
 def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[dict]]:
     """Fetch external-item data for the given IDs, owner-only.
 
@@ -100,7 +112,9 @@ def get_ext_quote_data(item_ids: List[int], user_id: int) -> Dict[int, Optional[
             # The tweet card's byline (#435): display name, then handle.
             "author_name": item.author_name,
             "title": title,
-            "url": item.url,
+            # Only a web link is offered to open (rows stored before the
+            # import checked its links may hold another scheme).
+            "url": item.url if _web_link(item.url) else None,
             "posted_at": iso_utc(item.posted_at) if item.posted_at else None,
             # The reference's owner and their own read mark: the quote
             # bubble offers "Mark as read" only to the owner (the read

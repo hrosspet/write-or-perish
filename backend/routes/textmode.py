@@ -6,16 +6,18 @@ from backend.extensions import db
 from backend.utils.serialization import serialize_node_status
 from backend.utils.timefmt import iso_utc
 from backend.utils.tool_meta import tool_calls_meta_for
-from backend.utils.prompts import get_user_prompt_record
 from backend.utils.placeholders import UserExportValidationError
 from backend.utils.thread_size import ThreadTooLong, reply_skipped_fields
 from backend.utils.llm_nodes import (
+    TooManyReplies,
     ai_usage_refused_response, auto_generate_refusal, create_llm_placeholder,
     pick_model_for_generation, read_only_model_refusal,
     read_only_model_response, reply_ai_usage, reply_refusal,
 )
-from backend.utils.context_artifacts import attach_context_artifacts
-from backend.utils.session_helpers import attach_agentic_prompt_under
+from backend.utils.session_helpers import (
+    attach_agentic_prompt_under, create_agentic_root,
+)
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 from backend.utils.privacy import (
     can_user_see_node_or_placeholder, validate_ai_usage,
     validate_privacy_level,
@@ -24,6 +26,10 @@ from backend.utils.privacy import (
 textmode_bp = Blueprint("textmode", __name__)
 
 PROMPT_KEY = 'textmode'
+
+# Who can read a level, from fewest to most people; an unknown level
+# counts as private.
+_VISIBILITY = {"private": 0, "circles": 1, "public": 2}
 
 
 def _serialize_message(node, viewer_id):
@@ -49,7 +55,7 @@ def _serialize_message(node, viewer_id):
         "llm_model": node.llm_model,
         "llm_task_status": node.llm_task_status,
     }
-    if is_llm and node.tool_calls_meta:
+    if is_llm and node.tool_calls_meta_stored:
         meta = tool_calls_meta_for(node, viewer_id)
         if meta:
             msg["tool_calls_meta"] = meta
@@ -57,6 +63,7 @@ def _serialize_message(node, viewer_id):
 
 
 @textmode_bp.route("/start", methods=["POST"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def start_conversation():
     """
@@ -130,21 +137,11 @@ def start_conversation():
         if refused is not None:
             return read_only_model_response(refused)
 
-    # 1. System node with the textmode prompt
-    prompt_record = get_user_prompt_record(current_user.id, PROMPT_KEY)
-    system_node = Node(
-        user_id=current_user.id,
-        human_owner_id=current_user.id,
-        parent_id=None,
-        node_type="user",
-        privacy_level=privacy_level,
-        ai_usage=ai_usage,
-    )
-    db.session.add(system_node)
-    db.session.flush()
-    attach_context_artifacts(
-        system_node.id, current_user.id, prompt_record=prompt_record,
-    )
+    # 1. System node with the textmode prompt: Public only for a Public
+    # entry of an account whose default is Public
+    # (session_helpers.prompt_entry_privacy).
+    system_node = create_agentic_root(
+        current_user.id, PROMPT_KEY, privacy_level, ai_usage)
     # Started from the Glean card (#435): every turn offers Glean.
     from backend.utils.glean import stamp_glean_entry
     stamp_glean_entry(system_node, current_user, data.get("entry"))
@@ -168,6 +165,15 @@ def start_conversation():
         token_count=approximate_token_count(segments[0]),
     )
     user_node.set_content(segments[0])
+    if privacy_level == "public":
+        # A public entry is what the public listings show for its thread
+        # (utils/public_threads): the top of the thread under a private
+        # prompt root, the root's card under a public one. It gets its
+        # permalink slug at birth, as a typed public root does (POST
+        # /nodes/, #228).
+        from backend.utils.slugs import generate_unique_public_slug
+        user_node.public_slug = generate_unique_public_slug(
+            current_user.id, segments[0])
     db.session.add(user_node)
     db.session.flush()
     parts = split_node_into_chain(user_node, segments=segments)
@@ -226,9 +232,10 @@ def start_conversation():
                 "tip_id": tip_node.id,
                 "llm_error": str(e),
             }), 202
-        except ThreadTooLong as e:
+        except (ThreadTooLong, TooManyReplies) as e:
             # A first entry so large that its reply's prompt is over the
-            # limit (#648): the entry is kept, the reply skipped.
+            # limit (#648), or the account's replies in progress at their
+            # bound: the entry is kept, the reply skipped.
             db.session.commit()
             return jsonify({
                 "conversation_id": system_node.id,
@@ -327,6 +334,12 @@ def add_message(conversation_id):
         refusal = publish_refusal(content, current_user.id)
         if refusal is not None:
             return refusal
+        # A day's public replies under other people's posts.
+        from backend.utils.public_reply_limits import public_reply_refusal
+        refusal = public_reply_refusal(
+            current_user.id, last_node.id, privacy_level)
+        if refusal is not None:
+            return refusal
 
     # This route always replies: refused before the message is written
     # when the thread (or the message's own setting) keeps AI out.
@@ -385,9 +398,10 @@ def add_message(conversation_id):
             "user_node_id": user_node.id,
             "llm_error": str(e),
         }), 202
-    except ThreadTooLong as e:
-        # The thread's next prompt would be over the limit (#648): the
-        # message is kept, the reply skipped.
+    except (ThreadTooLong, TooManyReplies) as e:
+        # The thread's next prompt would be over the limit (#648), or the
+        # account's replies in progress are at their bound: the message is
+        # kept, the reply skipped.
         db.session.commit()
         return jsonify({
             "user_node_id": user_node.id,
@@ -466,9 +480,22 @@ def continue_from_node(node_id):
     The text counterpart of POST /voice/from-node.
 
     Body: { content: string, model?: string, auto_generate?: bool,
-            ai_usage?: string }.
-    Privacy comes from the node (``message_level``: every check below
-    reads that one variable). AI usage is the one the reply form sent,
+            ai_usage?: string, privacy_level?: string }.
+    Privacy is the one the reply form sent, whatever the node's level
+    is now (Peter, 2026-11-24: "The privacy form is clear and it should
+    be adhered to"): a form that still shows Private after the node was
+    made public in another tab saves a private message. A client that
+    sends none (an installed iPhone build, a page loaded earlier) gets
+    the node's, as before (``message_level``: every check below reads
+    that one variable). The prompt node attached under the node is
+    Public only when the message and the node are Public and the
+    account's default level is Public, else Private
+    (session_helpers.prompt_entry_privacy, given the more private of the
+    node's level and the message's), so nobody sees a prompt node whose
+    message they cannot read. An automatic reply follows the message's
+    level: none to a public or circles message, one to a private message
+    also under a public node (a private branch under a public node is
+    not a shared thread, #644). AI usage is the one the reply form sent,
     else the thread's with the read looked through (reply_ai_usage,
     #362): a read reply is 'chat' for the tweets it quotes, which says
     nothing about what the user writes under it.
@@ -496,11 +523,13 @@ def continue_from_node(node_id):
     node = Node.query.get_or_404(node_id)
     if node.human_owner_id != current_user.id:
         return jsonify({"error": "Unauthorized"}), 403
-    # Only under a node the user can open, the parent check of the other
-    # reply routes (POST /nodes/, save-as-node): a node of theirs in a
-    # shared thread that is closed to them gets the same 404.
-    from backend.utils.node_deletion import parent_visibility_error
-    err = parent_visibility_error(node, current_user.id)
+    # Nothing is written under a deleted node (410), as in POST /nodes/;
+    # the row is locked against a delete that is under way. Only under a
+    # node the user can open, the parent check of the other reply routes
+    # (assert_parent_alive runs parent_visibility_error): a node of theirs
+    # in a shared thread that is closed to them gets the same 404.
+    from backend.utils.node_deletion import assert_parent_alive
+    err = assert_parent_alive(node.id)
     if err is not None:
         return err
 
@@ -523,28 +552,46 @@ def continue_from_node(node_id):
         return jsonify({"error": f"Invalid ai_usage: {ai_usage}"}), 400
     if ai_usage == 'none':
         return ai_usage_refused_response()
-    # The level the message is stored with. The reply rules, the quote
-    # rule, the automatic reply and the prompt node all read this one
-    # variable.
-    message_level = node.privacy_level or "private"
+    # The level the message is stored with: the form's, else the node's.
+    # The reply rules, the quote rule, the automatic reply and the prompt
+    # node all read this one variable.
+    node_privacy = node.privacy_level or "private"
+    message_level = node_privacy
+    if data.get("privacy_level") is not None:
+        message_level = data["privacy_level"]
+        if (not isinstance(message_level, str)
+                or not validate_privacy_level(message_level)):
+            return jsonify(
+                {"error": f"Invalid privacy_level: {message_level}"}), 400
+    # The prompt node is no more visible than the node or the message.
+    prompt_privacy = min(node_privacy, message_level,
+                         key=lambda level: _VISIBILITY.get(level, 0))
     # Typed replies under a Glean follow the Circles reply rules, as a
     # typed or recorded reply does; refused before anything is written.
     from backend.utils import circles as cz
     refused = cz.new_reply_refusal(node, message_level, current_user)
     if refused is not None:
         return refused
-    # A message under a public node is public: it quotes only public
-    # nodes (Peter, 2026-11-12).
+    # A public message quotes only public nodes (Peter, 2026-11-12).
     if message_level == "public":
         from backend.utils.publish_quotes import publish_refusal
         refusal = publish_refusal(content, current_user.id)
         if refusal is not None:
             return refusal
+        # A day's public replies under other people's posts.
+        from backend.utils.public_reply_limits import public_reply_refusal
+        refusal = public_reply_refusal(
+            current_user.id, node.id, message_level)
+        if refusal is not None:
+            return refusal
     auto_generate = bool(data.get("auto_generate", True))
-    # No automatic reply in a public (or circles) thread: the message is
-    # written, the answer says why (Peter, 2026-11-12).
-    auto_off = (auto_generate_refusal(privacy_level=message_level)
-                if auto_generate else None)
+    # No automatic reply to a public (or circles) message: the message is
+    # written, the answer says why (Peter, 2026-11-12). The reply would
+    # answer the message, so its level decides, as in save-as-node; with
+    # no level sent it is the node's.
+    auto_off = None
+    if auto_generate:
+        auto_off = auto_generate_refusal(privacy_level=message_level)
     if auto_off is not None:
         auto_generate = False
     if auto_generate:
@@ -585,7 +632,7 @@ def continue_from_node(node_id):
     prompt_node = None
     if not joined:
         prompt_node = attach_agentic_prompt_under(
-            node, current_user.id, PROMPT_KEY, message_level, ai_usage)
+            node, current_user.id, PROMPT_KEY, prompt_privacy, ai_usage)
         if prompt_node is not None:
             user_node.parent_id = prompt_node.id
     user_node.set_content(content)
@@ -636,9 +683,9 @@ def continue_from_node(node_id):
                 user_node.id, describe_exception(e))
             response["llm_error"] = str(e)
             return jsonify(response), 202
-        except ThreadTooLong as e:
-            # Over the limit (#648): the message is kept, the reply
-            # skipped.
+        except (ThreadTooLong, TooManyReplies) as e:
+            # Over the limit (#648), or the account's replies in progress
+            # at their bound: the message is kept, the reply skipped.
             db.session.commit()
             response.update(reply_skipped_fields(e))
             return jsonify(response), 202

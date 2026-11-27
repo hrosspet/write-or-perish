@@ -19,8 +19,14 @@ struct CurrentUser: Decodable, Equatable, Sendable {
     var preferredModel: String?
     var profileGenerationTaskId: String?
     var profileBatchPending: Bool
+    /// A pre-fill load's final merge still running after the person was let in
+    /// (#731): the profile watcher follows it as it follows a build.
+    var profileMergePending: Bool
     var defaultPrivacyLevel: PrivacyLevel
     var defaultAIUsage: AIUsage
+    /// Search by meaning is off because the account keeps its writing with this
+    /// provider and the search model is another one's (web `search_kept_to_provider`).
+    var searchKeptToProvider: String?
     var twitterLogin: Bool
     var twitterHandle: String?
     var pendingEmail: String?
@@ -72,8 +78,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         case preferredModel = "preferred_model"
         case profileGenerationTaskId = "profile_generation_task_id"
         case profileBatchPending = "profile_batch_pending"
+        case profileMergePending = "profile_merge_pending"
         case defaultPrivacyLevel = "default_privacy_level"
         case defaultAIUsage = "default_ai_usage"
+        case searchKeptToProvider = "search_kept_to_provider"
         case twitterLogin = "twitter_login"
         case twitterHandle = "twitter_handle"
         case pendingEmail = "pending_email"
@@ -113,8 +121,10 @@ struct CurrentUser: Decodable, Equatable, Sendable {
         preferredModel = c.tolerant(.preferredModel)
         profileGenerationTaskId = c.tolerant(.profileGenerationTaskId)
         profileBatchPending = c.tolerant(.profileBatchPending, default: false)
+        profileMergePending = c.tolerant(.profileMergePending, default: false)
         defaultPrivacyLevel = c.tolerant(.defaultPrivacyLevel, default: .private)
         defaultAIUsage = c.tolerant(.defaultAIUsage, default: .chat)
+        searchKeptToProvider = c.tolerant(.searchKeptToProvider)
         twitterLogin = c.tolerant(.twitterLogin, default: false)
         twitterHandle = c.tolerant(.twitterHandle)
         pendingEmail = c.tolerant(.pendingEmail)

@@ -11,6 +11,15 @@ import Foundation
 enum RecordingLimits {
     static let tooLongCode = "recording_too_long"
 
+    /// The most audio of one recording that is turned into text (backend
+    /// `MAX_TRANSCRIBED_SECONDS`, Peter 2026-11-21: two hours). Voice, which
+    /// does not read the transcription stream, says `tooLongMessage` once its
+    /// recording has this much audio (#736): the server counts the same thing,
+    /// the recording's decoded audio, never the time spent paused.
+    static let transcribedSeconds: Double = 2 * 60 * 60
+
+    static let tooLongMessage = "This recording is longer than two hours. The rest of it is saved as audio, but not turned into text."
+
     /// The 59-minute warning (#127; web `useLongRecordingWarning`). Nothing
     /// ends a recording at an hour: it names the two-hour transcription limit.
     static let longRecordingTitle = "You’ve been recording for 59 minutes"
@@ -21,7 +30,7 @@ enum RecordingLimits {
     static func untranscribedMessage(_ code: String?) -> String? {
         switch code {
         case tooLongCode?:
-            return "This recording is longer than two hours. The rest of it is saved as audio, but not turned into text."
+            return tooLongMessage
         default:
             return nil
         }

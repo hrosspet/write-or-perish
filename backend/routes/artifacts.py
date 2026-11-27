@@ -17,6 +17,7 @@ from backend.extensions import db
 from backend.models import NodeContextArtifact, UserArtifact
 from backend.utils.privacy import chat_at_most, shown_ai_usage, x_api_account
 from backend.utils.timefmt import iso_utc
+from backend.utils.request_size import LONG_TEXT_MAX_BODY_BYTES, body_limit
 
 # The answer for a deleted kind: the client says "This artifact was
 # deleted." instead of offering an empty artifact under its name (#603).
@@ -181,9 +182,22 @@ def artifact_viewed(kind):
 
 
 @artifacts_bp.route("/<kind>", methods=["PUT"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def update_artifact(kind):
-    """Create a new version of an artifact (creates the kind if new)."""
+    """Create a new version of an artifact (creates the kind if new).
+
+    ``base_content`` (optional): the text the edit form was opened on
+    ("" for an artifact with no version yet). When the latest version's
+    text is no longer that (a tick in place from another tab, a version
+    the AI wrote, a Save elsewhere), nothing is saved and the answer is
+    409 ``content_changed``; the form keeps the person's text and says
+    there is a newer version. A Save whose text is the one it was opened
+    on (only the description changed) saves the latest text with it.
+    Without it the content is saved as before (installed iPhone builds,
+    tabs opened before the change)."""
+    from backend.utils.content_base import (
+        base_content_of, content_changed_response)
     if not _KIND_RE.match(kind):
         return jsonify({"error": (
             "Invalid kind: use a short lowercase slug "
@@ -197,8 +211,27 @@ def update_artifact(kind):
     content = data.get("content")
     if content is None:
         return jsonify({"error": "Content is required"}), 400
+    base_content, bad_base = base_content_of(data)
+    if bad_base is not None:
+        return bad_base
 
     previous = UserArtifact.latest_for(current_user.id, kind)
+    if base_content is not None:
+        # Locked, then checked, as a tick (patch_artifact): a version added
+        # between the first read and the lock is caught by asking again.
+        if previous is not None:
+            previous = UserArtifact.query.filter_by(id=previous.id) \
+                .populate_existing().with_for_update().one()
+            newest = UserArtifact.latest_for(current_user.id, kind)
+            if newest is None or newest.id != previous.id:
+                db.session.rollback()
+                return content_changed_response()
+        stored = (previous.get_content() or "") if previous else ""
+        if content == base_content:
+            content = stored
+        elif stored != base_content:
+            db.session.rollback()
+            return content_changed_response()
     title = (data.get("title") or "").strip()
     if not title:
         title = (previous.title if previous
@@ -239,6 +272,7 @@ def update_artifact(kind):
 
 
 @artifacts_bp.route("/<kind>", methods=["PATCH"])
+@body_limit(LONG_TEXT_MAX_BODY_BYTES)
 @login_required
 def patch_artifact(kind):
     """Save a checklist toggle or a "+" insert from the artifacts page.
@@ -250,7 +284,16 @@ def patch_artifact(kind):
     means "this exact version was in that session's context"), the
     change becomes a new user version instead, and later clicks edit
     that one.
+
+    ``base_content`` (optional): the text the page showed before the
+    click (#795). When the latest version's text is no longer that (an
+    in-place edit from another tab, a new version from the AI or a Save),
+    nothing is written and the answer is 409 ``{"error", "code":
+    "content_changed"}``; the page undoes the click and asks for a reload.
+    Without it the content is saved as before (tabs opened before #795).
     """
+    from backend.utils.content_base import (
+        base_content_of, content_changed_response)
     refusal = _reserved_kind_refusal(kind)
     if refusal is not None:
         return refusal
@@ -258,12 +301,27 @@ def patch_artifact(kind):
     content = data.get("content")
     if content is None:
         return jsonify({"error": "Content is required"}), 400
+    base_content, bad_base = base_content_of(data)
+    if bad_base is not None:
+        return bad_base
 
     latest = UserArtifact.latest_for(current_user.id, kind)
     if latest is None:
         # A checklist click on a page left open after the delete in
         # another tab saves nothing (#603).
         return jsonify({"error": "Artifact not found"}), 404
+
+    if base_content is not None:
+        # Locked, then checked: two clicks from two tabs can't both pass.
+        # The latest is asked again under the lock, for a version added
+        # between the first read and the lock.
+        latest = UserArtifact.query.filter_by(id=latest.id) \
+            .populate_existing().with_for_update().one()
+        newest = UserArtifact.latest_for(current_user.id, kind)
+        if (newest is None or newest.id != latest.id
+                or (latest.get_content() or "") != base_content):
+            db.session.rollback()
+            return content_changed_response()
 
     pinned = NodeContextArtifact.query.filter_by(
         artifact_type="user_artifact", artifact_id=latest.id,
@@ -299,6 +357,13 @@ def get_artifact_versions(kind):
     rows = UserArtifact.live().filter_by(
         user_id=current_user.id, kind=kind
     ).order_by(UserArtifact.created_at.desc(), UserArtifact.id.desc()).all()
+
+    # Each version's title and description are read, not its text: the
+    # keys in one concurrent batch (versions written one after another
+    # share a key, so this is usually one call).
+    from backend.utils.encryption import prefetch_deks
+    prefetch_deks([r.title_enc for r in rows]
+                  + [r.description_enc for r in rows])
 
     total = len(rows)
     versions = [
@@ -387,8 +452,6 @@ def revert_artifact(kind, version_id):
     new = UserArtifact(
         user_id=current_user.id,
         kind=kind,
-        title=old.title,
-        description=old.description,
         generated_by="revert",
         tokens_used=0,
         privacy_level=old.privacy_level,
@@ -399,6 +462,9 @@ def revert_artifact(kind, version_id):
     )
     # Copy the encrypted content directly (no decrypt/re-encrypt round).
     new.content = old.content
+    # After the text, so they are stored under the text's key.
+    new.title = old.title
+    new.description = old.description
     db.session.add(new)
     db.session.commit()
 

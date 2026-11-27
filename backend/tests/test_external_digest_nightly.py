@@ -40,11 +40,14 @@ from backend.models import (  # noqa: E402
 
 
 def _make_app():
+    from backend.config import Config
     app = Flask(__name__)
     app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///:memory:"
     app.config["SECRET_KEY"] = "test-secret"
     app.config["TESTING"] = True
     app.config["ANTHROPIC_API_KEY"] = "fake-key"
+    # The account's own models: Opus 5 for an account without a
+    # preference, GPT-6 Astra for an OpenAI one.
     app.config["DEFAULT_LLM_MODEL"] = "claude-opus-5"
     app.config["SUPPORTED_MODELS"] = {
         "claude-opus-5": {
@@ -59,7 +62,13 @@ def _make_app():
             "input_price_per_mtok": 10.0,
             "output_price_per_mtok": 50.0,
         },
+        # The digest's models, with their real entries (prices included).
+        "claude-sonnet-5.5": Config.SUPPORTED_MODELS["claude-sonnet-5.5"],
+        "gpt-6.2-sol": Config.SUPPORTED_MODELS["gpt-6.2-sol"],
     }
+    app.config["DIGEST_MODEL_ANTHROPIC"] = "claude-sonnet-5.5"
+    app.config["DIGEST_MODEL_OPENAI"] = "gpt-6.2-sol"
+    app.config["DIGEST_MAX_PROMPT_TOKENS"] = Config.DIGEST_MAX_PROMPT_TOKENS
     _db.init_app(app)
     return app
 
@@ -105,9 +114,14 @@ class _FakeSelf:
 
 
 @pytest.fixture
-def app():
+def app(monkeypatch):
     saved_flask_app = _digest.flask_app
     _digest.flask_app = _app
+    # The collector's listing of batch statuses (llm_batch.list_batches)
+    # shows nothing: each pending batch is read on its own, through the
+    # stand-ins each test installs. A test of the listing replaces it.
+    monkeypatch.setattr(_digest, "list_batches",
+                        lambda wanted, keys, oldest=None: {})
     with _app.app_context():
         _db.create_all()
         # In use: an account nobody used for a month is paused (#647).
@@ -199,20 +213,25 @@ def test_rebuild_skips_a_current_digest_without_calling_the_model(
     assert len(calls) == 1
 
 
-def test_rebuild_uses_the_configured_default_model(app, monkeypatch):
-    """Users without a preferred_model fall back to DEFAULT_LLM_MODEL —
-    the config key. (LLM_NAME is only the env var it reads from, and
-    asking config for it yielded None, i.e. no model at all.)"""
+def test_rebuild_uses_the_digest_model_of_the_default_models_provider(
+        app, monkeypatch):
+    """Users without a preferred_model are on DEFAULT_LLM_MODEL's
+    provider — the config key. (LLM_NAME is only the env var it reads
+    from, and asking config for it yielded None, i.e. no model at all.)
+    The digest runs on that provider's digest model (2026-11-24), not on
+    the default model itself."""
     uid = User.query.first().id
     _mk_item(uid, "a")
     calls = _stub_llm(monkeypatch)
 
     result = _digest.rebuild_external_digest(_FakeSelf(), uid)
     assert result["status"] == "ok"
-    assert calls[0]["model_id"] == "claude-opus-5"
+    assert calls[0]["model_id"] == "claude-sonnet-5.5"
     artifact = UserArtifact.latest_for(uid, _digest.DIGEST_KIND)
-    assert artifact.generated_by == "claude-opus-5"
-    assert APICostLog.query.one().request_type == "external_digest"
+    assert artifact.generated_by == "claude-sonnet-5.5"
+    log = APICostLog.query.one()
+    assert (log.request_type, log.model_id) == (
+        "external_digest", "claude-sonnet-5.5")
 
 
 def test_rebuild_stamps_the_corpus_state_not_the_finish_time(
@@ -262,12 +281,30 @@ def test_rebuild_does_not_retry_an_account_failure(app, monkeypatch):
     assert len(retried) == 1
 
 
+def _sent_custom_id(user_id):
+    """The custom_id of the user's newest digest request: each carries a
+    token of its own after the account's id (external_digest._custom_id)."""
+    job = max((j for j in ExternalDigestBatchJob.query.all()
+               if any(i["user_id"] == user_id for i in j.items)),
+              key=lambda j: j.id)
+    custom_id = next(i["custom_id"] for i in job.items
+                     if i["user_id"] == user_id)
+    assert custom_id.startswith(f"external-digest-{user_id}-")
+    return custom_id
+
+
+def _sent_users(submitted):
+    """The user ids of the requests a stubbed batch_submit received."""
+    return [r["user_id"] for call in submitted
+            for reqs in call.values() for r in reqs]
+
+
 def _stub_batch_submit(monkeypatch, batch_id="batch_1"):
     """batch_submit stand-in: records what was submitted and answers with
     one batch id per provider key, the way llm_batch keys them."""
     submitted = []
 
-    def fake_submit(requests_by_provider, api_keys, phase=None):
+    def fake_submit(requests_by_provider, api_keys, phase=None, tag=None):
         submitted.append(requests_by_provider)
         ids = {}
         for provider, reqs in requests_by_provider.items():
@@ -327,23 +364,29 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
     result = _digest.sweep_external_digests()
     assert result == {"status": "ok", "submitted": 2}
 
-    # One submit call, grouped by provider, one request per user.
-    assert len(submitted) == 1
-    by_provider = submitted[0]
+    # One request per user, each its own batch (Peter, 2026-11-25: "make
+    # it prepare and send the batch request one at a time").
+    assert len(submitted) == 2
+    assert all(len(reqs) == 1 for call in submitted
+               for reqs in call.values())
+    by_provider = {provider: reqs for call in submitted
+                   for provider, reqs in call.items()}
     assert [r["custom_id"] for r in by_provider["anthropic"]] == [
-        f"external-digest-{night_user.id}"]
+        _sent_custom_id(night_user.id)]
     assert [r["custom_id"] for r in by_provider["openai"]] == [
-        f"external-digest-{oai_user.id}"]
+        _sent_custom_id(oai_user.id)]
     prompt = by_provider["anthropic"][0]["messages"][0]["content"]
     assert "The corpus holds 20 saved items" in prompt
-    assert by_provider["openai"][0]["api_model"] == "gpt-6-astra"
+    # Each on its provider's digest model (2026-11-24).
+    assert by_provider["anthropic"][0]["model_id"] == "claude-sonnet-5.5"
+    assert by_provider["openai"][0]["api_model"] == "gpt-6.2-sol"
 
     # Each provider batch persisted with its own routing metadata.
     jobs = {j.provider_key: j for j in ExternalDigestBatchJob.query.filter_by(
         status="pending").all() if j.batch_id != "older"}
-    assert set(jobs) == {"anthropic", "openai:gpt-6-astra"}
+    assert set(jobs) == {"anthropic", "openai:gpt-6.2-sol"}
     assert jobs["anthropic"].items[0]["user_id"] == night_user.id
-    assert jobs["openai:gpt-6-astra"].items[0]["model_id"] == "gpt-6-astra"
+    assert jobs["openai:gpt-6.2-sol"].items[0]["model_id"] == "gpt-6.2-sol"
 
     # Nothing is billed at submit time, and the sync path was not used.
     assert APICostLog.query.count() == 0
@@ -352,7 +395,7 @@ def test_nightly_sweep_submits_one_batch_request_per_stale_user_in_their_night(
     # now in a pending batch.
     assert _digest.sweep_external_digests() == {"status": "ok",
                                                 "submitted": 0}
-    assert len(submitted) == 1
+    assert len(submitted) == 2
 
 
 def test_account_opted_out_of_ai_gets_no_digest(app, monkeypatch):
@@ -935,7 +978,8 @@ def test_direct_rebuild_logs_the_cost_of_an_empty_output(app, monkeypatch):
     log = APICostLog.query.one()
     assert log.request_type == "external_digest"
     assert log.request_ref == REFUSED_REF   # cut off before any text
-    assert log.cost_microdollars == 7500    # full price, direct call
+    # Full price (direct call) on Sonnet 5.5: 1000 x $2 + 100 x $10.
+    assert log.cost_microdollars == 3000
     assert _digest.digest_is_stale(uid) is True
 
 
@@ -1010,9 +1054,10 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
 
     def refuse_round():
         res = _digest.sweep_external_digests()
+        custom_id = _sent_custom_id(user.id)
         monkeypatch.setattr(
             _digest, "batch_check_and_collect",
-            lambda ids, keys: ({f"external-digest-{user.id}": {
+            lambda ids, keys: ({custom_id: {
                 "content": "I can't", "refused": True,
                 "input_tokens": 1000, "output_tokens": 5}}, {}, {}))
         _digest._collect_digest_batches()
@@ -1023,8 +1068,12 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
     assert len(submitted) == 1 and APICostLog.query.count() == 1
     assert stops == []
 
+    # A later night (the sweep takes an account once a night, A.141):
+    # the batch went out the night before.
     APICostLog.query.update({"created_at": datetime.utcnow()
                              - timedelta(hours=1, minutes=1)})
+    ExternalDigestBatchJob.query.update({"submitted_at": datetime.utcnow()
+                                         - timedelta(days=1)})
     _db.session.commit()
     assert refuse_round() == 1                   # the one more try
     assert len(stops) == 1                       # second refusal: stopped
@@ -1032,6 +1081,8 @@ def test_refused_digest_backs_off_and_is_not_billed_every_night(
 
     APICostLog.query.update({"created_at": datetime.utcnow()
                              - timedelta(days=2)})
+    ExternalDigestBatchJob.query.update({"submitted_at": datetime.utcnow()
+                                         - timedelta(days=2)})
     _db.session.commit()
     for _ in range(3):
         assert _digest.sweep_external_digests()["submitted"] == 0
@@ -1059,7 +1110,7 @@ def test_policy_blocked_digest_is_never_resubmitted_by_the_sweep(
             for r in reqs] == [user.id]
 
     class Collected(dict):
-        blocked = {f"external-digest-{user.id}": "bio_policy"}
+        blocked = {_sent_custom_id(user.id): "bio_policy"}
     monkeypatch.setattr(_digest, "batch_check_and_collect",
                         lambda ids, keys: (Collected(), {}, {}))
     _digest._collect_digest_batches()
@@ -1068,8 +1119,11 @@ def test_policy_blocked_digest_is_never_resubmitted_by_the_sweep(
     assert row.request_ref == "policy_block:bio_policy"
     assert row.cost_microdollars == 0
     assert [r[:2] for r in reports] == [(user.id, "bio_policy")]
+    # Later nights: the block, not the once-a-night rule, holds it back.
     APICostLog.query.update({"created_at": datetime.utcnow()
                              - timedelta(days=3)})
+    ExternalDigestBatchJob.query.update({"submitted_at": datetime.utcnow()
+                                         - timedelta(days=3)})
     _db.session.commit()
     for _ in range(3):
         assert _digest.sweep_external_digests()["submitted"] == 0
@@ -1133,8 +1187,7 @@ def test_no_digest_for_an_account_nobody_used_for_a_month(app, monkeypatch):
     assert _digest.sweep_external_digests() == {"status": "ok",
                                                 "submitted": 1}
     requests_ = submitted[0]["anthropic"]
-    assert [r["custom_id"] for r in requests_] == [
-        f"external-digest-{away.id}"]
+    assert [r["user_id"] for r in requests_] == [away.id]
     assert ("The corpus holds 13 saved items"
             in requests_[0]["messages"][0]["content"])
 
@@ -1172,5 +1225,4 @@ def test_payments_on_the_sweep_needs_both_use_and_the_paid_set(
 
     assert _digest.sweep_external_digests() == {"status": "ok",
                                                 "submitted": 1}
-    assert [r["custom_id"] for r in submitted[0]["anthropic"]] == [
-        f"external-digest-{users['tester'].id}"]
+    assert _sent_users(submitted) == [users['tester'].id]

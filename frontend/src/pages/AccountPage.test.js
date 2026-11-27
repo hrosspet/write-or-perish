@@ -154,6 +154,12 @@ test('the outcome of the round trip is shown', () => {
   expect(screen.getByText(/already signs in to another Loore account/)).toBeTruthy();
 });
 
+test('Connect X started many times from one network says to wait', () => {
+  Element.prototype.scrollIntoView = jest.fn();
+  renderAt('/account?x_login=wait#x');
+  expect(screen.getByText(/Please wait a few minutes, then try again/)).toBeTruthy();
+});
+
 test('an unknown outcome shows nothing', () => {
   renderAt('/account?x_login=bogus');
   expect(screen.queryByText(/X connected|not connected|another Loore account/)).toBeNull();

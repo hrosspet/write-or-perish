@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import Observation
 import os
 
@@ -109,14 +110,20 @@ final class AppState {
     private var pendingLandingPath: String?
     private let secureStore: SecureStore
     private let defaults: UserDefaults
+    /// Whether the app's data showed an earlier run when this launch began (`InstallCheck`).
+    private let earlierInstallData: Bool
     private let log = Logger(subsystem: "org.loore.app", category: "app")
 
     init(launch: LaunchOptions = .current,
          secureStore: SecureStore = KeychainStore(),
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard,
+         earlierInstallData: Bool? = nil) {
         self.launch = launch
         self.secureStore = secureStore
         self.defaults = defaults
+        // Read before `ChunkUploader.shared` (below) creates its folder.
+        self.earlierInstallData = earlierInstallData
+            ?? InstallCheck.hasEarlierData(defaults: defaults, uploadsFolder: ChunkUploader.defaultRoot)
         let env = AppEnvironment.resolveCurrent(launch: launch)
         environment = env
         let api = APIClient(environment: env)
@@ -145,11 +152,13 @@ final class AppState {
         profileWatcher.clearUserFlags = { [weak self] in
             self?.user?.profileGenerationTaskId = nil
             self?.user?.profileBatchPending = false
+            self?.user?.profileMergePending = false
         }
-        profileWatcher.fetch = { [weak self] taskId in
+        profileWatcher.fetch = { [weak self] taskId, mergeId in
             guard let api = self?.api else { throw CancellationError() }
-            let query = taskId.map { [URLQueryItem(name: "task_id", value: $0)] } ?? []
-            return try await api.get(APIPath.profileProgress, query: query, poll: true)
+            return try await api.get(APIPath.profileProgress,
+                                     query: ProfileGenerationWatcher.query(taskId: taskId, mergeId: mergeId),
+                                     poll: true)
         }
         nodeTitles.fetch = { [weak self] ids in
             guard let api = await self?.api else { throw CancellationError() }
@@ -189,6 +198,15 @@ final class AppState {
             for cookie in api.cookieStorage.cookies ?? [] { api.cookieStorage.deleteCookie(cookie) }
         }
         #endif
+        // Recorded audio of a deleted account whose 30 days have ended (#777).
+        audio.uploader.removeEnded()
+        // The first launch after an install forgets the sign-in an earlier install
+        // left in the Keychain; an update keeps it (`InstallCheck`). Not while the
+        // phone's storage is locked: UserDefaults may not be readable then, and the
+        // check runs at the next launch instead.
+        if UIApplication.shared.isProtectedDataAvailable {
+            InstallCheck.run(defaults: defaults, store: secureStore, hasEarlierData: earlierInstallData)
+        }
         auth.startObservingCookies()
         #if DEBUG
         if let cookie = launch.sessionCookie {
@@ -200,6 +218,7 @@ final class AppState {
         auth.restoreStoredCookies()
         #endif
         guard auth.hasAuthCookies else {
+            DeviceChoices.signedOutAtLaunch(defaults: defaults)
             phase = .signedOut
             return
         }
@@ -214,8 +233,8 @@ final class AppState {
             let dashboard: DashboardResponse = try await api.get(
                 APIPath.dashboard, query: [URLQueryItem(name: "profile", value: "0")])
             didLoad(dashboard.user)
-        } catch APIError.unauthorized {
-            await signOutLocally()
+        } catch APIError.unauthorized(let deleted) {
+            await signOutLocally(deleted: deleted)
         } catch let error as APIError {
             log.error("dashboard load failed: status \(error.status ?? -1)")
             if phase != .signedIn {
@@ -230,6 +249,8 @@ final class AppState {
 
     /// Applies a fresh user object and runs the once-per-launch steps (design doc §4.5).
     func didLoad(_ newUser: CurrentUser) {
+        // Before any form reads them: remembered choices stay with their account.
+        DeviceChoices.signedIn(userId: newUser.id, defaults: defaults)
         user = newUser
         phase = .signedIn
         // Waiting for approval, the account cannot open the page its
@@ -246,7 +267,7 @@ final class AppState {
         syncTimezoneIfNeeded()
         fetchUpdatesIfNeeded()
         openLaunchRouteIfReady()
-        audio.didSignIn()
+        audio.didSignIn(account: newUser.id)
         if newUser.approved, !newUser.notLetIn { profileWatcher.userLoaded(newUser) }
     }
 
@@ -419,7 +440,16 @@ final class AppState {
     /// (401s) do not start a second sign-out, and leaving the page never
     /// waits for the web data removal.
     func accountDeletionScheduled(deleteOn: Date?) async {
-        resetSessionState(to: .accountDeleted(deleteOn: deleteOn))
+        // Recorded audio not yet on the server stays while the account can
+        // be restored, and goes when it no longer can (#777). Without the
+        // server's date: the grace period from now, as the page says.
+        let deleted = user.map { user in
+            DeletedAccount(account: user.id,
+                           deleteOn: deleteOn ?? AccountDeletion.dateAfter(days: user.accountDeletion?.graceDays ?? 30),
+                           restorable: true)
+        }
+        resetSessionState(to: .accountDeleted(deleteOn: deleteOn),
+                          unsentAudio: deleted.map(AudioCenter.UnsentAudio.keepUntilDeleted) ?? .keep)
         await auth.clearLocalSession()
     }
 
@@ -443,20 +473,45 @@ final class AppState {
         await signOutLocally()
     }
 
-    /// Logout: `GET /auth/logout`, then forget everything local.
+    /// Logout: `GET /auth/logout`, then forget everything local, with this
+    /// account's recorded audio that has not reached the server (#763: a
+    /// button asks first, `requestSignOut`).
     func signOut() async {
+        let account = user?.id
         await auth.signOut()
-        resetSessionState()
+        resetSessionState(unsentAudio: .delete(account: account))
     }
 
-    /// Forget everything local without calling the server (after a 401).
-    func signOutLocally() async {
+    /// Forget everything local without calling the server: the server refused
+    /// the sign-in (a 401), or the person left the restore question. Recorded
+    /// audio not yet on the server stays on the phone and is sent when the same
+    /// account signs in again (#763). When the 401 said the account is
+    /// deleted (`deleted`), it stays only while the account can be restored
+    /// (#777).
+    func signOutLocally(deleted: DeletedAccount? = nil) async {
         await auth.clearLocalSession()
-        resetSessionState()
+        resetSessionState(unsentAudio: deleted.map(AudioCenter.UnsentAudio.keepUntilDeleted) ?? .keep)
     }
 
-    private func resetSessionState(to newPhase: Phase = .signedOut) {
-        audio.signedOut()
+    /// Whether Logout would delete recorded audio of this account that has not
+    /// reached Loore (#763; any account's when the user could not be loaded).
+    var signOutDeletesUnsentAudio: Bool { audio.uploader.holdsUnsentAudio(account: user?.id) }
+
+    /// A sign-out button (#763): signs out at once, or, when this phone holds
+    /// audio of the account that has not reached Loore, sets `question` so
+    /// the screen asks first (`signOutQuestion`).
+    /// - Returns: the sign-out when it started at once.
+    @discardableResult
+    func requestSignOut(question: Binding<Bool>) -> Task<Void, Never>? {
+        guard !signOutDeletesUnsentAudio else {
+            question.wrappedValue = true
+            return nil
+        }
+        return Task { await signOut() }
+    }
+
+    private func resetSessionState(to newPhase: Phase = .signedOut, unsentAudio: AudioCenter.UnsentAudio) {
+        audio.signedOut(unsentAudio: unsentAudio)
         user = nil
         phase = newPhase
         spendCapped = false
@@ -514,9 +569,14 @@ final class AppState {
 
     func handle(_ event: APIEvent) {
         switch event {
-        case .unauthorized:
-            guard phase == .signedIn else { return }
-            Task { await signOutLocally() }
+        case .unauthorized(let deleted):
+            guard phase == .signedIn else {
+                // Signed out already, or while one is under way: what the
+                // answer says about a deleted account still applies (#777).
+                if let deleted { audio.uploader.accountDeleted(deleted) }
+                return
+            }
+            Task { await signOutLocally(deleted: deleted) }
         case .spendCapped(let message):
             spendCapped = true
             spendCapBannerMessage = message

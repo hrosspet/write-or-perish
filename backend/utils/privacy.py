@@ -716,18 +716,31 @@ def reply_context_nodes(parent_node, user_id, in_shared_thread=False):
     written in a shared thread (*in_shared_thread*), which reads what its
     requester reads there.
 
+    One kind of node is passed through instead of ending the walk: a
+    prompt entry *user_id* may not read whose owner also wrote the node
+    under it in the chain (Text mode continued inside a public thread,
+    utils/public_threads.passes_through). It is left out, never read,
+    and the walk goes on above it, each node there checked by the same
+    rule (as_ai included).
+
     The one walk for the completion task (llm_completion._load_node_chain)
     and for the agreement before an AI reply in a shared thread
     (circles.ai_reply_reads): what the dialog names is worked out from
     the nodes the reply is built from."""
+    from backend.utils.public_threads import passes_through
     as_ai = not in_shared_thread
     visible = []
     current = parent_node
     if current is not None and not can_user_see_node_or_tombstone(
             current, user_id, as_ai=as_ai):
         current = None
-    while current and can_user_see_node_or_placeholder(
-            current, user_id, as_ai=as_ai):
+    while current:
+        if not can_user_see_node_or_placeholder(
+                current, user_id, as_ai=as_ai):
+            if visible and passes_through(current, visible[0]):
+                current = current.parent
+                continue
+            break
         visible.insert(0, current)
         current = current.parent
     return visible

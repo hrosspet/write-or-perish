@@ -25,6 +25,21 @@ logger = logging.getLogger(__name__)
 auth_bp = Blueprint("auth_bp", __name__)
 
 
+def _loaded_into_a_page():
+    """True when the browser says this request loads something into a
+    page (an image, a script, a fetch) rather than opening it: the
+    Sec-Fetch-Dest header is there and is not "document". Signing in
+    with a link and signing out happen only when the URL is opened.
+    Clients that send no Sec-Fetch headers (the iPhone app, mail apps
+    opening links first) are not affected."""
+    dest = request.headers.get("Sec-Fetch-Dest")
+    return dest is not None and dest != "document"
+
+
+def _not_opened_as_a_page():
+    return jsonify({"error": "Open this link in the browser."}), 403
+
+
 def is_safe_redirect_url(target):
     """True when *target* is a page inside Loore that a sign-in (or a sign-
     out) may send the browser to: backend/utils/destination.py, the one
@@ -271,6 +286,18 @@ def refuse_x_callback():
     if _pop_connect_intent():
         return _account_redirect("failed")
     return _back_to_sign_in("x_try_again")
+
+
+def refuse_x_start():
+    """Response for a Sign in with X or Connect X start over the
+    per-client limit (backend/oauth.py, before anything is asked of X):
+    Connect X goes back to the Account page ("wait"), a sign-in to the
+    sign-in page ("x_wait"), still on the way to where it started; both
+    pages say to wait a few minutes. An invite code waiting in the
+    session stays."""
+    if session.pop(X_CONNECT_SESSION_KEY, None) is not None:
+        return _account_redirect("wait")
+    return _back_to_sign_in("x_wait")
 
 
 def _back_to_sign_in(error):
@@ -587,6 +614,8 @@ def _link_sent_answer():
 
 @auth_bp.route("/magic-link/verify")
 def magic_link_verify():
+    if _loaded_into_a_page():
+        return _not_opened_as_a_page()
     frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:3000")
     token = request.args.get("token", "")
 
@@ -727,6 +756,8 @@ def invite_choice_cancel():
 @auth_bp.route("/logout")
 @login_required
 def logout():
+    if _loaded_into_a_page():
+        return _not_opened_as_a_page()
     logout_user()
     # Drop flask-dance's stored X token as well. Left in the session, the
     # next "Sign in with X" in this browser skipped X and went straight

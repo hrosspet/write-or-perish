@@ -33,7 +33,7 @@ from backend.utils.glean import glean_user_fields
 from backend.utils.circles import circles_user_fields
 from backend.utils.profile_providers import (
     both_providers_answer, both_providers_ask, profile_provider,
-    set_both_providers)
+    search_kept_to_provider, set_both_providers)
 
 logger = logging.getLogger(__name__)
 dashboard_bp = Blueprint("dashboard_bp", __name__)
@@ -104,6 +104,10 @@ def _serialize_current_user():
         # Batch-pipeline builds set no task id (#258); the watcher starts
         # polling /export/profile-progress on either flag.
         "profile_batch_pending": bool(current_user.profile_batch_pending),
+        # A pre-fill load's final merge still running after the person was
+        # let in (#731): the watcher follows it as it follows a build, and
+        # gives the usual notice when its version lands.
+        "profile_merge_pending": _late_merge_pending(current_user.id),
         "default_privacy_level": current_user.default_privacy_level,
         "default_ai_usage": current_user.default_ai_usage,
         "twitter_login": bool(current_user.twitter_id),
@@ -162,6 +166,10 @@ def _serialize_current_user():
             current_user.profile_both_providers_answered_at),
         "profile_provider": profile_provider(current_user),
         "ask_both_providers": both_providers_ask(current_user),
+        # Search by meaning is off for an account that keeps to a
+        # provider other than the embedding model's: that provider's
+        # id, else null.
+        "search_kept_to_provider": search_kept_to_provider(current_user),
         # "Delete all my content" (#268): a scheduled deletion shows
         # its date and a way to cancel on every page.
         "data_deletion": deletion_status(current_user.id),
@@ -191,6 +199,11 @@ def _starting_point(user_id):
     return starting_point(user_id)
 
 
+def _late_merge_pending(user_id):
+    from backend.utils.prefill_bundle_merge import late_merge
+    return late_merge(user_id) is not None
+
+
 @dashboard_bp.route("/starting-point", methods=["GET"])
 @login_required
 def get_starting_point():
@@ -215,6 +228,12 @@ def get_starting_point():
 @dashboard_bp.route("/", methods=["GET"])
 @login_required
 def get_dashboard():
+    # The person's visit after their account was held as spam (#732): a
+    # pre-fill bundle load the hold stopped, or their Yes it kept, goes on
+    # now, so the payload below already says "checking" or "preparing".
+    # Nothing for an account with no Yes or no X id; never fails.
+    from backend.utils.prefill_bundle_load import resume_after_hold
+    resume_after_hold(current_user)
     dashboard = {
         "user": _serialize_current_user(),
     }

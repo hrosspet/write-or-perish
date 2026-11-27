@@ -8,7 +8,9 @@ a web tab from before the deploy, a direct call) is refused with 400
 which can be another provider. The routes that write the user's entry
 first refuse before writing; a finished Voice recording and a saved
 dictation keep the entry and say why there is no reply. A read turn still
-runs on the read-only model (test_read_routes.TestReadOnlyModels).
+runs on the read-only model (test_read_routes.TestReadOnlyModels). A Voice
+turn that continues a thread does not use the model it is sent: it runs on
+the thread's (#784), so only a new Voice thread can be refused here.
 
 Same harness as test_no_replies_for_none (minimal Flask app, completion
 task module stubbed, the finalize task body run with the celery glue
@@ -178,11 +180,15 @@ class TestVoiceRoutes:
         assert Node.query.count() == 0
         tasks.generate_llm_response.delay.assert_not_called()
 
-    def test_continued_turn_refused_and_its_audio_stays_in_the_draft(
-            self, ro, tasks, no_provider):
+    # A turn that continues a thread runs on the thread's model whatever
+    # model the client sent (#784, voice_turn_model): a read-only one sent
+    # there is not used, so there is nothing to refuse, and the reply is
+    # not moved off the thread's model either.
+
+    def test_a_continued_turn_runs_on_the_threads_model(self, ro, tasks):
         alice = _user()
         root = _prompt_root(alice, "voice")
-        reply = _reply(_node(alice, root), alice)
+        reply = _reply(_node(alice, root), alice)  # on gpt-5
         session_id = str(uuid.uuid4())
         draft = Draft(user_id=alice.id, session_id=session_id,
                       streaming_status="completed", label="Voice",
@@ -190,34 +196,36 @@ class TestVoiceRoutes:
         draft.set_content("spoken words")
         _db.session.add(draft)
         _db.session.commit()
-        before = Node.query.count()
-        _refused(_client(ro, alice).post("/api/voice/", json={
+        resp = _client(ro, alice).post("/api/voice/", json={
             "content": "spoken words", "parent_id": reply.id,
-            "session_id": session_id, "model": "gpt-6.1-sol"}))
-        assert Node.query.count() == before
-        assert Draft.query.filter_by(session_id=session_id).count() == 1
-        tasks.generate_llm_response.delay.assert_not_called()
+            "session_id": session_id, "model": "gpt-6.1-sol"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model \
+            == "gpt-5"
+        tasks.generate_llm_response.delay.assert_called_once()
 
-    def test_from_node_refused(self, ro, tasks, no_provider):
+    def test_from_node_runs_on_the_threads_model(self, ro, tasks):
         alice = _user()
         root = _prompt_root(alice, "voice")
-        msg = _node(alice, root)
+        msg = _node(alice, _reply(_node(alice, root), alice))
         _db.session.commit()
-        before = Node.query.count()
-        _refused(_client(ro, alice).post(
-            f"/api/voice/from-node/{msg.id}", json={"model": "gpt-6.1-sol"}))
-        assert Node.query.count() == before
-        tasks.generate_llm_response.delay.assert_not_called()
+        resp = _client(ro, alice).post(
+            f"/api/voice/from-node/{msg.id}", json={"model": "gpt-6.1-sol"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model \
+            == "gpt-5"
 
-    def test_from_node_without_a_prompt_refused(self, ro, tasks):
+    def test_from_node_without_a_prompt_runs_on_the_threads_model(
+            self, ro, tasks):
         # The branch that adds a Voice prompt under the node first.
         alice = _user()
-        plain = _node(alice)
+        plain = _node(alice, _reply(_node(alice), alice))
         _db.session.commit()
-        before = Node.query.count()
-        _refused(_client(ro, alice).post(
-            f"/api/voice/from-node/{plain.id}", json={"model": "gpt-6.1-sol"}))
-        assert Node.query.count() == before
+        resp = _client(ro, alice).post(
+            f"/api/voice/from-node/{plain.id}", json={"model": "gpt-6.1-sol"})
+        assert resp.status_code == 202, resp.get_json()
+        assert Node.query.get(resp.get_json()["llm_node_id"]).llm_model \
+            == "gpt-5"
 
 
 class TestVoiceFinalize:

@@ -817,6 +817,8 @@ def _as_ended(user):
             "customer": user.stripe_customer_id,
             "status": "canceled", "metadata": meta,
             "items": {"data": [{
+                "current_period_start": stamp(
+                    user.subscription_period_start),
                 "current_period_end": stamp(user.subscription_period_end)}]},
             "trial_start": stamp(user.subscription_trial_start),
             "trial_end": stamp(user.subscription_trial_end)}
@@ -897,7 +899,9 @@ def _apply_payment_state(user, sub, status):
     "Paid once" (User.subscription_ever_paid) is not set here: Stripe
     makes a subscription active when its trial ends and charges the
     first invoice about an hour later, so active is not proof of a
-    payment. Only a paid invoice above zero sets it (handle_event)."""
+    payment. Only a paid invoice above zero sets it (record_payment:
+    invoice.paid, or the hourly read in utils/period_reread when that
+    event was lost)."""
     # An alpha tester before their first paid invoice (#438) has one
     # ceiling from the free month's start; a subscription that arrives
     # meanwhile does not start it again.
@@ -935,6 +939,7 @@ def apply_subscription(sub, config=None):
     when the ceiling changed, the spend block): never ``plan`` or an
     admin's limit. Does not commit."""
     from backend.utils.spend import (
+        carry_into_next_period, ceiling_period_start,
         get_user_spend_limit_usd, reconcile_user_spend_block)
     cfg = _config(config)
     user = _user_for_subscription(sub)
@@ -964,11 +969,14 @@ def apply_subscription(sub, config=None):
                     sub.get("status"), user.id)
         return user
     limit_before = get_user_spend_limit_usd(user, cfg)
+    ceiling_period_before = ceiling_period_start(user)
 
     item = _first_item(sub)
     level = level_for_price(item.get("price"), sub.get("metadata"))
     period_end = _ts(item.get("current_period_end")
                      or sub.get("current_period_end"))
+    period_start = _ts(item.get("current_period_start")
+                       or sub.get("current_period_start"))
     cancel_at = _ts(sub.get("cancel_at"))
     cancelling = bool(sub.get("cancel_at_period_end")) or cancel_at is not None
     _apply_payment_state(user, sub, status)
@@ -976,6 +984,7 @@ def apply_subscription(sub, config=None):
     user.subscription_level = level
     user.subscription_status = status
     user.subscription_period_end = cancel_at or period_end
+    user.subscription_period_start = period_start
     user.subscription_trial_end = _ts(sub.get("trial_end"))
     user.subscription_cancel_at_period_end = cancelling and status != "ended"
     user.subscription_trial_start = _ts(sub.get("trial_start"))
@@ -991,7 +1000,14 @@ def apply_subscription(sub, config=None):
         customer = sub.get("customer")
         user.stripe_customer_id = (customer.get("id")
                                    if isinstance(customer, dict) else customer)
-    if get_user_spend_limit_usd(user, cfg) != limit_before:
+    if (get_user_spend_limit_usd(user, cfg) != limit_before
+            or ceiling_period_start(user) != ceiling_period_before):
+        # A new ceiling, or a new period to count it over (a renewal):
+        # what the ended period counted above the ceiling it ran under
+        # (the level before a change of level) goes into the new one,
+        # and the block follows what is counted now.
+        carry_into_next_period(user, cfg, ceiling_period_before,
+                               limit_before)
         reconcile_user_spend_block(user, cfg)
     return user
 
@@ -1360,28 +1376,39 @@ def handle_event(gateway, event, config=None):
     if (user is not None and etype in ("invoice.paid",
                                        "invoice.payment_succeeded")
             and user.stripe_subscription_id == sub_id):
-        # The only proof of a payment (see _apply_payment_state): an
-        # invoice above zero, paid. Customer credit (a referral's free
-        # week, #439) can pay all of one, so its total counts, not only
-        # what the card paid. The trial's ceiling ends with it, and the
-        # monthly ceiling may change with it (an alpha tester's is
-        # Standard's until the first payment, #438): a block that the new
-        # ceiling no longer warrants is lifted.
-        if ((obj.get("amount_paid") or 0) > 0
-                or (obj.get("total") or 0) > 0):
-            from backend.utils.spend import (
-                get_user_spend_limit_usd, reconcile_user_spend_block)
-            cfg = _config(config)
-            limit_before = get_user_spend_limit_usd(user, cfg)
-            user.subscription_ever_paid = True
-            user.subscription_trial_capped = False
-            if get_user_spend_limit_usd(user, cfg) != limit_before:
-                reconcile_user_spend_block(user, cfg)
+        if paid_above_zero(obj):
+            record_payment(user, config)
         # The friend's first payment by card gives the referral's free
         # weeks, once (#439).
         from backend.utils.referrals import grant_on_first_payment
         grant_on_first_payment(gateway, user, obj, config)
     return "applied" if user is not None else "no_account"
+
+
+def paid_above_zero(invoice):
+    """A paid invoice that counts as a payment: the only proof of one
+    (see _apply_payment_state). Customer credit (a referral's free week,
+    #439) can pay all of one, so its total counts, not only what the card
+    paid. A trial's invoice, of zero, does not."""
+    return ((invoice.get("amount_paid") or 0) > 0
+            or (invoice.get("total") or 0) > 0)
+
+
+def record_payment(user, config=None):
+    """The account paid (paid_above_zero, an invoice of its current
+    subscription), as invoice.paid records it: paid once, for good. The
+    trial's ceiling ends with it, and the monthly ceiling may change with
+    it (an alpha tester's is Standard's until the first payment, #438): a
+    block that the new ceiling no longer warrants is lifted. Nothing at
+    Stripe. Recording it again changes nothing. Does not commit."""
+    from backend.utils.spend import (
+        get_user_spend_limit_usd, reconcile_user_spend_block)
+    cfg = _config(config)
+    limit_before = get_user_spend_limit_usd(user, cfg)
+    user.subscription_ever_paid = True
+    user.subscription_trial_capped = False
+    if get_user_spend_limit_usd(user, cfg) != limit_before:
+        reconcile_user_spend_block(user, cfg)
 
 
 # ── Account deletion ────────────────────────────────────────────────────

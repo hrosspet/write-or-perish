@@ -158,6 +158,139 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "public")
     }
 
+    /// Peter, 2026-11-24: a Private reply under one's own Public entry "shouldn't be
+    /// refused, they should adhere to the form's selection". The parent is the
+    /// user's (id 5): an entry they wrote, or an AI reply they asked for.
+    private func stubParent(_ json: String) {
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path(percentEncoded: true) ?? "") {
+            case ("GET", "/api/nodes/7"): return .json(200, json)
+            case ("GET", "/api/drafts/"): return .json(404, #"{"error":"No draft"}"#)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":8}"#)
+            default: return .json(200, "{}")
+            }
+        }
+    }
+
+    private static let ownPublicParents = [
+        #"{"id":7,"content":"p","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"public","ai_usage":"chat"}"#,
+        #"{"id":7,"content":"p","node_type":"llm","user":{"id":99,"username":"gpt-5"},"parent_user_id":5,"privacy_level":"public","ai_usage":"chat"}"#,
+    ]
+
+    func testAPrivateReplyUnderOnesOwnPublicNodeIsSentPrivate() async {
+        for parent in Self.ownPublicParents {
+            StubURLProtocol.reset()
+            stubParent(parent)
+            defaults.removeObject(forKey: DefaultsKey.publicReplyAck)
+            let (model, result) = form(NodeFormConfig(parentId: 7))
+            await model.start()
+            XCTAssertFalse(model.lockPrivacy)
+            XCTAssertEqual(model.privacy, .public)
+            model.privacy = .private
+            XCTAssertFalse(model.autoGenerateLocked)
+            model.content = "for me only"
+            await model.submit()
+            XCTAssertFalse(model.showPublicReplyDialog)
+            XCTAssertEqual(result()?.id, 8)
+            XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "private")
+        }
+    }
+
+    func testAPublicReplyUnderOnesOwnPublicNodeStillAsks() async {
+        stubParent(Self.ownPublicParents[0])
+        defaults.removeObject(forKey: DefaultsKey.publicReplyAck)
+        let (model, result) = form(NodeFormConfig(parentId: 7))
+        await model.start()
+        model.content = "for everyone"
+        await model.submit()
+        XCTAssertTrue(model.showPublicReplyDialog)
+        XCTAssertFalse(calls.contains("POST /api/nodes/"))
+        model.answerPublicReply()
+        await model.dialogSubmit?.value
+        XCTAssertEqual(result()?.id, 8)
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "public")
+    }
+
+    func testUnderSomeoneElsesPublicNodeTheReplyStaysLockedEvenIfTheHostGuessedOwn() async {
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":6,"username":"anna"},"privacy_level":"public","ai_usage":"chat"}"#)
+        var config = NodeFormConfig(parentId: 7)
+        config.parentOwned = true
+        let (model, _) = form(config)
+        await model.start()
+        XCTAssertTrue(model.lockPrivacy)
+        model.privacy = .private
+        XCTAssertEqual(model.effectivePrivacy, .public)
+    }
+
+    /// The user's edit wins: a Private and a None picked while the form's request
+    /// for the parent is still open stay when it answers, and are sent.
+    func testChoicesMadeBeforeTheParentLoadsAreKept() async {
+        let gate = DispatchSemaphore(value: 0)
+        let parent = Self.ownPublicParents[0]
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path(percentEncoded: true) ?? "") {
+            case ("GET", "/api/nodes/7"):
+                gate.wait()
+                return .json(200, parent)
+            case ("GET", "/api/drafts/"): return .json(404, #"{"error":"No draft"}"#)
+            case ("POST", "/api/nodes/"): return .json(201, #"{"id":8}"#)
+            default: return .json(200, "{}")
+            }
+        }
+        defaults.set("true", forKey: DefaultsKey.publicReplyAck)
+        var config = NodeFormConfig(parentId: 7)
+        config.parentPrivacy = .public
+        config.parentOwned = true
+        let (model, result) = form(config)
+        let starting = Task { await model.start() }
+        for _ in 0..<100 where model.parentPrivacy != .public { await Task.yield() }
+        XCTAssertFalse(model.lockPrivacy)
+        model.choosePrivacy(.private)
+        model.chooseAIUsage(.off)
+        gate.signal()
+        await starting.value
+        XCTAssertEqual(model.privacy, .private)
+        XCTAssertEqual(model.aiUsage, .off)
+        model.content = "for me only"
+        await model.submit()
+        XCTAssertEqual(result()?.id, 8)
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["privacy_level"] as? String, "private")
+        XCTAssertEqual(body(of: "POST /api/nodes/")?["ai_usage"] as? String, "none")
+    }
+
+    /// Untouched selectors still take the parent's settings, and someone else's
+    /// public parent still pins the reply to public whatever was picked.
+    func testTheParentsSettingsStillApplyWhereNothingWasChosenOrItIsLocked() async {
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":5,"username":"seowriter"},"privacy_level":"private","ai_usage":"none"}"#)
+        let (untouched, _) = form(NodeFormConfig(parentId: 7))
+        await untouched.start()
+        XCTAssertEqual(untouched.privacy, .private)
+        XCTAssertEqual(untouched.aiUsage, .off)
+
+        stubParent(#"{"id":7,"content":"p","node_type":"user","user":{"id":6,"username":"anna"},"privacy_level":"public","ai_usage":"chat"}"#)
+        let (theirs, _) = form(NodeFormConfig(parentId: 7))
+        theirs.choosePrivacy(.private)
+        await theirs.start()
+        XCTAssertTrue(theirs.lockPrivacy)
+        XCTAssertEqual(theirs.effectivePrivacy, .public)
+    }
+
+    /// The form's request for the parent failed: the host's knowledge decides.
+    func testWhenTheParentCannotBeLoadedTheHostsOwnershipDecides() async {
+        StubURLProtocol.install { request in
+            request.url?.path(percentEncoded: true) == "/api/nodes/7"
+                ? .json(500, #"{"error":"boom"}"#) : .json(404, #"{"error":"No draft"}"#)
+        }
+        for owned in [true, false] {
+            var config = NodeFormConfig(parentId: 7)
+            config.parentPrivacy = .public
+            config.parentOwned = owned
+            let (model, _) = form(config)
+            await model.start()
+            XCTAssertEqual(model.lockPrivacy, !owned)
+        }
+    }
+
     func testWriteNewEntryAgenticStartsATextmodeThread() async {
         StubURLProtocol.install { _ in .json(202, #"{"conversation_id":1,"user_node_id":2,"llm_node_id":3}"#) }
         defaults.set(true, forKey: DefaultsKey.agenticReply)
@@ -303,6 +436,172 @@ final class NodeFormModelTests: StubbedAppTestCase {
         XCTAssertEqual(DraftAutosaver.timeAgo(now.addingTimeInterval(-600), now: now), "10m ago")
         XCTAssertEqual(DraftAutosaver.timeAgo(now.addingTimeInterval(-7300), now: now), "2h ago")
     }
+
+    // MARK: An edit draft older than the entry's last change (#761)
+
+    private static let olderDraft = #"{"id":3,"content":"- [ ] milk\n- [ ] eggs","node_id":9,"updated_at":"2026-11-20T14:03:00Z","older_than_entry":true,"entry_updated_at":"2026-11-21T09:12:00Z"}"#
+
+    /// The entry as the thread page shows it: the checkbox ticked after the edit was left.
+    private func editForm(_ draftJSON: String, entry: String = "- [x] milk") -> NodeFormModel {
+        let node = String(data: try! JSONSerialization.data(withJSONObject: [
+            "id": 9, "content": entry, "node_type": "user", "user": ["id": 5, "username": "seowriter"],
+            "privacy_level": "private", "ai_usage": "chat", "child_count": 0, "children": [], "ancestors": [],
+        ] as [String: Any]), encoding: .utf8)!
+        StubURLProtocol.install { request in
+            let path = request.url?.path(percentEncoded: true)
+            if request.httpMethod == "GET" && path == "/api/drafts/" { return .json(200, draftJSON) }
+            // The form reads the entry when it opens (#799 review): as the page has it.
+            if request.httpMethod == "GET" && path == "/api/nodes/9" { return .json(200, node) }
+            if request.httpMethod == "PUT" {
+                return .json(200, #"{"node":{"id":9,"content":"saved"},"descendants_updated":0}"#)
+            }
+            return .json(200, #"{"id":5,"content":"saved","updated_at":"2026-11-22T10:00:00Z"}"#)
+        }
+        return NodeFormModel(config: NodeFormConfig(edit: .init(nodeId: 9, initialContent: entry, initialPrivacy: .private,
+                                                                initialAIUsage: .chat)),
+                             app: app, defaults: defaults)
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<60 {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        return condition()
+    }
+
+    func testAnEditDraftOlderThanTheEntryIsOfferedNotLoaded() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        XCTAssertEqual(model.content, "- [x] milk", "the entry's newer text")
+        XCTAssertEqual(model.olderDraft?.content, "- [ ] milk\n- [ ] eggs")
+        XCTAssertFalse(model.hasDraft)
+        XCTAssertTrue(model.canUseOlderDraft)
+        XCTAssertFalse(calls.contains { $0.hasPrefix("DELETE") }, "the person's text stays on the server")
+    }
+
+    private func deleteQueries() -> [String] {
+        StubURLProtocol.requests.filter { $0.httpMethod == "DELETE" }.map { $0.url?.query ?? "" }
+    }
+
+    func testUsingTheOlderEditMakesItTheFormsText() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        model.useOlderDraft()
+        XCTAssertEqual(model.content, "- [ ] milk\n- [ ] eggs")
+        XCTAssertNil(model.olderDraft)
+        XCTAssertTrue(model.hasDraft)
+        // Saved as the newest draft first, then its older row goes.
+        let deleted = await eventually { self.deleteQueries() == ["node_id=9&draft_id=3"] }
+        XCTAssertTrue(deleted, "\(deleteQueries())")
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "- [ ] milk\n- [ ] eggs")
+        let post = StubURLProtocol.requests.firstIndex { $0.httpMethod == "POST" }
+        let delete = StubURLProtocol.requests.firstIndex { $0.httpMethod == "DELETE" }
+        XCTAssertLessThan(post ?? .max, delete ?? .max)
+    }
+
+    func testDiscardingTheOlderEditDeletesOnlyItsRow() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        model.discardOlderDraft()
+        XCTAssertNil(model.olderDraft)
+        let deleted = await eventually { self.deleteQueries() == ["node_id=9&draft_id=3"] }
+        XCTAssertTrue(deleted, "\(deleteQueries())")
+        XCTAssertEqual(model.content, "- [x] milk")
+    }
+
+    /// What the server answers after the person typed next to the older edit
+    /// (#766): the typing is the newest draft, the older edit is kept beside it.
+    private static let typedNextToOlder = #"{"id":4,"content":"- [x] milk\n- [x] bread","node_id":9,"updated_at":"2026-11-22T10:00:00Z","older_draft":{"id":3,"content":"- [ ] milk\n- [ ] eggs","updated_at":"2026-11-20T14:03:00Z"},"entry_updated_at":"2026-11-21T09:12:00Z"}"#
+
+    // #766 review: typing in the entry's text, then closing the form, keeps
+    // the older edit: nothing deletes it, and on the next open the typed text
+    // loads with the older edit offered beside it.
+    func testTheOlderEditSurvivesTypingClosingAndReopening() async throws {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        model.content = "- [x] milk\n- [x] bread"
+        model.contentChanged(from: "- [x] milk", to: model.content)
+        XCTAssertFalse(model.canUseOlderDraft)
+        model.useOlderDraft()
+        XCTAssertEqual(model.content, "- [x] milk\n- [x] bread", "typed text is never replaced")
+        XCTAssertNotNil(model.olderDraft)
+        await model.drafts.suspend()  // the form closes
+        XCTAssertEqual(body(of: "POST /api/drafts/")?["content"] as? String, "- [x] milk\n- [x] bread")
+        XCTAssertTrue(deleteQueries().isEmpty, "nothing deletes the older edit")
+
+        let reopened = editForm(Self.typedNextToOlder)
+        await reopened.start()
+        XCTAssertEqual(reopened.content, "- [x] milk\n- [x] bread", "the typed text loads")
+        XCTAssertTrue(reopened.hasDraft)
+        XCTAssertEqual(reopened.olderDraft?.id, 3)
+        XCTAssertEqual(reopened.olderDraft?.content, "- [ ] milk\n- [ ] eggs")
+        XCTAssertFalse(reopened.canUseOlderDraft, "never replaces the typed text")
+    }
+
+    // "Discard draft" next to a kept older edit deletes only the typed text.
+    func testDiscardingTheTypedDraftKeepsTheOlderEdit() async {
+        let model = editForm(Self.typedNextToOlder)
+        await model.start()
+        model.discardDraft()
+        XCTAssertEqual(model.content, "- [x] milk")
+        XCTAssertNotNil(model.olderDraft)
+        XCTAssertTrue(model.canUseOlderDraft)
+        let deleted = await eventually { self.deleteQueries() == ["node_id=9&draft_id=4"] }
+        XCTAssertTrue(deleted, "\(deleteQueries())")
+    }
+
+    func testADraftNewerThanTheEntryLoadsAsBefore() async {
+        let model = editForm(#"{"id":3,"content":"- [x] milk\n- [ ] eggs","node_id":9,"updated_at":"2026-11-22T09:00:00Z"}"#)
+        await model.start()
+        XCTAssertEqual(model.content, "- [x] milk\n- [ ] eggs")
+        XCTAssertTrue(model.hasDraft)
+        XCTAssertNil(model.olderDraft)
+    }
+
+    func testAnOlderDraftWithTheEntrysOwnTextIsNotOffered() async {
+        let model = editForm(#"{"id":3,"content":"- [x] milk","node_id":9,"updated_at":"2026-11-20T14:03:00Z","older_than_entry":true}"#)
+        await model.start()
+        XCTAssertNil(model.olderDraft)
+        XCTAssertFalse(model.hasDraft)
+        XCTAssertEqual(model.content, "- [x] milk")
+    }
+
+    // Save with the older edit on screen keeps the entry's text, and the
+    // successful save clears the drafts the form showed, the older edit
+    // included (#799 review: only those; another device's stays).
+    func testSavingTheEditClearsTheEntrysDraft() async {
+        let model = editForm(Self.olderDraft)
+        await model.start()
+        await model.submit()
+        XCTAssertEqual(body(of: "PUT /api/nodes/9")?["content"] as? String, "- [x] milk")
+        let delete = StubURLProtocol.requests.last { $0.httpMethod == "DELETE" }
+        XCTAssertEqual(delete?.url?.path(percentEncoded: true), "/api/drafts/")
+        XCTAssertEqual(delete?.url?.query, "node_id=9&draft_id=3")
+        XCTAssertNil(model.olderDraft)
+    }
+
+    func testTheOlderEditsNoticeSaysWhenEachWasMade() throws {
+        let utc = TimeZone(identifier: "UTC")!
+        let draft = try decode(Draft.self, Self.olderDraft)
+        XCTAssertTrue(draft.olderThanEntry)
+        let older = Draft.OlderEdit(id: draft.id, content: draft.content, updatedAt: draft.updatedAt)
+        XCTAssertEqual(NodeFormModel.olderDraftNotice(older, entryChangedAt: draft.entryUpdatedAt,
+                                                      formShowsNewerText: false, timeZone: utc),
+                       "Your unsaved edit from 2026/11/20 14:03. The entry changed after it (2026/11/21 09:12), "
+                       + "so the form shows the entry as it is now.")
+        let typed = try decode(Draft.self, Self.typedNextToOlder)
+        XCTAssertFalse(typed.olderThanEntry)
+        let kept = try XCTUnwrap(typed.olderDraft)
+        XCTAssertEqual(NodeFormModel.olderDraftNotice(kept, entryChangedAt: typed.entryUpdatedAt,
+                                                      formShowsNewerText: true, timeZone: utc),
+                       "Your unsaved edit from 2026/11/20 14:03. The entry changed after it (2026/11/21 09:12), "
+                       + "so the form shows what you typed since.")
+        let plain = try decode(Draft.self, #"{"id":4,"content":"x"}"#)
+        XCTAssertFalse(plain.olderThanEntry)
+        XCTAssertNil(plain.entryUpdatedAt)
+        XCTAssertNil(plain.olderDraft)
+    }
 }
 
 /// Review M5: the draft survives the form leaving the screen.
@@ -426,7 +725,9 @@ final class ThreadModelTests: StubbedAppTestCase {
         var auto = true
         let binding = Binding(get: { auto }, set: { auto = $0 })
         await model.inlineReplySent(NodeFormResult(id: 11), autoGenerate: binding)
-        XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["model"] as? String, "gpt-6-luna")
+        // No model, so the server continues on the thread's (#791).
+        XCTAssertEqual(body(of: "POST /api/nodes/11/llm")?["auto_generate"] as? Bool, true)
+        XCTAssertNil(body(of: "POST /api/nodes/11/llm")?["model"])
         // The entry's page opens once its node is fetched (NodePrefetch).
         let opened = await eventually { self.app.router.path(for: self.app.router.selectedTab).last == .thread(id: 11, awaitLLM: 77) }
         XCTAssertTrue(opened)

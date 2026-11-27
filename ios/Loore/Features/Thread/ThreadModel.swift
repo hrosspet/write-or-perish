@@ -43,7 +43,27 @@ final class ThreadModel {
     private(set) var llmRequesting = false
     private(set) var llmPollStatus: TaskStatus?
     private(set) var streamText = ""
+    /// The model the LLM Response picker shows: the account's until the picker fills
+    /// in the thread's.
     var selectedModel: String?
+    /// The model the person picked in that picker on this page, else nil.
+    private(set) var pickedModel: String?
+
+    /// The picker's row was chosen (not the default it fills in by itself).
+    func modelPicked(_ id: String) {
+        selectedModel = id
+        pickedModel = id
+    }
+
+    /// The model a reply asked for on this page names (#791): the one picked here,
+    /// while the picker still shows it. Otherwise none, and the server continues on
+    /// the thread's model (`resolve_chat_model`), the account's in a thread with no AI
+    /// reply yet. The account's model sent unpicked moved the thread to it, and that
+    /// turn read the whole thread uncached.
+    var requestModel: String? {
+        guard let pickedModel, pickedModel == selectedModel else { return nil }
+        return pickedModel
+    }
 
     // UI state
     private(set) var pinLoading = false
@@ -760,6 +780,10 @@ final class ThreadModel {
             // toast: the entry's page, where this goes back to, shows the limit.
             if !ThreadLength.isRefusal(data.errorCode) {
                 app.toasts.show(data.error ?? "Task failed", duration: 8)
+            } else if trackedId == nodeId && isReadReply {
+                // A Glean's refusal never counts as the thread's length (#717),
+                // so that page shows no limit: the toast says why (#746).
+                app.toasts.show(ThreadLength.message(data.error) ?? ThreadLength.limitText, duration: 8)
             }
             if trackedId == nodeId, let parent = parentAncestor, !parent.deleted {
                 // Back to the entry: pop when we came from it, else replace this dead node.
@@ -787,12 +811,15 @@ final class ThreadModel {
         return answer.nodeId
     }
 
-    /// The same request in every thread. The model is the requester's own
-    /// (their preferred model, or what the picker holds). The reply is created
-    /// private in every thread (Peter, 2026-11-12). `ack` (what the user
-    /// agreed to before a reply in a shared thread) goes as `ai_reads_ack`.
+    /// The same request in every thread. The model is the one picked on this
+    /// page (`requestModel`, #791), else none: the server continues on the
+    /// thread's model, and in someone else's shared thread on the requester's
+    /// own (`resolve_chat_model`: no reply made for another person sets it). The
+    /// reply is created private in every thread (Peter, 2026-11-12). `ack` (what
+    /// the user agreed to before a reply in a shared thread) goes as `ai_reads_ack`.
     func llmRequestBody(ack: String? = nil, automatic: Bool = false) -> [String: JSONValue] {
-        var body: [String: JSONValue] = ["model": .optional(selectedModel), "source_mode": .string("textmode")]
+        var body: [String: JSONValue] = ["source_mode": .string("textmode")]
+        if let requestModel { body["model"] = .string(requestModel) }
         if automatic { body["auto_generate"] = .bool(true) }
         if let ack, !ack.isEmpty { body["ai_reads_ack"] = .string(ack) }
         return body
@@ -800,25 +827,26 @@ final class ThreadModel {
 
     func handleLLMRequestError(_ error: Error) {
         guard let app else { return }
-        if SpendCap.isSpendCapError(error) { return }
-        // No automatic reply under a shared node: not an error, LLM Response stays.
-        if (error as? APIError)?.isAutoGenerateOff == true { return }
         // The thread is too long for another reply (#648): the form says so and
         // offers a new thread, instead of a toast.
         if let apiError = error as? APIError, apiError.isThreadTooLong {
             threadReachedLimit(message: apiError.body?.error)
             return
         }
-        let message = (error as? APIError)?.userMessage(fallback: "Error requesting LLM response.")
-            ?? "Error requesting LLM response."
-        app.toasts.show(message, duration: 8)
+        // The spend cap's banner and a shared node's refused automatic reply show
+        // no toast (LLMRequestError, which Write New Entry uses too).
+        if let message = LLMRequestError.toastMessage(error) {
+            app.toasts.show(message, duration: 8)
+        }
     }
 
     /// Fires a reply when auto-generate is on and the whole chain allows AI;
     /// otherwise turns auto-generate off with the web's toast. `entryPrivacy` is
     /// the new entry's: a public or circles entry gets no automatic reply,
     /// whatever the page it was written on, and neither does one the server
-    /// refuses as shared (nil: no reply, nothing shown).
+    /// refuses as shared (nil: no reply, nothing shown). Any other refusal is
+    /// thrown, the thread's length (#648) included, as the web's
+    /// `tryAutoGenerateFor`: the caller knows which page shows the limit.
     func tryAutoGenerate(for parentId: Int, chainAIUsages: [AIUsage?], autoGenerate: Binding<Bool>,
                          entryPrivacy: PrivacyLevel? = nil) async throws -> Int? {
         guard autoGenerateActive(autoGenerate.wrappedValue) else { return nil }
@@ -835,8 +863,7 @@ final class ThreadModel {
         // reply asks first too, when the thread's prompt reads their data.
         do {
             return try await requestConfirmedLLM(for: parentId, automatic: true)
-        } catch let error as APIError where error.isAutoGenerateOff || error.isThreadTooLong {
-            // This entry took the thread past the limit (#648): its page shows it.
+        } catch let error as APIError where error.isAutoGenerateOff {
             return nil
         }
     }
@@ -860,6 +887,9 @@ final class ThreadModel {
             }
         } catch {
             openThread(newId, awaitLLM: nil)
+            // This entry took the thread past the limit (#648): its page, opening
+            // now, shows it. This page's own next reply would not include the entry.
+            if (error as? APIError)?.isThreadTooLong == true { return }
             handleLLMRequestError(error)
         }
     }
@@ -878,7 +908,7 @@ final class ThreadModel {
             if submission.aiUsage != .off {
                 body["agentic"] = .bool(true)
                 body["auto_generate"] = .bool(auto)
-                body["model"] = .optional(selectedModel)
+                if let requestModel { body["model"] = .string(requestModel) }
             }
             let answer: SaveAsNodeResponse = try await app.api.post(APIPath.streamingSaveAsNode(sid), json: .object(body))
             return NodeFormResult(id: answer.id, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
@@ -894,10 +924,12 @@ final class ThreadModel {
             ]))
             return NodeFormResult(id: created.id)
         }
-        let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeFromNode(nodeId), json: .object([
-            "content": .string(submission.content), "ai_usage": .string(submission.aiUsage.rawString),
-            "model": .optional(selectedModel), "auto_generate": .bool(auto),
-        ]))
+        var body: [String: JSONValue] = [
+            "content": .string(submission.content), "privacy_level": .string(submission.privacy.rawString),
+            "ai_usage": .string(submission.aiUsage.rawString), "auto_generate": .bool(auto),
+        ]
+        if let requestModel { body["model"] = .string(requestModel) }
+        let answer: TextmodeStartResponse = try await app.api.post(APIPath.textmodeFromNode(nodeId), json: .object(body))
         return NodeFormResult(id: answer.userNodeId, userNodeId: answer.userNodeId, llmNodeId: answer.llmNodeId,
                               promptNodeId: answer.promptNodeId, spendCapped: answer.spendCapped,
                                   spendCapLiftsWithPayment: answer.spendCapLiftsWithPayment, llmError: answer.llmError,
@@ -1036,9 +1068,10 @@ final class ThreadModel {
         pageError = nil
         Task {
             do {
-                let answer: VoiceFromNodeResponse = try await app.api.post(APIPath.voiceFromNode(nodeId), json: .object([
-                    "model": .optional(selectedModel),
-                ]))
+                // No model: Voice continues on the thread's model (#784); the LLM
+                // Response picker's choice is for LLM Response.
+                let answer: VoiceFromNodeResponse = try await app.api.post(APIPath.voiceFromNode(nodeId),
+                                                                           json: .object([:]))
                 // A thread started from the Glean card keeps its Glean button on the
                 // Voice screen too (#435). A gleaning answers "ready": nothing plays.
                 let glean = gleanThread && gleanEnabled
@@ -1107,33 +1140,42 @@ final class ThreadModel {
 
     // MARK: Checklists and proposal edits on the focal node
 
-    func applyContentEdit(_ newContent: String, failure: @escaping (String) -> String) {
-        guard let app, let old = node?.content, newContent != old else { return }
-        node?.content = newContent
-        Task {
-            do {
-                let _: NodeUpdateResponse = try await app.api.put(APIPath.node(nodeId), json: .object([
-                    "content": .string(newContent),
+    /// What the screen says when a tick or "+" was refused because the entry
+    /// changed elsewhere (#795). The thread loads again when it is opened again.
+    static let newerEntryMessage =
+        "There's a newer version of this entry, so your change wasn't saved. Go back and open it again before continuing."
+
+    /// Ticks and the row "+" in the focal entry: shown at once, saved one after
+    /// the other, each only over the text the screen shows (#795).
+    @ObservationIgnored private let checklistEdits = ContentEditQueue()
+
+    func applyContentEdit(_ edit: @escaping (String) -> String, failure: @escaping (String) -> String) {
+        guard let app else { return }
+        let id = nodeId
+        checklistEdits.apply(edit, to: ContentEditQueue.Target(
+            onScreen: { [weak self] in self?.node.map(\.content) },
+            show: { [weak self] in self?.node?.content = $0 },
+            save: { content, base in
+                let _: NodeUpdateResponse = try await app.api.put(APIPath.node(id), json: .object([
+                    "content": .string(content),
+                    "base_content": .string(base),
                 ]))
-            } catch {
-                node?.content = old
-                let reason = (error as? APIError)?.serverMessage ?? (error as? APIError)?.errorDescription
-                    ?? error.localizedDescription
-                app.toasts.show(failure(reason))
-            }
-        }
+            },
+            notify: { [weak app] in app?.toasts.show($0, duration: 8) },
+            newerMessage: Self.newerEntryMessage
+        ), failure: failure)
     }
 
     func toggleCheckbox(_ itemText: String, checked: Bool) {
         guard let content = node?.content, !content.isEmpty else { return }
-        applyContentEdit(MarkdownEdits.toggleCheckbox(content, itemText: itemText, currentChecked: checked)) {
+        applyContentEdit({ MarkdownEdits.toggleCheckbox($0, itemText: itemText, currentChecked: checked) }) {
             "Couldn't save change — reverted (\($0))"
         }
     }
 
     func insertTask(after itemText: String, _ newText: String) {
-        guard let content = node?.content else { return }
-        applyContentEdit(MarkdownEdits.insertItemAfter(content, afterItemText: itemText, newText: newText)) {
+        guard node?.content != nil else { return }
+        applyContentEdit({ MarkdownEdits.insertItemAfter($0, afterItemText: itemText, newText: newText) }) {
             "Couldn't add task — reverted (\($0))"
         }
     }
@@ -1235,6 +1277,9 @@ final class ThreadModel {
                 openThread(llmId, awaitLLM: llmId)
             }
         } catch {
+            // The edit is saved. An edit that made the thread too long for a reply
+            // (#648) switches this page's form to the limit now (#747), as the web
+            // does; the PUT's answer does not carry the thread's length.
             handleLLMRequestError(error)
         }
     }

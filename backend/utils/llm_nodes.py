@@ -180,7 +180,9 @@ def is_chat_model(model_id):
 # from SUPPORTED_MODELS) can still be saved: an account preference, a
 # thread's last reply, a stored session's model, a page opened before the
 # deprecation. What runs in its place is a model of the same provider:
-# the user's own model there if they have one, else that provider's
+# the newer model named to replace it ("replaced_by": GPT-6 Astra →
+# GPT-6.2 Astra, GPT-6 Sol → GPT-6.2 Sol, Peter 2026-11-24), else the
+# user's own model there if they have one, else that provider's
 # default. Never another provider's: "A user's model is theirs" (Peter,
 # 2026-10-02; #418, #487).
 CHAT_MODEL_KEYS = {
@@ -229,16 +231,54 @@ def provider_chat_model(provider):
     return None
 
 
+def successor_model(model_id):
+    """The active model named to take the place of *model_id*, a retired
+    model: its SUPPORTED_MODELS entry's ``replaced_by`` (GPT-6 Sol →
+    GPT-6.2 Sol), followed on while the named model is retired too (a
+    later retirement of GPT-6.2 Sol with a replacement of its own). Only
+    a model of the same provider counts (the boot check,
+    validate_model_successors, rules out any other). None when no
+    entry on the way names one."""
+    supported = current_app.config.get("SUPPORTED_MODELS", {})
+    provider = saved_model_provider(model_id)
+    seen = {model_id}
+    current = model_id
+    while True:
+        named = (supported.get(current) or {}).get("replaced_by")
+        if (not named or named in seen
+                or saved_model_provider(named) != provider):
+            return None
+        if is_active_model(named):
+            return named
+        seen.add(named)
+        current = named
+
+
+def current_read_model(model_id):
+    """*model_id* while it is an active read model, else the read model
+    named to replace it (successor_model; GPT-6 Sol → GPT-6.2 Sol), else
+    None."""
+    if is_read_model(model_id):
+        return model_id
+    successor = successor_model(model_id)
+    return successor if is_read_model(successor) else None
+
+
 def same_provider_chat_model(model_id, *candidates):
     """The chat model that runs in place of *model_id*, a saved model no
-    longer offered for chat: the first of *candidates* (the thread's and
-    the user's own models, nearest first) that is an active chat model
-    of the same provider, else that provider's default
+    longer offered for chat: the model named to replace it
+    (successor_model: GPT-6 Astra → GPT-6.2 Astra) while it is an active
+    chat model; else the first of *candidates* (the thread's and the
+    user's own models, nearest first) that is an active chat model of
+    the same provider, else that provider's default
     (provider_chat_model). None when the provider can't be told or has
     no chat model."""
     provider = saved_model_provider(model_id)
     if provider is None:
         return None
+    successor = successor_model(model_id)
+    if is_chat_model(successor):
+        return successor
     for candidate in candidates:
         if (is_chat_model(candidate)
                 and saved_model_provider(candidate) == provider):
@@ -276,12 +316,10 @@ def _is_llm(node):
 
 
 def _has_read_marker(node):
-    try:
-        meta = json.loads(node.tool_calls_meta or "[]") or []
-    except (json.JSONDecodeError, TypeError):
-        return False
-    return any(isinstance(m, dict) and m.get("name") == READ_FURTHER_MARKER
-               for m in meta)
+    """Entry names are read without decrypting (utils/tool_record): the
+    chain walk reads no text."""
+    from backend.utils.tool_record import entry_names
+    return READ_FURTHER_MARKER in entry_names(node)
 
 
 class _Chain:
@@ -304,14 +342,15 @@ class _Chain:
         from backend.models import NodeContextArtifact, UserPrompt
         from backend.utils.thread_tree import ancestor_chain
         # token_count and continuation_node_id: the size of the reply's
-        # prompt (utils/thread_size, #648).
+        # prompt (utils/thread_size, #648). origin: an imported reply is
+        # no model Loore ran for the user (resolve_chat_model, #784).
         self.nodes = [] if node is None else ancestor_chain(
             node.id, Node.id, Node.parent_id, Node.node_type, Node.llm_model,
-            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta,
+            Node.deleted_at, Node.prompt_key, Node.tool_calls_meta_stored,
             Node.ai_usage, Node.user_id, Node.human_owner_id,
             Node.privacy_level, Node.audience_root_id,
             Node.token_count, Node.continuation_node_id,
-            max_depth=_MAX_ANCESTRY_HOPS)
+            Node.origin, max_depth=_MAX_ANCESTRY_HOPS)
         self.keys = {n.id: n.prompt_key for n in self.nodes if n.prompt_key}
         linked = [n.id for n in self.nodes if not n.prompt_key]
         if linked:
@@ -361,11 +400,19 @@ class _Chain:
             can_user_see_node_or_placeholder, can_user_see_node_or_tombstone,
             shown_as_deleted,
         )
+        from backend.utils.public_threads import passes_through
+        below = None
         for i, n in enumerate(self.nodes):
             seen = (can_user_see_node_or_tombstone if i == 0
                     else can_user_see_node_or_placeholder)
             if not seen(n, user_id, as_ai=as_ai):
+                # As the task (privacy.reply_context_nodes): a prompt
+                # entry the user may not read is left out and the walk
+                # goes on above it.
+                if below is not None and passes_through(n, below):
+                    continue
                 return None
+            below = n
             if (not shown_as_deleted(n, user_id)
                     and n.ai_usage not in AI_ALLOWED):
                 return n
@@ -379,27 +426,43 @@ class _Chain:
                 if n.deleted_at is None and n.node_type == "llm" and n.llm_model]
 
 
+def _loore_reply_for(node, user_id):
+    """Whether the AI reply *node* is one Loore made for *user_id*: the
+    user is its human owner (as glean_provider counts them), and it was
+    written in Loore, not imported (Node.origin NULL). Another member's
+    reply in a shared thread, and a reply from an imported ChatGPT or
+    Claude conversation, are not models this user chose in Loore."""
+    return (user_id is not None
+            and (node.human_owner_id or node.user_id) == user_id
+            and getattr(node, "origin", None) is None)
+
+
 def resolve_chat_model(parent_node, user, chain=None):
     """The model for a (non-read) reply under *parent_node* when the
     caller supplied none, and where it came from:
 
-      1. ("predecessor") the closest ancestor LLM reply's ``llm_model``,
-         skipping reads: a read runs on a read model (Luna), and that
-         must not become the default for the conversation around it.
+      1. ("predecessor") the closest ancestor LLM reply that Loore made
+         for *user* (_loore_reply_for): its ``llm_model``. Reads are
+         skipped: a read runs on a read model (Luna), and that must not
+         become the default for the conversation around it. Another
+         member's reply and an imported reply are skipped too (#784):
+         following them would send the user's words to a provider they
+         never chose in Loore.
       2. ("user_preference") ``user.preferred_model``
          (effective_preferred_model: its provider's default once it is
          no longer offered).
       3. ("default") ``DEFAULT_LLM_MODEL`` from the Flask config / env.
 
-    If the closest non-read LLM ancestor is recognized but not usable for
+    If the closest such reply is on a model recognized but not usable for
     chat (deprecated, read only, or the historical ``gpt-4.5-preview``
     legacy id), the walk stops there and the thread stays with that
-    model's provider (#487): the user's account model when it is that
+    model's provider (#487): the model named to replace it (GPT-6 Astra
+    → GPT-6.2 Astra), else the user's account model when it is that
     provider's, else the provider's default (same_provider_chat_model),
     still "predecessor". Walking past it to find an even older active
     model would pick a model nobody chose for this point of the thread.
-    Truly-unknown ancestors keep walking — they're typically placeholder
-    rows from data migrations and imports ("chatgpt", "claude-web").
+    Truly-unknown ids keep walking: placeholder rows from data
+    migrations ("chatgpt", "claude-web").
     """
     supported = current_app.config.get("SUPPORTED_MODELS", {})
     chain = chain or _Chain(parent_node)
@@ -408,10 +471,13 @@ def resolve_chat_model(parent_node, user, chain=None):
     # requester's own model. No reply made for another person sets it,
     # in the thread or above it (the author's private replies above her
     # entry are not the requester's to read, let alone to follow).
+    # _loore_reply_for (#784) now skips every reply made for another
+    # person, anywhere; the Circles checks below say the same for shared
+    # threads.
     own_only = user_id is not None and in_others_shared_thread(
         parent_node, user_id, chain=chain)
     for node in chain.llm_replies():
-        if node.id in chain.reads:
+        if node.id in chain.reads or not _loore_reply_for(node, user_id):
             continue
         if own_only and node.human_owner_id != user_id:
             continue
@@ -501,8 +567,11 @@ def resolve_read_model(anchor_node, chain=None, user=None):
         for node in chain.llm_replies():
             if node.id not in chain.reads:
                 continue
-            if is_read_model(node.llm_model):
-                return node.llm_model, "predecessor"
+            # A read on a retired read model: the one named to replace it
+            # (current_read_model), else the default.
+            read_model = current_read_model(node.llm_model)
+            if read_model:
+                return read_model, "predecessor"
             break
         return current_app.config["READ_DEFAULT_MODEL"], "default"
     provider = glean_provider(anchor_node, user, chain=chain)
@@ -515,9 +584,11 @@ def resolve_read_model(anchor_node, chain=None, user=None):
             if (node.id not in chain.reads
                     or (node.human_owner_id or node.user_id) != user.id):
                 continue
-            if (is_read_model(node.llm_model)
-                    and model_provider(node.llm_model) == provider):
-                return node.llm_model, "predecessor"
+            # Also the user's read on a retired read model: the one named
+            # to replace it (GPT-6 Sol → GPT-6.2 Sol, current_read_model).
+            read_model = current_read_model(node.llm_model)
+            if read_model and model_provider(read_model) == provider:
+                return read_model, "predecessor"
             break
     return glean_model_for_provider(provider), "provider_default"
 
@@ -526,6 +597,29 @@ def pick_model_for_generation(parent_node, user):
     """Pick the LLM model for an auto-generated (chat) response when the
     caller has not supplied an explicit model. See resolve_chat_model."""
     return resolve_chat_model(parent_node, user)[0]
+
+
+def voice_turn_model(parent_node, user, sent_model=None):
+    """The model of a Voice turn's reply (#784). A turn that continues a
+    thread (*parent_node*: where the turn's entry or reply goes) runs on
+    the thread's model, by the rule a Text reply follows when it names no
+    model (resolve_chat_model): the model of the closest earlier chat
+    reply Loore made for this user (never another member's reply or an
+    imported one), kept to that reply's provider when the model is no
+    longer offered (#487), else the account's model, else the server
+    default. So the turn reads the thread's prompt cache, as a Text
+    reply on that model would.
+
+    *sent_model*, the model the client sent, is not used for such a
+    turn: Voice has no model picker, and both apps send the account's
+    model with every turn (the iPhone builds already installed too), so
+    it names no choice for this thread. A new thread (*parent_node*
+    None) runs on *sent_model*, else the account's model, else the
+    default. Every Voice route asks here: streaming finalize, POST
+    /voice and POST /voice/from-node."""
+    if parent_node is None and sent_model:
+        return sent_model
+    return pick_model_for_generation(parent_node, user)
 
 
 def reply_read_turn(parent, meta=None, parent_content=None, chain=None):
@@ -799,9 +893,11 @@ def _read_turn_model(parent, owner, model_id, chain):
     # their own: nobody picks a model for someone else's thread.
     owns_parent = owner is not None and (
         (parent.human_owner_id or parent.user_id) == owner.id)
-    if (owns_parent and is_read_model(model_id)
-            and may_choose_glean_model(owner)):
-        return model_id
+    # A retired read model (a page opened before it was retired) counts
+    # as the one named to replace it (current_read_model).
+    named = current_read_model(model_id)
+    if owns_parent and named and may_choose_glean_model(owner):
+        return named
     new_model_id = resolve_read_model(parent, chain=chain, user=owner)[0]
     if new_model_id != model_id:
         current_app.logger.info(
@@ -869,6 +965,104 @@ def enqueue_reply_job(llm_node, dispatch, record_task_id=True):
     return task_id
 
 
+# ── Replies one account has waiting or being written ─────────────────────
+# Every account's replies wait in the same queue for the same few workers,
+# so one account may have at most MAX_REPLIES_IN_PROGRESS of its own
+# waiting or being written; a new one past it is refused before anything
+# is written (create_llm_placeholder). Counted under the account's
+# replies lock, so two requests at once cannot both pass.
+#
+# INTRODUCED HEURISTIC: 20. Real use stays well below it: a reply in each
+# of a few threads open at once (web tabs and the iPhone), a Voice turn, a
+# Glean, and the replies of the audio files being uploaded (at most
+# recording_limits.MAX_UPLOADS_IN_PROGRESS, 5) come to about ten at the
+# very most; 20 is twice that. A reply that is a step of another (the
+# continuation after a tool call) replaces that reply in the count.
+MAX_REPLIES_IN_PROGRESS = 20
+# A reply counts for this long after it was asked for: the reply task's
+# hard time limit (celery_app.TASK_TIME_LIMIT, one hour). A reply left
+# waiting by a worker that stopped does not hold the account longer.
+REPLY_COUNTS_FOR_SECONDS = 3600
+# The first key of the two-key advisory lock: a fixed number naming "an
+# account's new replies", distinct from utils/todo_lock (477001) and
+# utils/recording_limits (694001).
+_REPLIES_LOCK_NAMESPACE = 731001
+
+TOO_MANY_REPLIES_CODE = "too_many_replies"
+TOO_MANY_REPLIES_MESSAGE = (
+    "Several of your AI replies are still being written. Wait for one of "
+    "them to finish, then ask again.")
+TOO_MANY_REPLIES_ENTRY_MESSAGE = (
+    "Your entry is saved. Loore didn't reply because several of your AI "
+    "replies are still being written. Ask again once one of them is done.")
+TOO_MANY_REPLIES_RECORDING_MESSAGE = (
+    "Your recording is saved. Loore didn't reply because several of your "
+    "AI replies are still being written. Ask again once one of them is "
+    "done.")
+
+
+class TooManyReplies(Exception):
+    """The account already has MAX_REPLIES_IN_PROGRESS replies waiting or
+    being written. Raised by create_llm_placeholder before the reply is
+    written. HTTP callers answer 429 ``{"error", "code":
+    "too_many_replies"}`` (too_many_replies_response; backend/__init__.py
+    registers the same answer for a route that lets it escape), or keep
+    the entry they wrote and report the skipped reply as ``llm_error`` /
+    ``llm_error_code`` (thread_size.reply_skipped_fields)."""
+
+    code = TOO_MANY_REPLIES_CODE
+    message = TOO_MANY_REPLIES_MESSAGE
+    entry_message = TOO_MANY_REPLIES_ENTRY_MESSAGE
+    recording_message = TOO_MANY_REPLIES_RECORDING_MESSAGE
+
+    def __init__(self):
+        super().__init__(self.message)
+
+
+def too_many_replies_response(exc=None):
+    """The 429 answer for a refused reply."""
+    from flask import jsonify
+    exc = exc or TooManyReplies()
+    return jsonify({"error": exc.message, "code": exc.code}), 429
+
+
+def replies_in_progress(user_id, now=None):
+    """How many replies of the account are waiting or being written,
+    asked for within REPLY_COUNTS_FOR_SECONDS. The admin's Batch API reads
+    (READ_BATCH_MARKER) are left out: they wait for the provider's batch
+    for hours and take no worker meanwhile."""
+    from datetime import datetime, timedelta
+    from backend.utils.glean import READ_BATCH_MARKER
+    since = (now or datetime.utcnow()) - timedelta(
+        seconds=REPLY_COUNTS_FOR_SECONDS)
+    return Node.query.filter(
+        Node.human_owner_id == user_id,
+        Node.node_type == "llm",
+        Node.llm_task_status.in_(("pending", "processing")),
+        Node.created_at >= since,
+        db.or_(Node.tool_calls_meta.is_(None),
+               ~Node.tool_calls_meta.contains(f'"{READ_BATCH_MARKER}"',
+                                              autoescape=True)),
+    ).count()
+
+
+def _lock_new_replies(user_id):
+    """Take the account's replies lock for the rest of the current
+    transaction (a PostgreSQL advisory lock keyed on the user, as
+    utils/todo_lock): the commit or rollback releases it, also when a
+    worker dies. Its holder only counts, inserts and commits, so it waits
+    for nothing else and is held for milliseconds; no wait limit is set
+    (a lock timeout would end the caller's transaction, and the entry a
+    route keeps with it). Other databases (SQLite in the tests) take no
+    lock; the count still runs."""
+    from sqlalchemy import text
+    if db.session.get_bind().dialect.name != "postgresql":
+        return
+    db.session.execute(
+        text("SELECT pg_advisory_xact_lock(:namespace, :user_id)"),
+        {"namespace": _REPLIES_LOCK_NAMESPACE, "user_id": int(user_id)})
+
+
 def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                            ai_usage="chat",
                            placeholder_text="[LLM response generation pending...]",
@@ -919,6 +1113,11 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
 
     Raises ThreadTooLong (utils/thread_size), also before any write, when
     the reply's prompt would be over THREAD_PROMPT_TOKEN_LIMIT (#648).
+
+    Raises TooManyReplies, also before the reply is written, when the
+    account already has MAX_REPLIES_IN_PROGRESS replies waiting or being
+    written. The account's replies lock it takes is held until the
+    caller's transaction ends.
     """
     # Spend-cap guard: a blocked user must never get an LLM placeholder node
     # (and never incur generation spend). Raised before any DB write so no
@@ -1054,6 +1253,14 @@ def create_llm_placeholder(parent_node_id, model_id, human_owner_id,
                                          chain=chain, user=owner)
         if too_long is not None:
             raise too_long
+
+    # At most MAX_REPLIES_IN_PROGRESS replies of the account waiting or
+    # being written, counted under its replies lock (held to the commit
+    # below), so a burst of requests on many threads cannot all pass.
+    # Taken last, after everything that may wait on the network above.
+    _lock_new_replies(human_owner_id)
+    if replies_in_progress(human_owner_id) >= MAX_REPLIES_IN_PROGRESS:
+        raise TooManyReplies()
 
     llm_user = User.query.filter_by(username=model_id).first()
     if not llm_user:

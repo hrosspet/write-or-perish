@@ -46,8 +46,10 @@ def _make_app():
     app.config["PUBLIC_BASE_URL"] = "https://loore.org"
     _db.init_app(app)
     lm = LoginManager(app)
-    # The production loader (backend/__init__.py uses the same function).
+    # The production loader and 401 (backend/__init__.py uses the same
+    # functions; every route here is under /api).
     lm.user_loader(acc.session_user)
+    lm.unauthorized_handler(acc.unauthorized_answer)
 
     from backend.routes.account_data import account_data_bp
     from backend.routes.account_deletion import account_deletion_bp
@@ -781,6 +783,8 @@ def test_signing_in_during_the_grace_period_offers_a_restore(
     offer = r.get_json()
     assert offer["username"] == "alice" and offer["restorable"] is True
     assert offer["delete_on"]
+    # The iPhone's unsent audio is kept under the account id (#777).
+    assert offer["user_id"] == a.id
 
     r = c.post("/api/account/restore")
     assert r.status_code == 200 and r.get_json()["status"] == "restored"
@@ -842,6 +846,81 @@ def test_no_restore_once_the_deletion_has_started(app, world, stubs, mail):
     assert r.status_code == 409 and r.get_json()["code"] == "already_started"
     assert _db.session.get(User, world.alice.id).deleted_at is not None
     assert c.get("/api/account/data").status_code == 401
+
+
+# ── What a deleted account's sign-in is told (#777) ─────────────────────
+# The iPhone keeps audio it has not sent under the account it was recorded
+# under; the 401 says until when the account can be restored.
+
+def _get(c, path):
+    """A request from client *c* alone (flask-login caches the user on
+    the fixture's shared ``g``)."""
+    from flask import g
+    g.pop("_login_user", None)
+    return c.get(path)
+
+
+def test_a_deleted_accounts_sign_in_says_until_when_it_can_be_restored(
+        app, world, stubs, mail):
+    from flask_login.utils import encode_cookie
+    from backend.utils.timefmt import iso_utc
+    a = world.alice
+    phone = _client(app, a)
+    # A phone whose session ended keeps only the remember cookie.
+    remembered = app.test_client()
+    remembered.set_cookie("remember_token", encode_cookie(str(a.id)))
+    assert _get(phone, "/api/account/data").status_code == 200
+    assert _get(remembered, "/api/account/data").status_code == 200
+
+    job = _schedule(a)
+    for c in (phone, remembered):
+        r = _get(c, "/api/account/data")
+        assert r.status_code == 401
+        assert r.get_json() == {
+            "error": "Unauthorized", "code": "account_deleted",
+            "user_id": a.id, "delete_on": iso_utc(job.scheduled_for),
+            "restorable": True}
+    # A request without a sign-in, and a forged remember cookie, get the
+    # plain answer; another account's sign-in still works.
+    assert _get(app.test_client(), "/api/account/data").get_json() == {
+        "error": "Unauthorized"}
+    forged = app.test_client()
+    forged.set_cookie("remember_token", f"{a.id}|0000")
+    assert _get(forged, "/api/account/data").get_json() == {
+        "error": "Unauthorized"}
+    assert _get(_client(app, world.bob), "/api/account/data").status_code == 200
+
+    # Once the deletion has started, it can no longer be undone.
+    assert up.claim_job(job.id, "runner", now=job.scheduled_for)
+    body = _get(phone, "/api/account/data").get_json()
+    assert body["restorable"] is False
+    assert body["delete_on"] == iso_utc(job.scheduled_for)
+
+
+def test_a_restored_accounts_sign_in_works_again(app, world, stubs, mail):
+    a = world.alice
+    phone = _client(app, a)
+    _schedule(a)
+    assert _get(phone, "/api/account/data").get_json()["restorable"] is True
+    assert acc.restore_account(_db.session.get(User, a.id))
+    assert _get(phone, "/api/account/data").status_code == 200
+
+
+def test_the_sign_in_of_an_account_deleted_for_good_says_so(
+        app, world, stubs, mail):
+    a = world.alice
+    a_id = a.id
+    phone = _client(app, a)
+    job = _schedule(a)
+    assert _run_due(job, datetime.utcnow() + timedelta(days=30, minutes=1)) \
+        == "done"
+    _db.session.expire_all()
+    assert _db.session.get(User, a_id) is None
+    r = _get(phone, "/api/account/data")
+    assert r.status_code == 401
+    assert r.get_json() == {
+        "error": "Unauthorized", "code": "account_deleted",
+        "user_id": a_id, "delete_on": None, "restorable": False}
 
 
 # Starting a sign-in forgets an unanswered offer from an earlier one: Back

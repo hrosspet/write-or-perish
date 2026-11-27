@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 @testable import Loore
 
@@ -480,7 +481,7 @@ final class ChunkUploaderTests: XCTestCase {
         uploader.enqueue(sessionId: "s11", chunk: chunk(0))
         uploader.enqueue(sessionId: "s11", chunk: chunk(1))
         try await Task.sleep(nanoseconds: 20_000_000)
-        uploader.reset()
+        uploader.reset(account: nil)
         try await Task.sleep(nanoseconds: 20_000_000)
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
 
@@ -493,6 +494,626 @@ final class ChunkUploaderTests: XCTestCase {
         nextUser.resumePending()
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(sent, 0)
+    }
+
+    private func answer(_ request: URLRequest, _ status: Int, _ body: String = "{}") -> (Data, HTTPURLResponse) {
+        (Data(body.utf8), HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: nil)!)
+    }
+
+    private func files(_ sessionId: String) -> [String] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent(sessionId).path)) ?? []).sorted()
+    }
+
+    private func waitUntil(timeout: TimeInterval = 3, _ condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline { try await Task.sleep(nanoseconds: 5_000_000) }
+    }
+
+    // #763: the server refused the sign-in (401) and the app signed out on its
+    // own. The pieces not sent stay on the phone, also one the recorder hands
+    // over after the sign-out; another account that signs in never sends them
+    // (not after a relaunch either); the account they were recorded under does.
+    func testASignOutTheServerCausedKeepsTheAudioForTheSameAccount() async throws {
+        uploader.resumePending(account: 7)
+        var refused = true
+        var refusals = 0
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            if refused {
+                refusals += 1
+                return self.answer(request, 401)
+            }
+            sent.append(self.index(of: request, file: file))
+            return self.answer(request, 202)
+        }
+        uploader.open(sessionId: "s30", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s30", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s30", chunk: chunk(1))
+        // Chunk 0 refused; chunk 1 waits behind it (B1).
+        try await waitUntil { refusals == 1 }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        XCTAssertEqual(refusals, 1)
+
+        uploader.hold()
+        refused = false
+        // The recorder's last piece, handed over after the sign-out.
+        uploader.enqueue(sessionId: "s30", chunk: chunk(2))
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(sent, [], "nothing goes while nobody is signed in")
+        XCTAssertEqual(files("s30"), ["chunk_0.body", "chunk_1.body", "chunk_2.body", "manifest.json"])
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 7))
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 8))
+
+        // Another account signs in, in this run and after a relaunch.
+        uploader.resumePending(account: 8)
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.transport = { [unowned self] request, file in
+            sent.append(self.index(of: request, file: file))
+            return self.answer(request, 202)
+        }
+        XCTAssertEqual(relaunched.resumePending(account: 8), [])
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(sent, [], "never sent with another account's sign-in")
+        XCTAssertEqual(files("s30").count, 4, "and kept for its own")
+
+        // The account it was recorded under signs in again.
+        uploader.hold()
+        uploader.resumePending(account: 7)
+        let outcome = await uploader.settle(sessionId: "s30")
+        XCTAssertEqual(sent, [0, 1, 2])
+        XCTAssertEqual(outcome.stored, 3)
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 7))
+    }
+
+    // #763: Logout deletes the audio of the account that logs out, and only
+    // that; without a known account (it could not be loaded), all of it.
+    func testLogoutDeletesTheAudioOfTheAccountThatLogsOut() async throws {
+        uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        uploader.resumePending(account: 7)
+        uploader.open(sessionId: "s31", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s31", chunk: chunk(0))
+        _ = await uploader.settle(sessionId: "s31")
+        uploader.hold()
+        uploader.resumePending(account: 8)
+        uploader.open(sessionId: "s32", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s32", chunk: chunk(0))
+        _ = await uploader.settle(sessionId: "s32")
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 7))
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 8))
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 9))
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: nil))
+
+        uploader.reset(account: 8)
+        XCTAssertEqual(files("s32"), [])
+        XCTAssertEqual(files("s31"), ["chunk_0.body", "manifest.json"], "another account's audio stays")
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 8))
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 7))
+
+        uploader.reset(account: nil)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), [])
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
+    }
+
+    // #763: a queue left by a build that did not record accounts goes to the
+    // first account that signs in (as that build would have sent it), and then
+    // belongs to it.
+    func testAQueueFromAnEarlierBuildGoesToTheFirstAccountThatSignsIn() async throws {
+        uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        uploader.open(sessionId: "s33", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s33", chunk: chunk(0))
+        _ = await uploader.settle(sessionId: "s33")
+        let manifest = root.appendingPathComponent("s33").appendingPathComponent("manifest.json")
+        XCTAssertFalse(try String(contentsOf: manifest, encoding: .utf8).contains("account"))
+
+        let first = ChunkUploader(root: root, useBackgroundSession: false)
+        first.transport = { request, _ in (Data(), HTTPURLResponse(url: request.url!, statusCode: 401, httpVersion: nil, headerFields: nil)!) }
+        first.resumePending(account: 7)
+        _ = await first.settle(sessionId: "s33")
+
+        var sent = 0
+        let other = ChunkUploader(root: root, useBackgroundSession: false)
+        other.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        other.resumePending(account: 8)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(sent, 0, "it is account 7's now")
+        let owner = ChunkUploader(root: root, useBackgroundSession: false)
+        owner.transport = other.transport
+        owner.resumePending(account: 7)
+        let outcome = await owner.settle(sessionId: "s33")
+        XCTAssertEqual(sent, 1)
+        XCTAssertEqual(outcome.stored, 1)
+    }
+
+    /// A recording made offline under `account`, held at a sign-out.
+    private func recordOffline(_ sessionId: String, account: Int, chunks: Int = 1) async {
+        uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        uploader.resumePending(account: account)
+        uploader.open(sessionId: sessionId, uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<chunks { uploader.enqueue(sessionId: sessionId, chunk: chunk(i)) }
+        _ = await uploader.settle(sessionId: sessionId)
+        uploader.hold()
+    }
+
+    private func offlineUploader(at clock: @escaping () -> Date) -> ChunkUploader {
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        relaunched.now = clock
+        return relaunched
+    }
+
+    // #777: account 7 is deleted while the phone holds its audio. The audio
+    // stays while the account can be restored, through another account's
+    // sign-in and relaunches, and is never sent under account 8. When the
+    // 30 days end it leaves the phone; account 8's audio stays.
+    func testADeletedAccountsAudioStaysUntilItsDateThenLeavesThePhone() async throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        uploader.now = { clock }
+        await recordOffline("s40", account: 7)
+        await recordOffline("s41", account: 8)
+        let deleteOn = clock.addingTimeInterval(30 * 86_400)
+
+        // Learned after a relaunch: the manifest on disk takes the date.
+        offlineUploader { clock }.accountDeleted(DeletedAccount(account: 7, deleteOn: deleteOn, restorable: true))
+        XCTAssertEqual(files("s40"), ["chunk_0.body", "manifest.json"], "kept while it can be restored")
+        let manifest = root.appendingPathComponent("s40").appendingPathComponent("manifest.json")
+        XCTAssertTrue(try String(contentsOf: manifest, encoding: .utf8).contains("accountDeletedOn"))
+        XCTAssertFalse(try String(contentsOf: root.appendingPathComponent("s41").appendingPathComponent("manifest.json"),
+                                  encoding: .utf8).contains("accountDeletedOn"), "only account 7's")
+
+        clock = deleteOn.addingTimeInterval(-1)
+        var sent = 0
+        let other = offlineUploader { clock }
+        other.transport = { [unowned self] request, _ in
+            sent += 1
+            return self.answer(request, 202)
+        }
+        other.resumePending(account: 8)
+        _ = await other.settle(sessionId: "s41")
+        XCTAssertEqual(sent, 1, "account 8's own piece")
+        XCTAssertEqual(files("s40").count, 2)
+        offlineUploader { clock }.removeEnded()
+        XCTAssertEqual(files("s40").count, 2, "a second before the date it is still here")
+
+        // The 30 days end: the next launch removes it.
+        clock = deleteOn
+        let later = offlineUploader { clock }
+        later.removeEnded()
+        XCTAssertEqual(files("s40"), [])
+        XCTAssertFalse(later.holdsUnsentAudio(account: 7))
+        XCTAssertEqual(sent, 1, "never sent under account 8")
+    }
+
+    // #777: the account is restored and signs in again before its date. Its
+    // audio stays without an end, as after any sign-out, and uploads.
+    func testARestoredAccountsAudioUploadsAndNoLongerHasAnEnd() async throws {
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        uploader.now = { clock }
+        await recordOffline("s42", account: 7, chunks: 2)
+        let deleteOn = clock.addingTimeInterval(30 * 86_400)
+        uploader.accountDeleted(DeletedAccount(account: 7, deleteOn: deleteOn, restorable: true))
+
+        // Restored on day 10 and signed in while still offline, then signed
+        // out by the server again (a 401 without a deletion).
+        clock = clock.addingTimeInterval(10 * 86_400)
+        uploader.resumePending(account: 7)
+        _ = await uploader.settle(sessionId: "s42")
+        uploader.hold()
+        clock = deleteOn.addingTimeInterval(86_400)
+        uploader.removeEnded()
+        offlineUploader { clock }.removeEnded()
+        XCTAssertEqual(files("s42"), ["chunk_0.body", "chunk_1.body", "manifest.json"], "no end any more")
+
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            sent.append(self.index(of: request, file: file))
+            return self.answer(request, 202)
+        }
+        uploader.resumePending(account: 7)
+        let outcome = await uploader.settle(sessionId: "s42")
+        XCTAssertEqual(sent, [0, 1])
+        XCTAssertEqual(outcome.stored, 2)
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 7))
+    }
+
+    // #777: a deletion that has started (or an account that is gone) removes
+    // the audio at once; one whose date is not known keeps it as after any
+    // sign-out; an answer about the account signed in now changes nothing.
+    func testWhenTheAccountCanNoLongerBeRestoredTheAudioGoesAtOnce() async throws {
+        let clock = Date(timeIntervalSince1970: 1_800_000_000)
+        uploader.now = { clock }
+        await recordOffline("s43", account: 7)
+        await recordOffline("s44", account: 8)
+
+        uploader.accountDeleted(DeletedAccount(account: 7, deleteOn: nil, restorable: false))
+        XCTAssertEqual(files("s43"), [])
+        XCTAssertEqual(files("s44").count, 2)
+
+        uploader.accountDeleted(DeletedAccount(account: 8, deleteOn: nil, restorable: true))
+        offlineUploader { clock.addingTimeInterval(400 * 86_400) }.removeEnded()
+        XCTAssertEqual(files("s44").count, 2, "no date known: kept")
+
+        uploader.resumePending(account: 8)
+        uploader.accountDeleted(DeletedAccount(account: 8, deleteOn: nil, restorable: false))
+        XCTAssertEqual(files("s44").count, 2, "account 8 is signed in: the answer is stale")
+    }
+
+    // #754: Stop could not send chunks 2 and 3; "Continue recording" claims the
+    // session, whose server holds 0 and 1. The new chunks are numbered after
+    // the ones still on the phone, those go first, and their files are the
+    // audio that was recorded for them.
+    func testAContinuedRecordingIsNumberedAfterThePiecesStillOnThePhone() async throws {
+        var online = false
+        var sent: [String] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            if i >= 2 && !online { throw URLError(.notConnectedToInternet) }
+            let body = try Data(contentsOf: file)
+            let byte = (0...255).first { body.range(of: Data(repeating: UInt8($0), count: 32)) != nil } ?? -1
+            sent.append("\(i):\(byte)")
+            return self.answer(request, 202)
+        }
+        uploader.open(sessionId: "s40", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<4 { uploader.enqueue(sessionId: "s40", chunk: chunk(i)) }
+        let stopped = await uploader.settle(sessionId: "s40")
+        XCTAssertEqual(stopped.failed, [2, 3])
+        XCTAssertEqual(files("s40"), ["chunk_2.body", "chunk_3.body", "manifest.json"])
+
+        online = true
+        sent = []
+        let first = uploader.open(sessionId: "s40", uploadURL: URL(string: "http://x/c")!, firstIndex: 2)
+        XCTAssertEqual(first, 4, "after the pieces still on the phone, not the server's 2")
+        for i in first..<(first + 2) {
+            uploader.enqueue(sessionId: "s40", chunk: RecordedChunk(index: i, data: Data(repeating: UInt8(0x40 + i), count: 32),
+                                                                     duration: 15))
+        }
+        let outcome = await uploader.settle(sessionId: "s40")
+        XCTAssertEqual(sent, ["2:2", "3:3", "4:68", "5:69"], "the queued pieces first, with their own audio")
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, 6)
+    }
+
+    // #754: another device recorded into the session meanwhile, so the server
+    // is ahead of the phone: the new chunks follow the server's, and finalize
+    // counts the chunks the phone never had.
+    func testAContinuationAfterTheServerMovedOnCountsItsChunks() async throws {
+        var online = false
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            if i >= 2 && !online { throw URLError(.notConnectedToInternet) }
+            sent.append(i)
+            return i == 2 || i == 3 ? self.answer(request, 200, #"{"message":"Chunk already uploaded"}"#)
+                                    : self.answer(request, 202)
+        }
+        uploader.open(sessionId: "s41", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<4 { uploader.enqueue(sessionId: "s41", chunk: chunk(i)) }
+        _ = await uploader.settle(sessionId: "s41")
+        online = true
+        let first = uploader.open(sessionId: "s41", uploadURL: URL(string: "http://x/c")!, firstIndex: 6)
+        XCTAssertEqual(first, 6)
+        for i in 6..<9 { uploader.enqueue(sessionId: "s41", chunk: chunk(i)) }
+        let outcome = await uploader.settle(sessionId: "s41")
+        XCTAssertEqual(sent.suffix(5), [2, 3, 6, 7, 8])
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, 9, "0-1 and 6-8 from this phone, 2-5 on the server")
+    }
+
+    // #754: a session whose queued pieces are on disk only (a relaunch that has
+    // not resumed them yet) is read before it is continued, so they are kept.
+    func testContinuingASessionKeptOnDiskKeepsItsQueuedPieces() async throws {
+        uploader.transport = { [unowned self] request, file in
+            if self.index(of: request, file: file) == 1 { throw URLError(.notConnectedToInternet) }
+            return self.answer(request, 202)
+        }
+        uploader.open(sessionId: "s42", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s42", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s42", chunk: chunk(1))
+        _ = await uploader.settle(sessionId: "s42")
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        var sent: [Int] = []
+        relaunched.transport = { [unowned self] request, file in
+            sent.append(self.index(of: request, file: file))
+            return self.answer(request, 202)
+        }
+        let first = relaunched.open(sessionId: "s42", uploadURL: URL(string: "http://x/c")!, firstIndex: 1)
+        XCTAssertEqual(first, 2)
+        relaunched.enqueue(sessionId: "s42", chunk: chunk(2))
+        let outcome = await relaunched.settle(sessionId: "s42")
+        XCTAssertEqual(sent, [1, 2])
+        XCTAssertEqual(outcome.totalForFinalize, 3)
+    }
+
+    // #765 with #764: Continue's claim (the server's next index is 1) can be
+    // answered before the left recording's last piece (0) reaches the queue,
+    // or after it. Finalize counts each index once either way.
+    func testTheTotalDoesNotDependOnWhetherALatePieceOrTheClaimComesFirst() async throws {
+        uploader.transport = { [unowned self] request, _ in self.answer(request, 202) }
+        let url = URL(string: "http://x/c")!
+
+        // The claim first, while the manifest holds no chunk yet.
+        uploader.open(sessionId: "s44", uploadURL: url)
+        XCTAssertEqual(uploader.open(sessionId: "s44", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s44", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s44", chunk: chunk(1))
+        let claimFirst = await uploader.settle(sessionId: "s44")
+        XCTAssertEqual(claimFirst.failed, [])
+        XCTAssertEqual(claimFirst.totalForFinalize, 2)
+
+        // The late piece first.
+        uploader.open(sessionId: "s45", uploadURL: url)
+        uploader.enqueue(sessionId: "s45", chunk: chunk(0))
+        XCTAssertEqual(uploader.open(sessionId: "s45", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s45", chunk: chunk(1))
+        let settled45 = await uploader.settle(sessionId: "s45")
+        XCTAssertEqual(settled45.totalForFinalize, 2)
+
+        // The server holds 0 and this phone never had it: with an empty
+        // manifest from an earlier open, and without one.
+        uploader.open(sessionId: "s46", uploadURL: url)
+        XCTAssertEqual(uploader.open(sessionId: "s46", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s46", chunk: chunk(1))
+        let settled46 = await uploader.settle(sessionId: "s46")
+        XCTAssertEqual(settled46.totalForFinalize, 2)
+        XCTAssertEqual(uploader.open(sessionId: "s47", uploadURL: url, firstIndex: 1), 1)
+        uploader.enqueue(sessionId: "s47", chunk: chunk(1))
+        let settled47 = await uploader.settle(sessionId: "s47")
+        XCTAssertEqual(settled47.totalForFinalize, 2)
+    }
+
+    // The review's probes: two Continues in a row, each stopped offline, and
+    // then a Continue after a relaunch. Every index is counted once.
+    func testRepeatedContinuesAndARelaunchCountEveryIndexOnce() async throws {
+        var online = false
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            if i >= 2 && !online { throw URLError(.notConnectedToInternet) }
+            sent.append(i)
+            return self.answer(request, 202)
+        }
+        let url = URL(string: "http://x/c")!
+        uploader.open(sessionId: "s48", uploadURL: url)
+        for i in 0..<4 { uploader.enqueue(sessionId: "s48", chunk: chunk(i)) }
+        _ = await uploader.settle(sessionId: "s48")
+        XCTAssertEqual(uploader.open(sessionId: "s48", uploadURL: url, firstIndex: 2), 4)
+        for i in 4..<6 { uploader.enqueue(sessionId: "s48", chunk: chunk(i)) }
+        let settled48 = await uploader.settle(sessionId: "s48")
+        XCTAssertEqual(settled48.failed, [2, 3, 4, 5])
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.delay = { _ in 0.001 }
+        relaunched.transport = uploader.transport
+        XCTAssertEqual(relaunched.open(sessionId: "s48", uploadURL: url, firstIndex: 2), 6)
+        online = true
+        for i in 6..<8 { relaunched.enqueue(sessionId: "s48", chunk: chunk(i)) }
+        let outcome = await relaunched.settle(sessionId: "s48")
+        XCTAssertEqual(sent, [0, 1, 2, 3, 4, 5, 6, 7])
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, 8)
+    }
+
+    // #754: a number already queued is never written again.
+    func testAQueuedChunkIsNeverWrittenOver() async throws {
+        uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        uploader.open(sessionId: "s43", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s43", chunk: chunk(1))
+        _ = await uploader.settle(sessionId: "s43")
+        uploader.enqueue(sessionId: "s43", chunk: RecordedChunk(index: 1, data: Data(repeating: 0xEE, count: 32), duration: 15))
+        let body = try Data(contentsOf: root.appendingPathComponent("s43").appendingPathComponent("chunk_1.body"))
+        XCTAssertNotNil(body.range(of: Data(repeating: 1, count: 32)), "the queued audio is still there")
+        XCTAssertNil(body.range(of: Data(repeating: 0xEE, count: 32)))
+        XCTAssertEqual(uploader.outcome("s43").produced, 1)
+    }
+
+    private let notFoundBody = #"{"error":"Streaming session not found","code":"session_not_found"}"#
+
+    // Review of #765: the server has no such recording for the account signed
+    // in (it was discarded on the web, or cleaned up). Its pieces leave the
+    // phone and no longer count as unsent audio, nothing more is sent into it,
+    // and a relaunch does not bring it back.
+    func testARecordingTheServerNoLongerHasLeavesThePhone() async throws {
+        uploader.resumePending(account: 7)
+        var sent: [Int] = []
+        uploader.transport = { [unowned self] request, file in
+            let i = self.index(of: request, file: file)
+            sent.append(i)
+            return i == 0 ? self.answer(request, 202) : self.answer(request, 404, self.notFoundBody)
+        }
+        uploader.open(sessionId: "s34", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<3 { uploader.enqueue(sessionId: "s34", chunk: chunk(i)) }
+        let outcome = await uploader.settle(sessionId: "s34")
+        XCTAssertEqual(sent, [0, 1], "not retried, and nothing more is sent into it")
+        XCTAssertEqual(outcome.fatalMessage, ChunkUploader.sessionNotFoundMessage)
+        XCTAssertEqual(files("s34"), ["manifest.json"])
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: 7))
+
+        let relaunched = ChunkUploader(root: root, useBackgroundSession: false)
+        relaunched.transport = { [unowned self] request, file in
+            sent.append(self.index(of: request, file: file))
+            return self.answer(request, 202)
+        }
+        XCTAssertEqual(relaunched.resumePending(account: 7), [])
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(sent, [0, 1])
+        XCTAssertEqual(files("s34"), [])
+
+        // A 404 without the code (not the server's answer about the recording) deletes nothing.
+        uploader.transport = { [unowned self] request, _ in self.answer(request, 404, "<html>Not Found</html>") }
+        uploader.open(sessionId: "s37", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s37", chunk: chunk(0))
+        let plain = await uploader.settle(sessionId: "s37")
+        XCTAssertNil(plain.fatalMessage)
+        XCTAssertEqual(files("s37"), ["chunk_0.body", "manifest.json"])
+    }
+
+    // ...but only for a recording made under the account signed in now, while
+    // it still is. A queue an earlier build left may be another account's; a
+    // recording of another account is never sent, so it gets no answer; an
+    // answer that comes after a sign-out the server caused deletes nothing.
+    func testANotFoundAnswerDeletesNothingUnlessTheRecordingsAccountIsSignedIn() async throws {
+        // 1. A queue from an earlier build, taken by account 8.
+        uploader.transport = { _, _ in throw URLError(.notConnectedToInternet) }
+        uploader.open(sessionId: "s35", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s35", chunk: chunk(0))
+        _ = await uploader.settle(sessionId: "s35")
+        let adopter = ChunkUploader(root: root, useBackgroundSession: false)
+        adopter.delay = { _ in 0.001 }
+        var answered = 0
+        adopter.transport = { [unowned self] request, _ in
+            answered += 1
+            return self.answer(request, 404, self.notFoundBody)
+        }
+        adopter.resumePending(account: 8)
+        let adopted = await adopter.settle(sessionId: "s35")
+        XCTAssertGreaterThan(answered, 0)
+        XCTAssertNil(adopted.fatalMessage)
+        XCTAssertEqual(files("s35"), ["chunk_0.body", "manifest.json"], "kept: it may be another account's")
+        uploader.forget(sessionId: "s35")
+
+        // 2. Account 7's recording while account 8 is signed in: never sent.
+        uploader.resumePending(account: 7)
+        uploader.open(sessionId: "s36", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s36", chunk: chunk(0))
+        _ = await uploader.settle(sessionId: "s36")
+        uploader.hold()
+        var sentUnderEight = 0
+        uploader.transport = { [unowned self] request, _ in
+            sentUnderEight += 1
+            return self.answer(request, 404, self.notFoundBody)
+        }
+        uploader.resumePending(account: 8)
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertEqual(sentUnderEight, 0)
+        XCTAssertEqual(files("s36"), ["chunk_0.body", "manifest.json"])
+
+        // 3. Account 7 again; its request is in flight when the server refuses
+        // the sign-in and the app holds the queue; then the answer comes.
+        uploader.hold()
+        var inFlight = false
+        uploader.transport = { [unowned self] request, _ in
+            inFlight = true
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { done.resume() }
+            }
+            return self.answer(request, 404, self.notFoundBody)
+        }
+        uploader.resumePending(account: 7)
+        try await waitUntil { inFlight }
+        uploader.hold()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(files("s36"), ["chunk_0.body", "manifest.json"])
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 7))
+    }
+
+    // MARK: The recorder's numbering (#754)
+
+    /// A tone file the Debug file source reads in real time.
+    private func toneFile(seconds: Double) throws -> URL {
+        let url = root.appendingPathComponent("tone-\(UUID().uuidString).caf")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let format = AVAudioFormat(standardFormatWithSampleRate: 44_100, channels: 1)!
+        let frames = AVAudioFrameCount(seconds * 44_100)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)!
+        buffer.frameLength = frames
+        for i in 0..<Int(frames) {
+            buffer.floatChannelData![0][i] = Float(sin(Double(i) * 2 * .pi * 440 / 44_100) * 0.2)
+        }
+        do {
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            try file.write(from: buffer)
+        }
+        return url
+    }
+
+    /// The first-run piece of a chunk body: the chunk's own byte when it is
+    /// one of `chunk(i)`'s, else only its number.
+    private func label(_ request: URLRequest, _ file: URL) -> String {
+        let i = index(of: request, file: file)
+        let body = (try? Data(contentsOf: file)) ?? Data()
+        let own = body.range(of: Data(repeating: UInt8(truncatingIfNeeded: i), count: 32)) != nil
+        return own ? "\(i):own" : "\(i)"
+    }
+
+    private func makeRecorder(_ file: URL, ended: @escaping () -> Void,
+                          observed: @escaping (RecordedChunk) -> Void) -> VoiceRecorder {
+        let recorder = VoiceRecorder(uploader: uploader, debugFile: file,
+                                     recordingLog: RecordingLog(directory: root.appendingPathComponent("log")))
+        recorder.onSourceEnded = ended
+        recorder.chunkObserver = observed
+        return recorder
+    }
+
+    // #754 through the real recorder: "Continue recording" holds its pieces
+    // until the claim answers 2 (the server holds 0 and 1); this phone still
+    // holds 2 and 3. The recorder's first piece becomes 4 (`releaseHeldChunks`),
+    // and 2 and 3 go first with their own audio.
+    func testTheRecorderNumbersAContinuationPastThePiecesStillOnThePhone() async throws {
+        var online = false
+        var sent: [String] = []
+        uploader.transport = { [unowned self] request, file in
+            if self.index(of: request, file: file) >= 2 && !online { throw URLError(.notConnectedToInternet) }
+            sent.append(self.label(request, file))
+            return self.answer(request, 202)
+        }
+        uploader.open(sessionId: "s60", uploadURL: URL(string: "http://x/c")!)
+        for i in 0..<4 { uploader.enqueue(sessionId: "s60", chunk: chunk(i)) }
+        let stopped = await uploader.settle(sessionId: "s60")
+        XCTAssertEqual(stopped.failed, [2, 3])
+        online = true
+        sent = []
+
+        var ended = false
+        var observed: [RecordedChunk] = []
+        let recorder = makeRecorder(try toneFile(seconds: 1), ended: { ended = true }, observed: { observed.append($0) })
+        try recorder.startHoldingChunks(sessionId: "s60", uploadURL: URL(string: "http://x/c")!,
+                                        firstChunkIndex: 2, elapsedOffset: 30)
+        try await waitUntil(timeout: 15) { ended }
+        recorder.pause()
+        XCTAssertEqual(sent, [], "held until the claim answers")
+        recorder.releaseHeldChunks(firstChunkIndex: 2)
+        let outcome = await recorder.stop()
+
+        XCTAssertEqual(observed.first?.index, 4)
+        XCTAssertTrue(observed.first.map { MP4Boxes.startsWithFtyp($0.data) } ?? false, "a new stream's first piece")
+        XCTAssertEqual(Array(sent.prefix(3)), ["2:own", "3:own", "4"])
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, (observed.map(\.index).max() ?? 0) + 1)
+    }
+
+    // The same for a recorder that starts without holding (`begin`): a
+    // session of which this phone still holds 0 and 1 is numbered from 2.
+    func testTheRecorderStartsPastThePiecesStillOnThePhone() async throws {
+        var online = false
+        var sent: [String] = []
+        uploader.transport = { [unowned self] request, file in
+            if !online { throw URLError(.notConnectedToInternet) }
+            sent.append(self.label(request, file))
+            return self.answer(request, 202)
+        }
+        uploader.open(sessionId: "s61", uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: "s61", chunk: chunk(0))
+        uploader.enqueue(sessionId: "s61", chunk: chunk(1))
+        let stopped = await uploader.settle(sessionId: "s61")
+        XCTAssertEqual(stopped.failed, [0, 1])
+        online = true
+
+        var ended = false
+        var observed: [RecordedChunk] = []
+        let recorder = makeRecorder(try toneFile(seconds: 1), ended: { ended = true }, observed: { observed.append($0) })
+        try recorder.start(sessionId: "s61", uploadURL: URL(string: "http://x/c")!, firstChunkIndex: 0, elapsedOffset: 0)
+        try await waitUntil(timeout: 15) { ended }
+        let outcome = await recorder.stop()
+
+        XCTAssertEqual(observed.first?.index, 2)
+        XCTAssertEqual(Array(sent.prefix(3)), ["0:own", "1:own", "2"])
+        XCTAssertEqual(outcome.failed, [])
+        XCTAssertEqual(outcome.totalForFinalize, (observed.map(\.index).max() ?? 0) + 1)
     }
 
     func testDuplicateAnswerCountsAsStored() async throws {
@@ -670,6 +1291,24 @@ final class PlaybackFailureTests: XCTestCase {
                        "Audio playback failed.")
     }
 
+    /// The server's MP3 of a WebM recording: a refusal with its own words and
+    /// code (429 `download_busy`) says those words; any other failure keeps the
+    /// WebM message.
+    func testConvertedRecordingFailureSaysTheServersWordsForARefusal() {
+        let busy = "Another download of a recording is being prepared. Please try again in a few minutes."
+        let body = Data("{\"error\": \"\(busy)\", \"code\": \"download_busy\"}".utf8)
+        let refusal = APIError.from(status: 429, contentType: "application/json", data: body)
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: refusal), busy)
+
+        let noCode = APIError.from(status: 500, contentType: "application/json",
+                                   data: Data("{\"error\": \"Failed to convert to MP3\"}".utf8))
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: noCode), ListenFormats.webMMessage)
+        let page = APIError.from(status: 504, contentType: "text/html", data: Data("<html></html>".utf8))
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: page), ListenFormats.webMMessage)
+        XCTAssertEqual(ListenFormats.convertedRecordingMessage(for: URLError(.timedOut)),
+                       ListenFormats.webMMessage)
+    }
+
     func testAnUnplayableItemIsReportedOnceAndTheQueueFinishes() async throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("playback-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -719,5 +1358,277 @@ final class PrivateFilesTests: XCTestCase {
         try Data("x".utf8).write(to: file)
         PrivateFiles.remove(file)
         XCTAssertFalse(fm.fileExists(atPath: folder.path))
+    }
+}
+
+import SwiftUI
+
+// #763, through the app: which sign-outs keep recorded audio that has not
+// reached the server, and which delete it (after saying so).
+@MainActor
+final class SignOutUnsentAudioTests: StubbedAppTestCase {
+    private var root: URL!
+    private var uploader: ChunkUploader!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("signout-\(UUID().uuidString)")
+        uploader = ChunkUploader(root: root, useBackgroundSession: false)
+        uploader.delay = { _ in 0.001 }
+        app.audio.uploader = uploader
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: root)
+        try await super.tearDown()
+    }
+
+    private func status(_ code: Int) -> (URLRequest, URL) async throws -> (Data, HTTPURLResponse) {
+        { request, _ in (Data(), HTTPURLResponse(url: request.url!, statusCode: code, httpVersion: nil, headerFields: nil)!) }
+    }
+
+    /// A recording whose only piece the server refused with a 401.
+    private func recordWhileTheSignInIsRefused(_ sessionId: String) async {
+        uploader.transport = status(401)
+        uploader.open(sessionId: sessionId, uploadURL: URL(string: "http://x/c")!)
+        uploader.enqueue(sessionId: sessionId, chunk: RecordedChunk(index: 0, data: Data(repeating: 1, count: 32), duration: 15))
+        _ = await uploader.settle(sessionId: sessionId)
+    }
+
+    private func signInAgain() throws {
+        app.useForTesting(api: app.api, user: try decode(CurrentUser.self, Self.userJSON))
+        app.audio.didSignIn(account: 5)
+    }
+
+    func testA401KeepsTheAudioUntilTheSameAccountSignsInAgain() async throws {
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s50")
+        XCTAssertTrue(app.signOutDeletesUnsentAudio)
+
+        // Any request answered 401 signs the app out on its own (`handle(.unauthorized)`).
+        await app.signOutLocally()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertTrue(uploader.isHeld)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "kept on this phone")
+
+        // The same account signs in again: the piece goes.
+        var sent = 0
+        uploader.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        try signInAgain()
+        let outcome = await uploader.settle(sessionId: "s50")
+        XCTAssertEqual(sent, 1)
+        XCTAssertEqual(outcome.stored, 1)
+        XCTAssertFalse(app.signOutDeletesUnsentAudio)
+    }
+
+    func testA401ToWhoAmIAndLeavingTheRestoreQuestionKeepTheAudioToo() async throws {
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s53")
+        StubURLProtocol.install { _ in .json(401, #"{"error":"Unauthorized"}"#) }
+        await app.loadUser()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertTrue(uploader.isHeld)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        await app.leaveAccountDeletionScreen()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+    }
+
+    func testLogoutSaysTheAudioIsDeletedAndDeletesIt() async throws {
+        app.audio.didSignIn(account: 5)
+        // Nothing waiting: a sign-out button signs out at once.
+        var asked = false
+        let question = Binding(get: { asked }, set: { asked = $0 })
+        StubURLProtocol.install { _ in .json(200, "{}") }
+        await app.requestSignOut(question: question)?.value
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertFalse(asked)
+
+        try signInAgain()
+        await recordWhileTheSignInIsRefused("s51")
+        app.requestSignOut(question: question)
+        XCTAssertTrue(asked, "the screen asks first")
+        XCTAssertEqual(app.phase, .signedIn, "and nothing happens before the answer")
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        await app.signOut()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil), "confirmed: deleted")
+        // Where the account is not known, the question says every account's audio goes.
+        XCTAssertTrue(SignOutQuestion.everyAccount.message.contains("deletes all of it from this phone, for every account"))
+    }
+
+    // MARK: #777: a deleted account's audio stays while it can be restored
+
+    /// A launch of the app on this phone (the queue on disk stays).
+    private func launchAgain() async {
+        let relaunched = AppState(launch: LaunchOptions(), secureStore: InMemorySecureStore(), defaults: defaults)
+        relaunched.audio.uploader = uploader
+        await relaunched.start()
+        XCTAssertEqual(relaunched.phase, .signedOut, "nobody is signed in on that launch")
+    }
+
+    /// The 401 of a sign-in whose account (5) is deleted (backend `refused_sign_in`).
+    private func deletedAnswer(deleteOn: String?, restorable: Bool = true) -> String {
+        let date = deleteOn.map { "\"\($0)\"" } ?? "null"
+        return #"{"error":"Unauthorized","code":"account_deleted","user_id":5,"delete_on":\#(date),"restorable":\#(restorable)}"#
+    }
+
+    /// The restore question, "Restore my account", and the sign-in after it.
+    private func answerTheRestore(offer: String) {
+        StubURLProtocol.install { request in
+            switch (request.httpMethod ?? "", request.url?.path ?? "") {
+            case ("GET", "/api/account/restore"): return .json(200, offer)
+            case ("POST", "/api/account/restore"): return .json(200, #"{"status":"restored","next":"/"}"#)
+            case ("POST", "/api/account/restore/decline"): return .json(200, #"{"status":"declined"}"#)
+            default: return .json(200, #"{"user":\#(Self.userJSON),"nodes":[],"pinned_nodes":[]}"#)
+            }
+        }
+    }
+
+    private func sendEverything() -> () -> Int {
+        var sent = 0
+        uploader.transport = { request, _ in
+            sent += 1
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 202, httpVersion: nil, headerFields: nil)!)
+        }
+        return { sent }
+    }
+
+    // (1) Deleting the account on this phone keeps its unsent audio; after a
+    // restore and sign-in it uploads as after any sign-in.
+    func testDeletingTheAccountHereKeepsItsAudioAndARestoreSendsIt() async throws {
+        let clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s52")
+        let deleteOn = clock.addingTimeInterval(30 * 86_400)
+        await app.accountDeletionScheduled(deleteOn: deleteOn)
+        XCTAssertEqual(app.phase, .accountDeleted(deleteOn: deleteOn))
+        XCTAssertTrue(uploader.isHeld)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "kept while the account can be restored")
+        await app.leaveAccountDeletionScreen()
+        await launchAgain()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        // The person signs in, and restores the account at the question.
+        answerTheRestore(offer: #"{"username":"seowriter","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#)
+        let sent = sendEverything()
+        await app.signInCompleted(landing: "/account-restore")
+        let question = AccountRestoreModel(app: app)
+        await question.load()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+        await question.restore()
+        XCTAssertEqual(app.phase, .signedIn)
+        let outcome = await uploader.settle(sessionId: "s52")
+        XCTAssertEqual(sent(), 1)
+        XCTAssertEqual(outcome.stored, 1)
+        XCTAssertFalse(app.signOutDeletesUnsentAudio)
+    }
+
+    // (1) Without a restore, the audio leaves the phone at the first launch
+    // after the 30 days (here the server's answer had no date: 30 days from
+    // the request, as the page says).
+    func testADeletedAccountsAudioLeavesThePhoneWhenTheThirtyDaysEnd() async throws {
+        var clock = Date()
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s54")
+        await app.accountDeletionScheduled(deleteOn: nil)
+        await app.leaveAccountDeletionScreen()
+
+        clock = clock.addingTimeInterval(29 * 86_400)
+        await launchAgain()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "day 29: still restorable")
+        clock = clock.addingTimeInterval(2 * 86_400)
+        await launchAgain()
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil), "day 31: removed")
+    }
+
+    // (2) The deletion was scheduled elsewhere while the app runs: the
+    // server's 401 says until when; the audio stays until then, and goes
+    // when the app comes back after it.
+    func testADeletionScheduledElsewhereKeepsTheAudioUntilItsDate() async throws {
+        var clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s55")
+        let refusal = deletedAnswer(deleteOn: "2026-12-23T10:00:00Z")
+        StubURLProtocol.install { _ in .json(401, refusal) }
+        let _: EmptyResponse? = try? await app.api.get("/api/drafts")
+        let deadline = Date().addingTimeInterval(3)
+        while app.phase != .signedOut && Date() < deadline { try await Task.sleep(nanoseconds: 5_000_000) }
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertTrue(uploader.isHeld)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        clock = try XCTUnwrap(LooreDate.parse("2026-12-23T09:59:59Z"))
+        await launchAgain()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+        // The app comes back to the foreground after the date.
+        clock = try XCTUnwrap(LooreDate.parse("2026-12-23T10:00:00Z"))
+        app.audio.appDidBecomeActive()
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
+    }
+
+    // (2) The same, learned by "who am I" at launch; the person restores the
+    // account and signs in on the phone: the audio uploads.
+    func testARestoreAfterADeletionElsewhereSendsTheAudio() async throws {
+        let clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s56")
+        let refusal = deletedAnswer(deleteOn: "2026-12-23T10:00:00Z")
+        StubURLProtocol.install { _ in .json(401, refusal) }
+        await app.loadUser()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5))
+
+        answerTheRestore(offer: #"{"username":"seowriter","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#)
+        let sent = sendEverything()
+        await app.signInCompleted(landing: "/account-restore")
+        let question = AccountRestoreModel(app: app)
+        await question.load()
+        await question.restore()
+        let outcome = await uploader.settle(sessionId: "s56")
+        XCTAssertEqual(sent(), 1)
+        XCTAssertEqual(outcome.stored, 1)
+    }
+
+    // (2) A deletion that has started, or an account that is gone: removed at once.
+    func testASignInRefusedForAnAccountThatCannotComeBackRemovesItsAudio() async throws {
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s58")
+        let refusal = deletedAnswer(deleteOn: nil, restorable: false)
+        StubURLProtocol.install { _ in .json(401, refusal) }
+        await app.loadUser()
+        XCTAssertEqual(app.phase, .signedOut)
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
+    }
+
+    // Audio held before the phone knew of the deletion (a plain 401, or an
+    // earlier build): the restore question sets its end. "Keep it deleted"
+    // keeps it until the date, and the first launch after it removes it.
+    func testTheRestoreQuestionSetsTheEndOfAudioHeldBeforeThePhoneKnew() async throws {
+        var clock = try XCTUnwrap(LooreDate.parse("2026-11-23T10:00:00Z"))
+        uploader.now = { clock }
+        app.audio.didSignIn(account: 5)
+        await recordWhileTheSignInIsRefused("s57")
+        await app.signOutLocally()
+
+        answerTheRestore(offer: #"{"username":"seowriter","user_id":5,"delete_on":"2026-12-23T10:00:00Z","restorable":true}"#)
+        await app.signInCompleted(landing: "/account-restore")
+        let question = AccountRestoreModel(app: app)
+        await question.load()
+        await question.keepDeleted()
+        await app.leaveAccountDeletionScreen()
+        XCTAssertTrue(uploader.holdsUnsentAudio(account: 5), "still restorable")
+
+        clock = try XCTUnwrap(LooreDate.parse("2026-12-23T10:00:00Z"))
+        await launchAgain()
+        XCTAssertFalse(uploader.holdsUnsentAudio(account: nil))
     }
 }

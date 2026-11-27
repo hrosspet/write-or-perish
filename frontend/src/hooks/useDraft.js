@@ -8,6 +8,9 @@ import api from '../api';
  * @param {number} options.parentId - Parent node ID if creating a new child node
  * @param {number} options.autoSaveInterval - Auto-save interval in ms (default: 3000)
  * @param {number} options.debounceDelay - Debounce delay for typing (default: 1000)
+ * @param {string} options.baseContent - Editing: the entry's text the form was
+ *   opened on, sent with each autosave (#799). The server marks a draft whose
+ *   base is no longer the entry's text as older than the entry.
  * @returns {Object} - { draft, saveDraft, deleteDraft, lastSaved, isSaving, loadError }
  */
 export function useDraft(options = {}) {
@@ -15,7 +18,8 @@ export function useDraft(options = {}) {
     nodeId = null,
     parentId = null,
     autoSaveInterval = 3000,
-    debounceDelay = 1000
+    debounceDelay = 1000,
+    baseContent = null
   } = options;
 
   const [draft, setDraft] = useState(null);
@@ -32,6 +36,12 @@ export function useDraft(options = {}) {
   const inFlightSaveRef = useRef(null);
   // True from the start of deleteDraft until its DELETE has completed
   const deletingRef = useRef(false);
+  // The draft row this form's text is saved in (the loaded one, then each
+  // save's answer): with an older edit on offer, "Discard draft" deletes
+  // only this one (#766).
+  const savedIdRef = useRef(null);
+  const baseContentRef = useRef(baseContent);
+  baseContentRef.current = baseContent;
 
   // Build query params for API calls
   const buildParams = useCallback(() => {
@@ -48,6 +58,7 @@ export function useDraft(options = {}) {
         const params = buildParams();
         const response = await api.get(`/drafts/?${params}`);
         setDraft(response.data);
+        savedIdRef.current = response.data.id ?? null;
         // Parse server timestamp as UTC (append Z if missing)
         const timestamp = response.data.updated_at;
         const utcTimestamp = timestamp.endsWith('Z') ? timestamp : timestamp + 'Z';
@@ -89,11 +100,14 @@ export function useDraft(options = {}) {
     setIsSaving(true);
     const request = (async () => {
       try {
+        const base = baseContentRef.current;
         const response = await api.post('/drafts/', {
           content,
           node_id: nodeId,
-          parent_id: parentId
+          parent_id: parentId,
+          ...(nodeId && typeof base === 'string' && { base_content: base }),
         });
+        savedIdRef.current = response.data.id ?? savedIdRef.current;
         // Only update draft state on initial load, not on every save
         // This prevents unnecessary re-renders that cause cursor jumping
         // setDraft(response.data);
@@ -151,8 +165,28 @@ export function useDraft(options = {}) {
     };
   }, [autoSaveInterval, saveDraftToServer]);
 
-  // Delete draft from server
-  const deleteDraft = useCallback(async () => {
+  // Saves `content` now, without waiting for the debounce (an edit Save was
+  // refused, #799 review: another device's Save may have deleted this
+  // form's draft, and the text must outlive a reload).
+  const saveDraftNow = useCallback(async (content) => {
+    pendingContentRef.current = content;
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    if (inFlightSaveRef.current) {
+      await inFlightSaveRef.current;
+    }
+    if (pendingContentRef.current !== null) {
+      await saveDraftToServer(pendingContentRef.current);
+    }
+  }, [saveDraftToServer]);
+
+  // Delete draft from server. Without options: every draft of the place.
+  // `keepingId`: an older edit on offer stays; only this form's own row
+  // goes (none yet: nothing is deleted). `shownIds`: this form's own row
+  // and these (the rows the form showed, after an edit's Save, #799
+  // review); a row it never showed stays.
+  const deleteDraft = useCallback(async ({ keepingId = null, shownIds = null } = {}) => {
     // Block new autosaves first, so none can start while we wait below
     deletingRef.current = true;
     // Clear any pending saves
@@ -168,8 +202,18 @@ export function useDraft(options = {}) {
       if (inFlightSaveRef.current) {
         await inFlightSaveRef.current;
       }
-      const params = buildParams();
+      let params = buildParams();
+      if (keepingId != null) {
+        const own = savedIdRef.current;
+        if (own == null || own === keepingId) return;
+        params += `&draft_id=${own}`;
+      } else if (shownIds) {
+        const ids = [...new Set([savedIdRef.current, ...shownIds].filter((id) => id != null))];
+        if (ids.length === 0) return;
+        params += ids.map((id) => `&draft_id=${id}`).join('');
+      }
       await api.delete(`/drafts/?${params}`);
+      savedIdRef.current = null;
       setDraft(null);
       setLastSaved(null);
     } catch (err) {
@@ -188,6 +232,7 @@ export function useDraft(options = {}) {
     draft,
     isLoaded,
     saveDraft,
+    saveDraftNow,
     deleteDraft,
     lastSaved,
     isSaving,

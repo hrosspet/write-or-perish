@@ -518,7 +518,8 @@ def test_the_thread_s_earlier_reads_are_its_own_completed_ones_of_the_window(app
 
 def test_the_budget_is_the_thread_limit_less_the_margin(app):  # noqa: F811
     """250k less 2 %: 245,000 tokens on GPT-5.6 Luna and GPT-6 Luna, under
-    their 272k price tier; a model whose window is smaller sets it."""
+    their 272k price tier; a model whose window is smaller sets it. With
+    the limit off, the price tier does (#733)."""
     from backend.config import Config
     from backend.llm_providers import model_input_cap
     models = app.config["SUPPORTED_MODELS"]
@@ -537,7 +538,7 @@ def test_the_budget_is_the_thread_limit_less_the_margin(app):  # noqa: F811
             * (1 - GLEAN_BUDGET_MARGIN))
         app.config["THREAD_PROMPT_TOKEN_LIMIT"] = 0
         assert glean_prompt_budget("gpt-5.6-luna", app.config) == int(
-            922_000 * (1 - GLEAN_BUDGET_MARGIN))
+            272_000 * (1 - GLEAN_BUDGET_MARGIN))
     finally:
         app.config["THREAD_PROMPT_TOKEN_LIMIT"] = saved
         for model in added:

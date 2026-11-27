@@ -42,4 +42,49 @@ final class SearchAccessTests: XCTestCase {
                        "Search needs AI to find things by meaning. Your Default AI usage is set to None, so Loore "
                        + "keeps your entries away from AI. You can change it in Account settings.")
     }
+
+    // An account that keeps its writing with Anthropic: the search model is
+    // OpenAI's, so there is no search by meaning; an admin keeps keyword search.
+
+    func testAnAccountThatKeepsToAnthropicHasNoSearch() {
+        XCTAssertEqual(SearchAccess.decide(accountAIUsage: .chat, isAdmin: false, keptToProvider: "anthropic"),
+                       .oneProvider("anthropic"))
+        XCTAssertEqual(SearchAccess.decide(accountAIUsage: .chat, isAdmin: true, keptToProvider: "anthropic"),
+                       .keywordOnly)
+        // Set to None as well: the None notice comes first.
+        XCTAssertEqual(SearchAccess.decide(accountAIUsage: .off, isAdmin: false, keptToProvider: "anthropic"),
+                       .needsAI)
+        // Control: no provider named, today's search.
+        XCTAssertEqual(SearchAccess.decide(accountAIUsage: .chat, isAdmin: false, keptToProvider: nil), .semantic)
+        XCTAssertEqual(SearchAccess.decide(accountAIUsage: .chat, isAdmin: false, keptToProvider: ""), .semantic)
+    }
+
+    func testTheServersOneProviderRefusalNamesTheProvider() {
+        XCTAssertEqual(SearchAccess.oneProviderRefusal(
+            refusal(#"{"error":"x","code":"search_one_provider","provider":"anthropic"}"#)), "anthropic")
+        XCTAssertEqual(SearchAccess.oneProviderRefusal(refusal(#"{"error":"x","code":"search_one_provider"}"#)),
+                       "unknown")
+        XCTAssertNil(SearchAccess.oneProviderRefusal(
+            refusal(#"{"error":"x","code":"ai_usage_none","scope":"account"}"#)))
+        XCTAssertFalse(SearchAccess.isRefusal(
+            refusal(#"{"error":"x","code":"search_one_provider","provider":"anthropic"}"#)))
+    }
+
+    func testTheUserFieldIsRead() throws {
+        let kept = try JSONDecoder().decode(
+            CurrentUser.self, from: Data(#"{"id":1,"search_kept_to_provider":"anthropic"}"#.utf8))
+        XCTAssertEqual(kept.searchKeptToProvider, "anthropic")
+        let other = try JSONDecoder().decode(CurrentUser.self, from: Data(#"{"id":1,"search_kept_to_provider":null}"#.utf8))
+        XCTAssertNil(other.searchKeptToProvider)
+        XCTAssertNil(try JSONDecoder().decode(CurrentUser.self, from: Data(#"{"id":1}"#.utf8)).searchKeptToProvider)
+    }
+
+    func testOneProviderCopy() {
+        XCTAssertEqual(SearchAccess.oneProviderTitle, "Search is off")
+        XCTAssertEqual(SearchAccess.oneProviderBody("anthropic"),
+                       "Search by meaning is off for this account, in the app and in the AI's search of "
+                       + "your archive. Search data would be computed by OpenAI, and you chose to keep your "
+                       + "background work with Anthropic. You can change this under Background tasks in "
+                       + "Account settings on loore.org.")
+    }
 }

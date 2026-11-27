@@ -39,6 +39,40 @@ final class RecordingLimitsTests: StubbedAppTestCase {
         XCTAssertFalse(app.spendCapped)
     }
 
+    // #736: in Voice mode the length messages stay until the person dismisses
+    // them (the app's toasts, with no time limit and a dismiss button). The
+    // same message is not shown twice; the two-hour one and the four-hour stop
+    // stack, oldest first. Sign-out clears them.
+    func testALastingMessageStaysUntilDismissed() async throws {
+        let stop = ChunkUploader.longestRecordingMessage
+        let notices: VoiceNotices = app.audio
+        notices.lastingToast(RecordingLimits.tooLongMessage)
+        app.toasts.show("A short one", duration: 0.05)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(app.toasts.toasts.map(\.message), [RecordingLimits.tooLongMessage],
+                       "the short toast went; the lasting one stays")
+        XCTAssertEqual(app.toasts.toasts.map(\.lasting), [true])
+
+        notices.lastingToast(stop)
+        notices.lastingToast(stop)
+        notices.lastingToast(RecordingLimits.tooLongMessage)
+        XCTAssertEqual(app.toasts.toasts.map(\.message), [RecordingLimits.tooLongMessage, stop])
+
+        app.toasts.dismiss(app.toasts.toasts[0].id)
+        XCTAssertEqual(app.toasts.toasts.map(\.message), [stop])
+        app.toasts.clear()
+        XCTAssertTrue(app.toasts.toasts.isEmpty)
+    }
+
+    // The notification at the four-hour stop (#736) has the same words as the
+    // screen: the server's, or Loore's own when its answer carried none.
+    func testTheStopNotification() {
+        XCTAssertEqual(LocalNotice.recordingStopped.title, "Your recording has stopped")
+        XCTAssertEqual(LocalNotice.recordingStopped.body, ChunkUploader.longestRecordingMessage)
+        XCTAssertNotEqual(LocalNotice.recordingStopped.rawValue, LocalNotice.longRecording.rawValue,
+                          "it does not replace the 59-minute one")
+    }
+
     func testAFailedChunkSaysNothingHere() {
         let dictation = DictationController(app: app)
 

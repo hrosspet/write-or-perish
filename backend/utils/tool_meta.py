@@ -48,6 +48,27 @@ def get_tool_meta_entry(node, tool_name):
 SHARED_TOOL_FIELDS = ("name", "status")
 
 
+def share_owner_id(node):
+    """The user a node's saved-share state belongs to: the user an AI
+    reply was written for, else the entry's author (the owner
+    utils/share.may_save_shares_from lets save)."""
+    if node.node_type == "llm":
+        return node.human_owner_id or node.user_id
+    return node.user_id
+
+
+def _without_saved_share_state(node, meta):
+    """*meta* without the saved-share state Save to shares writes:
+    entries marked owner-only, and a propose_share entry on a node that
+    is not an AI reply (only a save writes one there)."""
+    from backend.utils.tool_record import OWNER_ONLY_KEY
+    return [m for m in meta if not (
+        isinstance(m, dict)
+        and (m.get(OWNER_ONLY_KEY) is True
+             or (m.get("name") == "propose_share"
+                 and node.node_type != "llm")))]
+
+
 def tool_calls_meta_for(node, viewer_id):
     """*node*'s tool_calls_meta as *viewer_id* may see it: a list (empty
     when nothing is left), or None when the column is empty or unreadable.
@@ -55,10 +76,24 @@ def tool_calls_meta_for(node, viewer_id):
     The reply's owner (the user who asked for it, else the node's author:
     the owner the access checks use) gets every entry in full. Anyone
     else, admins included, gets each entry's SHARED_TOOL_FIELDS only.
-    Nobody gets the app marker (utils/client_platform)."""
+    Nobody gets the app marker (utils/client_platform). An entry's
+    saved-share state goes to its owner only (share_owner_id): anyone
+    else gets the record as if no share had been saved."""
     from backend.utils.client_platform import without_client_marker
-    if not node.tool_calls_meta:
+    from backend.utils.tool_record import shown_exactly
+    if not node.tool_calls_meta_stored:
         return None
+    owner = viewer_id is not None \
+        and (node.human_owner_id or node.user_id) == viewer_id
+    share_owner = viewer_id is not None and share_owner_id(node) == viewer_id
+    if not owner:
+        # The stored value repeats these fields beside the encrypted
+        # record, so another viewer's answer decrypts nothing.
+        shown = shown_exactly(node.tool_calls_meta_stored)
+        if shown is not None:
+            shown = without_client_marker(shown)
+            return shown if share_owner else _without_saved_share_state(
+                node, shown)
     try:
         meta = json.loads(node.tool_calls_meta)
     except (json.JSONDecodeError, TypeError):
@@ -66,8 +101,9 @@ def tool_calls_meta_for(node, viewer_id):
     if not isinstance(meta, list):
         return None
     meta = without_client_marker(meta)
-    if viewer_id is not None \
-            and (node.human_owner_id or node.user_id) == viewer_id:
+    if not share_owner:
+        meta = _without_saved_share_state(node, meta)
+    if owner:
         return meta
     return [{k: m[k] for k in SHARED_TOOL_FIELDS if k in m}
             for m in meta if isinstance(m, dict)]

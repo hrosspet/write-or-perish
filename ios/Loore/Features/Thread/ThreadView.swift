@@ -340,6 +340,7 @@ private struct ThreadContent: View {
                                     hidePowerFeatures: !craftMode, hideAudioUpload: !craftMode, compact: true,
                                     placeholder: model.readReplyMessage ? "Ask about these picks, or say what you make of them…"
                                         : "Type what's on your mind…")
+        config.parentOwned = model.isOwner
         if model.readReplyMessage {
             config.submitOverride = { [model, autoGenerate] submission in
                 try await model.submitReadReply(submission, autoGenerate: autoGenerate)
@@ -386,8 +387,8 @@ private struct ThreadContent: View {
 
     /// The AI-reply control. `offReason`: a shared thread where AI usage
     /// closes it (shown disabled; the sentence stands above it). `showPicker`
-    /// false leaves the model picker out: the request then carries the
-    /// user's own preferred model.
+    /// false leaves the model picker out: the request then names no model,
+    /// and the server runs the reply on the user's own (`resolve_chat_model`).
     private func llmResponseRow(_ node: NodeDetail, offReason: String? = nil, showPicker: Bool = true) -> some View {
         let working = model.llmRequesting || model.llmTaskNodeId != nil
         // Another node is loading (NodePrefetch): disabled too, as a second press would
@@ -422,7 +423,8 @@ private struct ThreadContent: View {
                                : ""))
             .accessibilityIdentifier("thread.llmResponse")
             if showPicker {
-                ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: off)
+                ModelPicker(nodeId: node.id, selectedModel: $model.selectedModel, disabled: off,
+                            onPick: { [model] id in model.modelPicked(id) })
                     .padding(.leading, -1)
             }
             Spacer(minLength: 0)
@@ -590,6 +592,7 @@ private struct FocalCard: View {
                 ProposalCard(content: node.content, nodeId: node.id, toolCallsMeta: node.toolCallsMeta,
                              shareOnly: !model.isLLMNode, canAct: model.isOwner,
                              onContentChange: model.isOwner ? { model.setContent($0) } : nil,
+                             currentContent: { model.node?.content },
                              onApplied: { model.updateToolMeta($0, $1) })
                 if let after = split?.after, !after.isEmpty {
                     QuotedContentView(content: after, quotes: model.quotes,

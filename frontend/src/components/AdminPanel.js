@@ -629,12 +629,15 @@ export function purgeLabel(job) {
 
 // The Users tab's Status cell. Payments on (#697): "Blocked" for an
 // account the admin blocked; "Held (spam)" for one the spam mark holds
-// (#713: not let in, Activate lets it in); "Inactive" is then one that has
-// not come back since payments went on (it is let in at its next visit).
+// (#713: not let in, Activate lets it in); "Waiting" for a new account
+// held for approval because the day's number of new accounts was reached
+// (Activate lets it in); "Inactive" is then one that has not come back
+// since payments went on (it is let in at its next visit).
 export function statusLabel(u, letInWithoutApproval) {
   if (u.approved) return "Active";
   if (letInWithoutApproval && u.blocked) return "Blocked";
   if (letInWithoutApproval && u.held_as_spam) return "Held (spam)";
+  if (letInWithoutApproval && u.waits_for_approval) return "Waiting";
   return "Inactive";
 }
 
@@ -986,7 +989,9 @@ function AdminPanel() {
       fetchUsers();
     } catch (err) {
       console.error(err);
-      setError("Error updating email.");
+      // The server says why: an account someone has signed in to, an
+      // address another account holds, an address that is not valid.
+      setError(err.response?.data?.error || "Error updating email.");
     }
   };
 
@@ -1116,7 +1121,6 @@ function AdminPanel() {
     if (c.timeline_cap != null) return xCheckLabel(c);
     const n = (v) => (v == null ? "?" : v.toLocaleString());
     const parts = [`${n(c.archived)} archived`];
-    if (c.archived_live != null) parts.push(`(${n(c.archived_live)} live)`);
     if (c.retweets != null) parts.push(`${n(c.retweets)} RT`);
     if (c.replies != null) parts.push(`${n(c.replies)} replies`);
     if (c.originals != null) parts.push(`${n(c.originals)} originals`);
@@ -1209,8 +1213,17 @@ function AdminPanel() {
       const reported = r.account_num_tweets != null && r.account_num_tweets !== r.archived
         ? `; account reports ${r.account_num_tweets.toLocaleString()} tweets`
         : "";
+      // With an API key (#712): the latest export first, then the newer
+      // tweets through the API, and how many requests that took.
+      const n = (v) => (v || 0).toLocaleString();
+      const sourceNote = r.source === "parquet" ? " (snapshot)"
+        : r.source === "export" ? ` (${n(r.from_export)} from the export only)`
+          : r.source === "export+api-v1"
+            ? ` (${n(r.from_export)} from the export${r.export_id ? "" : ": none available"}, ` +
+              `${n(r.from_api)} newer via the API in ${n(r.api_requests)} requests)`
+            : "";
       return `Done: ${(r.created || 0).toLocaleString()} nodes${archived} from @${r.handle}` +
-        `${r.source === "parquet" ? " (snapshot)" : ""}${rts}${reported}` +
+        `${sourceNote}${rts}${reported}` +
         `${r.skipped ? `, ${r.skipped} already imported` : ""}` +
         `${r.imported_tokens != null ? `, ~${r.imported_tokens.toLocaleString()} tokens` : ""}` +
         queuedNote + idNote;
@@ -1483,6 +1496,14 @@ function AdminPanel() {
               </td>
               <td style={{ border: "1px solid var(--border)", padding: "8px", width: "140px", whiteSpace: "nowrap" }}>
                 ${(u.current_month_spending_usd || 0).toFixed(2)}
+                {u.spend_period_start && (
+                  <span
+                    title={`Counted against the limit in the paid period since ${new Date(u.spend_period_start).toLocaleDateString()}`}
+                    style={{ color: "var(--text-muted)", marginLeft: "6px", fontSize: "0.85em" }}
+                  >
+                    (period ${(u.spend_period_usd || 0).toFixed(2)})
+                  </span>
+                )}
                 {u.spend_blocked && (
                   <FaTimesCircle
                     title="Blocked this month"

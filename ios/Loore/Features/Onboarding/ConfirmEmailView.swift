@@ -28,6 +28,7 @@ struct ConfirmEmailView: View {
 
     @Environment(AppState.self) private var app
     @State private var model: ConfirmEmailModel?
+    @State private var signOutQuestion = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,6 +57,7 @@ struct ConfirmEmailView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .loorePageBackground()
         .navigationBarTitleDisplayMode(.inline)
+        .signOutQuestion($signOutQuestion)
         .onAppear {
             if model == nil {
                 let created = ConfirmEmailModel(app: app, token: token)
@@ -85,7 +87,7 @@ struct ConfirmEmailView: View {
             linkButton("Try again") { model.confirm() }
         case .signOut:
             linkButton("Sign out and use the other account →") {
-                Task { await app.signOut() }
+                app.requestSignOut(question: $signOutQuestion)
             }
         }
     }

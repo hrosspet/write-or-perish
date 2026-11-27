@@ -399,14 +399,17 @@ struct NewTokenDialog: View {
     let token: String
     let onClose: () -> Void
     @State private var copied = false
+    /// Stays true after the first tap, so the line about the copy can be read.
+    @State private var wasCopied = false
 
     var body: some View {
         LooreDialogCard(title: "Your clipper token") {
             DialogBodyText(text: "Paste it into the extension's options now. It is shown only this once: Loore keeps just a fingerprint of it, so after you close this there is no way to see it again. If it gets lost, revoke it and create another.")
             Button {
-                UIPasteboard.general.string = token
+                ClipperTokenCopy.copy(token)
                 copied = true
-                UIAccessibility.post(notification: .announcement, argument: "Copied")
+                wasCopied = true
+                UIAccessibility.post(notification: .announcement, argument: ClipperTokenCopy.copiedText)
                 Task {
                     try? await Task.sleep(nanoseconds: 1_500_000_000)
                     copied = false
@@ -428,7 +431,7 @@ struct NewTokenDialog: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Copy token to clipboard")
-            Text("Tap the token to copy it.")
+            Text(wasCopied ? ClipperTokenCopy.copiedText : "Tap the token to copy it.")
                 .font(LooreFont.sans(12.5, .light))
                 .foregroundStyle(LooreColor.textMuted)
             ChoiceButton(title: "Done, I've saved it", subtitle: "Closes this for good.", tone: .accent, action: onClose)

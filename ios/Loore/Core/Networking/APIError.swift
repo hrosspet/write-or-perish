@@ -35,8 +35,9 @@ struct ServerErrorBody: Equatable, Sendable {
 
 /// Every failure the API client reports (design doc §3 "APIClient").
 enum APIError: Error, Equatable, Sendable {
-    /// 401: signed out. The app signs out when it sees this.
-    case unauthorized
+    /// 401: signed out. The app signs out when it sees this. Carries the
+    /// account when the server said the sign-in's account is deleted (#777).
+    case unauthorized(DeletedAccount? = nil)
     /// 403 with the approval message: a waitlisted user called a gated API
     /// (or, payments on, an account the admin blocked: `notActiveCode`).
     case notApproved(message: String)
@@ -85,7 +86,7 @@ enum APIError: Error, Equatable, Sendable {
         let body = isJSON ? ServerErrorBody(data: data) : nil
         switch status {
         case 401:
-            return .unauthorized
+            return .unauthorized(DeletedAccount(body: body))
         case 402 where body?.error == spendCapCode:
             // Which cap it is (#438), before the caller's toast reads it.
             SpendCap.liftsWithPayment = body?.extra["lifts_with_payment"]?.boolValue == true

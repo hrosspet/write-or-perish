@@ -69,7 +69,29 @@ def is_llm_node(node):
     return node.node_type == 'llm' or bool(node.llm_model)
 
 
-def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
+def prompt_entry_privacy(user_id, prompt_key, message_privacy):
+    """The level a new prompt entry is stored at. A prompt entry shows
+    its owner's prompt text and carries pinned versions of their profile
+    and other documents.
+
+    A Text-mode one is Public only when its owner's default level on the
+    Account page is Public AND the message it starts with
+    (*message_privacy*) is created Public; in every other case (default
+    Private, a Private or Circles message, an unknown value) it is
+    Private (Peter, 2026-11-24: a public message alone does not share
+    the prompt, and a private message under a Public default says the
+    prompt is meant to be private too; the owner may share it on the
+    entry itself). Every other kind (Voice, Glean) is Private, as
+    before."""
+    if prompt_key != "textmode" or message_privacy != "public":
+        return "private"
+    from backend.models import User
+    user = User.query.get(user_id)
+    default = getattr(user, "default_privacy_level", None)
+    return "public" if default == "public" else "private"
+
+
+def attach_agentic_prompt_under(node, user_id, prompt_key, message_privacy,
                                 ai_usage):
     """The agentic prompt node a Text / Voice session continuing under
     *node* needs, or None when one already sits above it (any key in
@@ -77,7 +99,16 @@ def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
     the prompt that is there). The node is created empty and linked to
     the user's prompt record through attach_context_artifacts, which
     also pins the artifact snapshots its placeholders name; the caller
-    hangs the message under it and commits."""
+    hangs the message (created at *message_privacy*) under it and
+    commits. The prompt node's level is prompt_entry_privacy's.
+
+    A session starts only under a node of the user's own (for an AI
+    reply: one they asked for). Under someone else's node the answer is
+    None as well: the message is a plain reply there, directly under
+    that node, as one sent to POST /nodes/ is."""
+    from backend.utils.privacy import is_node_owner
+    if not is_node_owner(node, user_id):
+        return None
     if ancestors_have_prompt(node, user_id, AGENTIC_PROMPT_KEYS):
         return None
     from backend.extensions import db
@@ -85,14 +116,15 @@ def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
     from backend.utils.context_artifacts import attach_context_artifacts
     prompt_record = get_user_prompt_record(user_id, prompt_key)
     # Circles: a prompt node is never shared (it carries its writer's
-    # prompt and guidance). Under a shared node it is its writer's alone.
+    # prompt and guidance). Under a shared node it is its writer's alone:
+    # prompt_entry_privacy gives a "circles" message a private prompt.
     prompt_node = Node(
         user_id=user_id,
         human_owner_id=user_id,
         parent_id=node.id,
         node_type="user",
-        privacy_level=("private" if privacy_level == "circles"
-                       else privacy_level),
+        privacy_level=prompt_entry_privacy(
+            user_id, prompt_key, message_privacy),
         ai_usage=ai_usage,
     )
     db.session.add(prompt_node)
@@ -103,12 +135,15 @@ def attach_agentic_prompt_under(node, user_id, prompt_key, privacy_level,
     return prompt_node
 
 
-def create_agentic_root(user_id, prompt_key, privacy_level, ai_usage):
+def create_agentic_root(user_id, prompt_key, message_privacy, ai_usage):
     """The system node that starts a new agentic thread: empty, top-level,
     linked to the user's *prompt_key* prompt record (and the artifact
     snapshots its placeholders name) through attach_context_artifacts.
     Same shape /textmode/start and save-as-node build. The caller hangs
-    the first message under it and commits."""
+    the first message (created at *message_privacy*) under it and
+    commits. The root's level is prompt_entry_privacy's. The public
+    listings show the thread by its first public message
+    (utils/public_threads)."""
     from backend.extensions import db
     from backend.utils.prompts import get_user_prompt_record
     from backend.utils.context_artifacts import attach_context_artifacts
@@ -118,7 +153,8 @@ def create_agentic_root(user_id, prompt_key, privacy_level, ai_usage):
         human_owner_id=user_id,
         parent_id=None,
         node_type="user",
-        privacy_level=privacy_level,
+        privacy_level=prompt_entry_privacy(
+            user_id, prompt_key, message_privacy),
         ai_usage=ai_usage,
     )
     db.session.add(root)

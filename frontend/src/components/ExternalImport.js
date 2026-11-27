@@ -425,7 +425,9 @@ export default function ExternalImport() {
           , turn on Developer mode, choose “Load unpacked” and pick the{' '}
           <code style={codeStyle}>extension/</code> folder of the Loore
           repository. Then paste a token below into the extension’s options.
-          A token can only add references; it cannot read anything.
+          A token can add references and replace one saved before with a
+          fuller copy; it cannot read your entries or the text of your
+          references.
         </p>
         {tokens.length > 0 && (
           <div style={{ marginBottom: '12px' }}>

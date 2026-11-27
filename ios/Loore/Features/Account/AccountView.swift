@@ -181,7 +181,7 @@ private struct AccountForm: View {
             }
             if user.shareV1Available {
                 AccountRow(label: "Public sharing",
-                           helper: "The public side of Loore: publish shares to your public page and the Commons, and respond in public threads. Experimental.") {
+                           helper: "The public side of Loore: publish shares to your public page and the Commons, and respond in public threads. Experimental. Off takes your public pieces and replies off the open web and the Commons. A note set to Public stays readable by signed-in members until you set it to Private.") {
                     onOffSelect(field: "public_sharing_enabled", isOn: user.publicSharingEnabled, onTitle: "On (experimental)")
                 }
             }

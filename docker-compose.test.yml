@@ -36,6 +36,10 @@ services:
     environment:
       - DATABASE_URL=postgresql://test:test@db:5432/writeorperish_test
       - FLASK_ENV=testing
+      # The test stack runs without encryption (required in every
+      # environment: the app does not start without this line or a KMS
+      # key name).
+      - ENCRYPTION_DISABLED=true
       - SECRET_KEY=test-secret-key-for-ci
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0

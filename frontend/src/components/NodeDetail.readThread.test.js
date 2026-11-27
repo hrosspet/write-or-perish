@@ -460,7 +460,9 @@ describe('Try again without craft mode', () => {
     expect(screen.getByRole('button', { name: 'Glean' })).toBeInTheDocument();
   });
 
-  test('it sends the request LLM Response sends, with the user\'s own model, and opens the reply', async () => {
+  // No model, as the automatic reply: the server continues on the
+  // thread's model (#791).
+  test('it sends the request LLM Response sends, naming no model, and opens the reply', async () => {
     mockPost.mockResolvedValue({ data: { node_id: 80, status: 'pending' } });
     routes['/nodes/80'] = {
       ...pendingRead(), id: 80, llm_model: 'claude-opus-5.5', llm_task_status: 'pending',
@@ -471,9 +473,7 @@ describe('Try again without craft mode', () => {
     await act(async () => { tryAgain().click(); });
 
     expect(mockPost).toHaveBeenCalledTimes(1);
-    expect(mockPost).toHaveBeenCalledWith('/nodes/60/llm', {
-      model: 'claude-opus-5.5', source_mode: 'textmode',
-    });
+    expect(mockPost).toHaveBeenCalledWith('/nodes/60/llm', { source_mode: 'textmode' });
     // The page moves on to the reply, as after LLM Response.
     expect(await screen.findByText('Thinking')).toBeInTheDocument();
   });

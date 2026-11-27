@@ -19,11 +19,16 @@ import {
   AUTO_GENERATE_OFF_HINT, ONLY_YOU_SEE_REPLY, isAutoGenerateOff,
   isSharedPrivacy, onlyYouSeeReply,
 } from "../utils/sharedThread";
-import { useCheckboxToggle, useTaskInsert } from "../utils/markdown";
+import {
+  NEWER_ENTRY_MESSAGE, insertEdit, tickEdit, useChecklistEdits,
+} from "../utils/markdown";
+import { llmRequestErrorToast } from "../utils/llmRequestError";
 import {
   contextAllowsAi, isAiUsageRefusedError, keptFromTrainRepliesNote,
 } from "../utils/aiUsage";
-import { THREAD_TOO_LONG_CODE, isThreadTooLong } from "../utils/threadLength";
+import {
+  THREAD_LIMIT_TEXT, THREAD_TOO_LONG_CODE, isThreadTooLong,
+} from "../utils/threadLength";
 import ThreadLengthNotice from "./ThreadLengthNotice";
 import NodeFormModal from "./NodeFormModal";
 import Bubble from "./Bubble";
@@ -174,7 +179,21 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // or none at all; the server never says which (#704).
   const [notShared, setNotShared] = useState(false);
   const [showEditOverlay, setShowEditOverlay] = useState(false);
+  // The model the LLM Response picker shows: the account's until the
+  // picker fills in the thread's (ModelSelector).
   const [selectedModel, setSelectedModel] = useState(currentUser?.preferred_model || null);
+  // The model the person picked in that picker on this page, else null.
+  const [pickedModel, setPickedModel] = useState(null);
+  const handleModelChange = useCallback((model, { picked = false } = {}) => {
+    setSelectedModel(model);
+    if (picked) setPickedModel(model);
+  }, []);
+  // The model a reply asked for on this page names (#791): the one picked
+  // here, while the picker still shows it. Otherwise none, and the server
+  // continues on the thread's model (resolve_chat_model), the account's in
+  // a thread with no AI reply yet. The account's model sent unpicked moved
+  // the thread to it, and that turn read the whole thread uncached.
+  const chatModel = pickedModel && pickedModel === selectedModel ? pickedModel : null;
   // The Read button's own model: reads run only on the read models
   // (#355), so it never shares the LLM Response picker's choice. Null
   // until its picker loads; the backend then picks (resolve_read_model).
@@ -209,6 +228,26 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setEditTarget(slot === 'edit' ? value : null);
     setDeleteTarget(slot === 'delete' ? value : null);
   }, []);
+  // Edit opens on the entry as it is now, not on the page's copy (#799
+  // review): after a refused Save the page still shows the older text, and
+  // a form opened on it would write into the older edit's draft. The entry
+  // is read first; the page's copy is the fallback (its Save is still
+  // checked against the stored text). The focal entry's text on the page
+  // follows.
+  const openEdit = useCallback(async (target) => {
+    let current = target;
+    try {
+      const fresh = (await api.get(`/nodes/${target.id}`)).data;
+      if (fresh && fresh.id === target.id) {
+        current = { ...target, ...fresh };
+        setNode((prev) => (prev && prev.id === fresh.id && prev.content !== fresh.content
+          ? { ...prev, content: fresh.content } : prev));
+      }
+    } catch (err) {
+      console.error('Could not read the entry before editing:', err);
+    }
+    setExclusiveTarget('edit', current);
+  }, [setExclusiveTarget]);
   // autoGenerate is shared across the whole text-mode experience — the
   // NodeDetailWrapper uses `key={id}` which remounts NodeDetail on every
   // node navigation, so local useState would reset the toggle. Persist to
@@ -560,7 +599,14 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       }
       setLlmTaskNodeId(null);
     } else if (llmStatus === 'failed') {
-      if (llmData?.error_code === THREAD_TOO_LONG_CODE) {
+      const lengthRefusal = llmData?.error_code === THREAD_TOO_LONG_CODE;
+      // A Glean refused for the thread's length (#746): its refusal never
+      // counts as the thread's length (#717), so the entry this page goes
+      // back to shows no limit. The toast gives the server's sentence.
+      if (lengthRefusal && String(llmTaskNodeId) === String(id)
+          && isGleaningNode(node)) {
+        addToast(llmData?.error || THREAD_LIMIT_TEXT, 8000);
+      } else if (lengthRefusal) {
         // Refused for the thread's length (#648): the reply form of the
         // entry says so, with the way to a new thread, instead of a toast.
         if (String(llmTaskNodeId) !== String(id)) {
@@ -613,11 +659,25 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     ));
   }, [llmTaskNodeId, id, llmStatus, polledMeta]);
 
-  const getNodeContent = useCallback(() => node?.content, [node]);
-  const setNodeContent = useCallback((newContent) => setNode(prev => ({ ...prev, content: newContent })), []);
-  const saveNodeContent = useCallback((newContent) => api.put(`/nodes/${id}`, { content: newContent }), [id]);
-  const handleCheckboxToggle = useCheckboxToggle(getNodeContent, setNodeContent, saveNodeContent);
-  const handleTaskInsert = useTaskInsert(getNodeContent, setNodeContent, saveNodeContent);
+  // Ticks and the row "+" in the entry's checklists (#795): shown at once,
+  // saved only over the text the page shows (base_content), one after the
+  // other; refused when the entry changed elsewhere, then undone with a
+  // toast that asks for a reload.
+  const nodeRef = useRef(node);
+  nodeRef.current = node;
+  const applyChecklistEdit = useChecklistEdits({
+    getContent: (key) => (nodeRef.current && nodeRef.current.id === key ? nodeRef.current.content : null),
+    setContent: (key, content) => setNode(prev => (prev && prev.id === key ? { ...prev, content } : prev)),
+    save: (key, content, base) => api.put(`/nodes/${key}`, { content, base_content: base }),
+    newerMessage: NEWER_ENTRY_MESSAGE,
+    notify: addToast,
+  });
+  const handleCheckboxToggle = useCallback((itemText, checked) => applyChecklistEdit(
+    nodeRef.current?.id, tickEdit(itemText, checked), "Couldn't save change",
+  ), [applyChecklistEdit]);
+  const handleTaskInsert = useCallback((afterItemText, newText) => applyChecklistEdit(
+    nodeRef.current?.id, insertEdit(afterItemText, newText), "Couldn't add task",
+  ), [applyChecklistEdit]);
 
   // The action row: [LLM Response | model] [Read further | model]. When
   // the second group wraps onto a line of its own (a phone), the row
@@ -733,7 +793,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     if (ownedByMe(n)) {
       actions.push({
         label: 'Edit',
-        action: () => setExclusiveTarget('edit', n),
+        action: () => openEdit(n),
         color: 'var(--text-primary)',
       });
       actions.push({
@@ -965,7 +1025,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     // (the picker's default comes from /suggested-model, which never
     // suggests the model of another member's reply).
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
-      model: selectedModel,
+      ...(chatModel && { model: chatModel }),
       source_mode: sourceMode,
       ...(auto && { auto_generate: true }),
       ...(ack && { ai_reads_ack: ack }),
@@ -1016,23 +1076,20 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // used by the explicit button and the auto-generate-on-submit/edit paths.
   // - 402 (monthly spend cap): surfaced globally by SpendCapBanner — return
   //   silently so the thread stays exactly where the user was.
-  // - otherwise: toast. Never setError() here — that replaces the whole
-  //   node view (thread, inline form and all) with the failure text and
-  //   strands the user on a dead end.
+  // - otherwise: toast (llmRequestErrorToast, which Write New Entry uses
+  //   too). Never setError() here — that replaces the whole node view
+  //   (thread, inline form and all) with the failure text and strands the
+  //   user on a dead end.
   const handleLlmRequestError = (err) => {
     console.error(err);
-    const status = err?.response?.status;
-    const apiErr = err?.response?.data?.error;
-    if (status === 402) return;
-    // No automatic reply under a shared node: LLM Response stays offered.
-    if (isAutoGenerateOff(err)) return;
     // The thread is too long for another reply (#648): the reply form
     // says so, with the way to a new thread, in place of LLM Response.
     if (isThreadTooLong(err)) {
-      markThreadTooLong(apiErr);
+      markThreadTooLong(err.response.data?.error);
       return;
     }
-    addToast(apiErr || err.message || "Error requesting LLM response.", 8000);
+    const message = llmRequestErrorToast(err);
+    if (message) addToast(message, 8000);
   };
 
   // The server refused a reply for the thread's length: the page shows the
@@ -1148,7 +1205,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
           ? { content, privacy_level, ai_usage }
           : {
             content, privacy_level, ai_usage, agentic: true,
-            auto_generate: autoGenerateActive, model: selectedModel,
+            auto_generate: autoGenerateActive, ...(chatModel && { model: chatModel }),
           },
       );
       return res.data;
@@ -1162,7 +1219,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
       return res.data;
     }
     const res = await api.post(`/textmode/from-node/${id}`, {
-      content, ai_usage, model: selectedModel, auto_generate: autoGenerateActive,
+      content, privacy_level, ai_usage, ...(chatModel && { model: chatModel }),
+      auto_generate: autoGenerateActive,
     });
     return res.data;
   };
@@ -1244,7 +1302,9 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
     setVoiceLoading(true);
     setError("");
     api
-      .post(`/${sessionType}/from-node/${id}`, { model: selectedModel })
+      // No model: Voice continues on the thread's model (#784); the LLM
+      // Response picker's choice is for LLM Response.
+      .post(`/${sessionType}/from-node/${id}`, {})
       .then((response) => {
         const { mode, llm_node_id, parent_id, fresh } = response.data;
         // A thread started from the Glean card keeps its Glean button
@@ -1566,8 +1626,8 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // Without craft mode there is no LLM Response, so an entry whose
   // automatic reply failed left the user no way to ask again. Everyone
   // gets a plain Try again there (Peter, 2026-11-10): the same request
-  // LLM Response sends, without a model picker, so it asks with the model
-  // the automatic reply used (selectedModel, the user's own). Only where
+  // LLM Response sends, without a model picker, so like the automatic
+  // reply it names no model and runs on the thread's (#791). Only where
   // a reply was attempted and did not succeed: a failed or cancelled
   // reply stands under the entry (or its last part) and no other reply
   // does (awaitsReply, which also keeps it away from an upload whose
@@ -1803,7 +1863,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             items={[
               {
                 label: 'Edit',
-                action: () => setExclusiveTarget('edit', node),
+                action: () => openEdit(node),
                 color: 'var(--text-primary)',
               },
               {
@@ -1975,7 +2035,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                   tc.name === toolName ? { ...tc, ...updates } : tc),
               };
             })}
-            onError={(msg) => addToast(msg)}
+            onError={(msg, ms) => addToast(msg, ms)}
           />
         )}
         {showProposal && proposalAfter && (
@@ -2124,7 +2184,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
                 <ModelSelector
                   nodeId={node.id}
                   selectedModel={selectedModel}
-                  onModelChange={setSelectedModel}
+                  onModelChange={handleModelChange}
                   disabled={llmRequesting || !!llmTaskNodeId || underReadReply || moving || !!aiOffReason}
                   style={joinedPickerStyle}
                 />
@@ -2206,6 +2266,7 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
             key={`inline-${id}`}
             parentId={parseInt(id, 10)}
             parentPrivacyLevel={node.privacy_level}
+            parentOwnedByViewer={!!isOwner}
             hidePowerFeatures={!craftMode}
             hideAudioUpload={!craftMode}
             compact

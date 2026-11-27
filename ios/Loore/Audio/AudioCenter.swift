@@ -15,6 +15,10 @@ final class AudioCenter {
     @ObservationIgnored let sounds = SoundPlayer()
     @ObservationIgnored let session = AudioSessionController()
     @ObservationIgnored let nowPlaying = NowPlayingController()
+    /// Decides between the entry's heading and a fixed title in Now Playing.
+    @ObservationIgnored var lockState: DeviceLockState = SystemLockState() {
+        didSet { lockState.onChange = { [weak self] in self?.refreshNowPlaying() } }
+    }
     @ObservationIgnored let liveActivity = VoiceLiveActivity()
     /// A refused Voice turn's sentence (#651): its clip, else the device's speech.
     @ObservationIgnored let refusalVoice = RefusalVoice()
@@ -34,6 +38,8 @@ final class AudioCenter {
     var appState: AppState? { app }
     /// The writing form's recorder while it runs (interruptions go to it).
     @ObservationIgnored weak var activeDictation: DictationController?
+    /// The recordings' upload queue (tests set their own).
+    @ObservationIgnored var uploader: ChunkUploader = .shared
     @ObservationIgnored private var voiceController: VoiceTurnController?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     @ObservationIgnored var listenTask: Task<Void, Never>?
@@ -75,6 +81,7 @@ final class AudioCenter {
         }
         session.onEvent = { [weak self] event in self?.handleSessionEvent(event) }
         liveActivity.onEnded = { [weak self] in self?.refreshNowPlaying() }
+        lockState.onChange = { [weak self] in self?.refreshNowPlaying() }
         refusalVoice.fetch = { [weak self] refusal in await self?.refusalClip(refusal) }
         refusalVoice.playClip = { [refusalClips] data in await refusalClips.play(data) }
         refusalVoice.stopClip = { [refusalClips] in refusalClips.stop() }
@@ -84,17 +91,23 @@ final class AudioCenter {
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didBecomeActiveNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app active")
-            MainActor.assumeIsolated {
-                self?.voiceController?.appDidBecomeActive()
-                // A change may have been decided on another device meanwhile.
-                self?.recheckQueuedAnnouncement()
-            }
+            MainActor.assumeIsolated { self?.appDidBecomeActive() }
         })
         observers.append(NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
                                                                 object: nil, queue: .main) { [weak self] _ in
             RecordingLog.shared.note("app in background")
             MainActor.assumeIsolated { self?.voiceController?.appDidEnterBackground() }
         })
+    }
+
+    /// The app came to the foreground (also at launch).
+    func appDidBecomeActive() {
+        voiceController?.appDidBecomeActive()
+        // A change may have been decided on another device meanwhile.
+        recheckQueuedAnnouncement()
+        // A deleted account's 30 days may have ended while the app was in
+        // the background (#777).
+        uploader.removeEnded()
     }
 
     /// Connects to the app (API client, cookies, toasts). Called once by `AppState`.
@@ -158,7 +171,7 @@ final class AudioCenter {
             #endif
         }()
         let controller = VoiceTurnController(backend: backend,
-                                             recorder: VoiceRecorder(debugFile: debugFile),
+                                             recorder: VoiceRecorder(uploader: uploader, debugFile: debugFile),
                                              audio: self, notices: self)
         controller.model = { [weak self] in self?.app?.user?.preferredModel }
         controller.aiUsage = { [weak self] in self?.app?.user?.defaultAIUsage.rawString ?? "none" }
@@ -294,15 +307,38 @@ final class AudioCenter {
         #endif
     }
 
+    /// What a sign-out does with recorded audio that has not reached the server (#763).
+    enum UnsentAudio: Equatable {
+        /// A sign-out the person did not ask for (the server refused the
+        /// sign-in): kept on the phone, and sent when the same account signs
+        /// in again.
+        case keep
+        /// The account is deleted (#777: deleted here, or the server refused
+        /// its sign-in and said so): kept like `keep` while the account can
+        /// still be restored, so a restore and sign-in sends it, and removed
+        /// when it no longer can (`ChunkUploader.accountDeleted`).
+        case keepUntilDeleted(DeletedAccount)
+        /// The person logged out: the account's audio is deleted (every
+        /// account's when nil: it could not be loaded).
+        case delete(account: Int?)
+    }
+
     /// Sign-out: stop everything, forget the conversation, and delete this user's
-    /// audio and temporary files (upload queue, dictation, exports, downloads; M2).
-    func signedOut() {
+    /// temporary files (dictation, exports, downloads; M2). Recorded audio not
+    /// yet on the server is kept or deleted as `unsentAudio` says (#763).
+    func signedOut(unsentAudio: UnsentAudio) {
         voiceController?.tearDown()
         voiceController = nil
         voiceApprovals = nil
         queuedAnnouncementValue = nil
         activeDictation?.cancel()
-        ChunkUploader.shared.reset()
+        switch unsentAudio {
+        case .keep: uploader.hold()
+        case .keepUntilDeleted(let deleted):
+            uploader.hold()
+            uploader.accountDeleted(deleted)
+        case .delete(let account): uploader.reset(account: account)
+        }
         PrivateFiles.sweepTemporary()
         RecordingLog.shared.deleteAll()
         listenTask?.cancel()
@@ -378,6 +414,7 @@ final class AudioCenter {
     // MARK: Lock screen
 
     func refreshNowPlaying() {
+        lockState.playbackChanged(playing: player.isLoaded && player.isPlaying)
         if let voice = voiceController {
             liveActivity.sync(VoiceLiveActivity.state(turn: voice.state, isPaused: voice.isPaused,
                                                       isInterrupted: voice.isInterrupted,
@@ -424,9 +461,14 @@ final class AudioCenter {
                                     skip: { [weak self] in self?.player.skip(by: $0) },
                                     seek: { [weak self] in self?.player.seek(to: $0) },
                                     rate: { [weak self] in self?.player.setRate($0) })
-        var title = player.title.isEmpty ? "Loore" : player.title
-        if player.chapters.count > 1, let i = player.currentChapterIndex {
-            title += " — " + player.chapters[i].title
+        // Unlocked: the entry's title and the heading being read. Locked: one of
+        // two fixed titles; the entry's own words stay inside the app.
+        let title: String
+        if lockState.isLocked {
+            title = NowPlayingController.playbackTitle(voice: player.source == .voice)
+        } else {
+            let chapter = player.chapters.count > 1 ? player.currentChapterIndex.map { player.chapters[$0].title } : nil
+            title = NowPlayingController.playbackTitle(entry: player.title, chapter: chapter)
         }
         nowPlaying.update(.playback(title: title, elapsed: player.cumulativeTime, duration: player.totalDuration,
                                     rate: player.rate, playing: player.isPlaying))
@@ -650,12 +692,16 @@ extension AudioCenter: VoiceNotices {
         return app?.toasts.show(text, duration: duration) ?? 0
     }
 
+    func lastingToast(_ text: String) {
+        app?.toasts.showLasting(text)
+    }
+
     func dismissToast(_ id: Int) {
         app?.toasts.dismiss(id)
     }
 
-    func notify(_ notice: LocalNotice) {
-        LocalNotifier.post(notice)
+    func notify(_ notice: LocalNotice, body: String?) {
+        LocalNotifier.post(notice, body: body)
     }
 
     func withdraw(_ notice: LocalNotice) {
@@ -707,9 +753,11 @@ enum LocalNotifier {
 }
 
 extension AudioCenter {
-    /// Signed in with cookies restored: finish uploads a killed app left behind.
-    func didSignIn() {
-        releaseAbandonedRecordings(ChunkUploader.shared.resumePending(releaseMargin: AudioCenter.releaseTimeout))
+    /// Signed in with cookies restored: finish the uploads of this account that
+    /// a killed app, or a sign-out the person did not ask for, left behind (#763).
+    func didSignIn(account: Int) {
+        releaseAbandonedRecordings(uploader.resumePending(account: account,
+                                                          releaseMargin: AudioCenter.releaseTimeout))
         #if DEBUG
         // `-LooreDebugListenNode <id>`: play a node's audio in the global player
         // at launch (the speaker icon's path) until the thread view lands (M2).

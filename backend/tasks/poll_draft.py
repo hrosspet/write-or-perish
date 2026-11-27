@@ -148,6 +148,9 @@ def _build_request(resp):
         "provider": model_cfg["provider"],
         # The user the request is for: its OpenAI safety identifier.
         "user_id": resp.user_id,
+        # Ends with this poll's question: no later request starts with
+        # it, so no prompt cache write (#803).
+        "one_shot": True,
     }
 
 
@@ -233,22 +236,21 @@ def _save_draft_result(item, result):
     from backend.utils.hidden_rows import including_hidden_rows
     from backend.utils.system_accounts import get_poll_system_user
 
-    def log_cost():
-        # Cache-aware for either provider: the poll's model is admin-chosen
-        # and may be an OpenAI one (#286).
-        db.session.add(APICostLog(
-            user_id=get_poll_system_user().id, model_id=item["model_id"],
-            request_type="poll_draft",
-            request_ref=f"poll:{item['poll_id']}",
-            **llm_cost_log_fields(item["model_id"], result, batch=True),
-        ))
+    # The provider billed every result it returned, also one whose answer
+    # is no longer waiting for it, so the cost row comes first.
+    # Cache-aware for either provider: the poll's model is admin-chosen and
+    # may be an OpenAI one (#286).
+    db.session.add(APICostLog(
+        user_id=get_poll_system_user().id, model_id=item["model_id"],
+        request_type="poll_draft",
+        request_ref=f"poll:{item['poll_id']}",
+        **llm_cost_log_fields(item["model_id"], result, batch=True),
+    ))
 
     if _hidden_for_deletion(item["response_id"]):
         # "Delete all my content" hid the answer while its draft was in
-        # the batch (#268): the provider billed it, so the cost row is
-        # written, and nothing is saved. A restore finds the answer where
-        # the user can write it or ask for a draft again.
-        log_cost()
+        # the batch (#268): nothing is saved. A restore finds the answer
+        # where the user can write it or ask for a draft again.
         with including_hidden_rows():
             hidden = PollResponse.query.get(item["response_id"])
             if hidden is not None and hidden.status == "drafting":
@@ -263,7 +265,6 @@ def _save_draft_result(item, result):
                     resp.status if resp else "gone")
         return
 
-    log_cost()
     refused = is_refused(result)
     if refused or is_empty_truncated(result):
         # Cut off before any text (#368), or refused by the model (#470;

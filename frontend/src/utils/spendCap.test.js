@@ -37,6 +37,18 @@ test('a lift date already past is ignored', () => {
   expect(spendCapResetDate(new Date(Date.UTC(2027, 0, 5)))).toMatch(/February/);
 });
 
+// A subscribed account's limit is counted per paid period: the date is
+// the day the next period starts.
+test('a lift date before the first of next month names that date', () => {
+  markSpendBlocked('2026-11-27');
+  expect(spendCapResetDate(NOV_20)).toMatch(/November 27/);
+  expect(spendCapToastMessage('record', NOV_20)).toMatch(/until it resets on November 27\./);
+  expect(spendCapBannerMessage(NOV_20)).toBe(
+    "You've reached your monthly usage limit for the free alpha. It resets on November 27.");
+  // Once that day has come, the date is past.
+  expect(spendCapResetDate(new Date(Date.UTC(2026, 10, 28)))).toMatch(/December 1/);
+});
+
 test('a saved entry whose reply the cap skipped passes its lift date', () => {
   notifySpendBlocked('2027-01-01');
   expect(spendCapBannerMessage(NOV_20)).toMatch(/It resets on January 1\./);

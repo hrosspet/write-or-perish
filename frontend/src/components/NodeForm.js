@@ -22,6 +22,7 @@ import { useOnlineStatus } from "../hooks/useOnlineStatus";
 import { useToast } from "../contexts/ToastContext";
 import RecoveryBanner from './RecoveryBanner';
 import { replySkippedForLength } from "../utils/threadLength";
+import { llmRequestErrorToast } from "../utils/llmRequestError";
 import api from "../api";
 import { uploadFileInChunks } from "../utils/chunkedUpload";
 import {
@@ -29,10 +30,12 @@ import {
 } from "../utils/spendCap";
 import { noteSkippedReply } from "../utils/subscription";
 import useSubmitShortcut from "../hooks/useSubmitShortcut";
+import { NEWER_ENTRY_EDIT_MESSAGE, isContentChanged } from "../utils/markdown";
+import { NewerVersionNotice, OlderDraftBox } from "./NewerVersionNotice";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, aiReply = false, parentPrivacyLevel, trainRefused = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, aiReply = false, parentPrivacyLevel, parentOwnedByViewer, trainRefused = false },
     ref
   ) => {
     const { user } = useUser();
@@ -63,7 +66,22 @@ const NodeForm = forwardRef(
     const [showPublicReplyDialog, setShowPublicReplyDialog] = useState(false);
     // Parent's privacy, tracked whenever replying — drives the public-reply
     // consent dialog (#228). Independent of the inherit-defaults effect.
-    const [parentPrivacy, setParentPrivacy] = useState(null);
+    // A reply starts from the level the page already holds for the parent
+    // (parentPrivacyLevel), so a send before the form's own request for
+    // the parent answers, or after it failed, uses the parent's level and
+    // not the account's default.
+    const [parentPrivacy, setParentPrivacy] = useState(
+      (!editMode && parentId && parentPrivacyLevel) || null);
+    // Is the parent the user's own (they wrote it, or asked for the AI
+    // reply)? From the form's own request for the parent once it
+    // answers, before that from the page (parentOwnedByViewer). Under a
+    // public parent of the user's own the reply may be Private or
+    // Circles (Peter, 2026-11-24: "they should adhere to the form's
+    // selection"); under someone else's it is public (#228).
+    const [parentOwnerId, setParentOwnerId] = useState(undefined);
+    const parentOwned = parentOwnerId !== undefined
+      ? !!user && parentOwnerId === user.id
+      : !!parentOwnedByViewer;
     const [pendingPaste, setPendingPaste] = useState(null);
     const [splitAcknowledged, setSplitAcknowledged] = useState(false);
 
@@ -125,6 +143,7 @@ const NodeForm = forwardRef(
     // For new nodes with a parent, we'll update these after fetching the parent.
     const [privacyLevel, setPrivacyLevel] = useState(
       initialPrivacyLevel
+      || (!editMode && parentId && parentPrivacyLevel)
       || readRemembered('loore_last_privacy_level', user?.default_privacy_level)
       || "private"
     );
@@ -139,6 +158,20 @@ const NodeForm = forwardRef(
             : readRemembered('loore_last_ai_usage', user?.default_ai_usage))
       || "none"
     );
+
+    // Has the user changed the privacy / AI usage selector themselves? From
+    // then on the parent's settings arriving later (the form's request for
+    // the parent, an edit of the parent above) leave that choice alone.
+    const privacyChosenRef = useRef(false);
+    const aiUsageChosenRef = useRef(false);
+    const choosePrivacy = (level) => {
+      privacyChosenRef.current = true;
+      setPrivacyLevel(level);
+    };
+    const chooseAiUsage = (usage) => {
+      aiUsageChosenRef.current = true;
+      setAiUsage(usage);
+    };
 
     // Persist choices whenever the user changes them on a fresh top-level
     // entry, so the next Write dialog opens with the same selections.
@@ -176,18 +209,28 @@ const NodeForm = forwardRef(
     // server's answer ({ message, quoted }), shown as a dialog; nothing
     // was saved (Peter, 2026-11-12).
     const [quotesRefusal, setQuotesRefusal] = useState(null);
+    // An edit's Save was refused: the entry changed since the form was
+    // opened (#799). The form keeps the person's text and says what to do.
+    const [newerVersion, setNewerVersion] = useState(false);
+    // An unsaved edit written on an older version of the entry (#761,
+    // #799): offered below the editor, never loaded into it.
+    const [olderDraft, setOlderDraft] = useState(null);
 
     // Draft auto-save hook
     const {
       draft,
       isLoaded: isDraftLoaded,
       saveDraft,
+      saveDraftNow,
       deleteDraft,
       lastSaved,
       isSaving: isDraftSaving
     } = useDraft({
       nodeId: editMode ? nodeId : null,
-      parentId: editMode ? null : parentId
+      parentId: editMode ? null : parentId,
+      // The entry's text the form was opened on: the draft records it, so
+      // a draft written on an older version is offered, not loaded (#799).
+      baseContent: editMode && typeof initialContent === "string" ? initialContent : null,
     });
 
     // Audio file upload state
@@ -245,13 +288,23 @@ const NodeForm = forwardRef(
                 : parent.parent_user_id === myId)));
             setThreadPath(parentIsMine && !parent.audience && !onlyMe
               ? { shared: false } : null);
+            // An AI reply belongs to the user who asked for it.
+            setParentOwnerId((parent.node_type === "llm"
+              ? parent.parent_user_id : parent.user?.id) ?? null);
             if (!initialPrivacyLevel && !initialAiUsage) {
               // Set privacy settings to match parent's settings. AI usage
               // is the backend's reply default (#362): the parent's, but
               // under a Read the thread's, since a Read's nodes are 'chat'
-              // only for the tweets they quote.
-              setPrivacyLevel(parent.privacy_level || "private");
-              setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
+              // only for the tweets they quote. A selector the user has
+              // already changed keeps their choice (the user's edit wins):
+              // a Private picked before this answer arrives must not turn
+              // Public, nor a None turn Chat.
+              if (!privacyChosenRef.current) {
+                setPrivacyLevel(parent.privacy_level || "private");
+              }
+              if (!aiUsageChosenRef.current) {
+                setAiUsage(parent.reply_ai_usage || parent.ai_usage || "none");
+              }
             }
           })
           .catch((err) => {
@@ -263,26 +316,30 @@ const NodeForm = forwardRef(
 
     // The parent's privacy as the page holds it now: an edit of the parent
     // while this form is open (made public, or private again) moves the
-    // reply's privacy with it, and the public-reply dialog follows. The
-    // first value comes from the fetch above; the text typed stays.
+    // reply's privacy with it, and the public-reply dialog follows, unless
+    // the user has chosen the reply's level themselves. The first value
+    // comes from the fetch above; the text typed stays.
     const seenParentPrivacyProp = useRef(parentPrivacyLevel);
     useEffect(() => {
       if (editMode || !parentId || !parentPrivacyLevel) return;
       if (seenParentPrivacyProp.current === parentPrivacyLevel) return;
       seenParentPrivacyProp.current = parentPrivacyLevel;
       setParentPrivacy(parentPrivacyLevel);
-      setPrivacyLevel(parentPrivacyLevel);
+      if (!privacyChosenRef.current) setPrivacyLevel(parentPrivacyLevel);
     }, [parentPrivacyLevel, parentId, editMode]);
 
-    // Replies in a public thread are public (#228): pin the STATE, not just
-    // the display — a remembered 'private' from loore_last_privacy_level
-    // must never reach the submit path.
+    // Replies under someone else's public node are public (#228): pin the
+    // STATE, not just the display — a remembered 'private' from
+    // loore_last_privacy_level must never reach the submit path. Under a
+    // public node of the user's own the reply starts at Public (the
+    // parent's level) and the selector stays free.
+    const publicParentLock = !editMode && parentPrivacy === "public"
+      && !parentOwned;
     useEffect(() => {
-      if (!editMode && parentPrivacy === "public"
-          && privacyLevel !== "public") {
+      if (publicParentLock && privacyLevel !== "public") {
         setPrivacyLevel("public");
       }
-    }, [parentPrivacy, privacyLevel, editMode]);
+    }, [publicParentLock, privacyLevel]);
 
     // A reply in a shared thread is "circles", read by the thread's
     // people (enforced server-side too): pin the state like the public
@@ -346,7 +403,7 @@ const NodeForm = forwardRef(
     // 2026-11-12): the toggle shows off and can't be turned on, and the
     // stored preference is left as the user set it for private entries.
     const autoGenerateLocked = isSharedPrivacy(
-      !editMode && parentPrivacy === "public" ? "public" : privacyLevel);
+      publicParentLock ? "public" : privacyLevel);
     const autoGenerateOn = useAutoGenerate && !autoGenerateLocked;
 
     // Auto-populate form with draft when loaded
@@ -355,11 +412,25 @@ const NodeForm = forwardRef(
         // A left-behind recording is offered in the banner instead (#389);
         // its text comes into the box only if the user chooses Recover.
         if (draft.session_id && draft.has_stored_chunks) return;
+        if (editMode && draft.older_than_entry) {
+          // Written on an older version of the entry (#761, #799): loaded,
+          // its Save would put the older text over the newer one. The form
+          // keeps the entry's text and offers the draft below it.
+          if (draft.content !== (initialContent || "")) {
+            setOlderDraft({ id: draft.id, content: draft.content, updated_at: draft.updated_at });
+          }
+          return;
+        }
         // Auto-populate the form with draft content
         setContent(draft.content);
         setHasDraft(true);
+        // Typed on the entry's text while such an edit was offered, which
+        // is still kept (#766).
+        if (editMode && draft.older_draft && draft.older_draft.content !== draft.content) {
+          setOlderDraft(draft.older_draft);
+        }
       }
-    }, [isDraftLoaded, draft]);
+    }, [isDraftLoaded, draft]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Recovery: when a draft has stored (untranscribed) audio chunks,
     // trigger server-side transcription and poll for completion.
@@ -483,11 +554,22 @@ const NodeForm = forwardRef(
 
     // Handle discard draft
     const handleDiscardDraft = useCallback(() => {
-      deleteDraft();
+      // Only the text typed here; an older edit on offer stays (#766).
+      deleteDraft(olderDraft ? { keepingId: olderDraft.id } : undefined);
       setHasDraft(false);
       // Reset content to initial value (empty for new nodes, original content for edit mode)
       setContent(initialContent || "");
-    }, [deleteDraft, initialContent]);
+    }, [deleteDraft, initialContent, olderDraft]);
+
+    // "Discard" on the older edit: only its row goes; the form's text stays.
+    const handleDiscardOlderDraft = useCallback(() => {
+      const older = olderDraft;
+      setOlderDraft(null);
+      if (!older || !nodeId) return;
+      api.delete(`/drafts/?node_id=${nodeId}&draft_id=${older.id}`).catch((err) => {
+        if (err.response?.status !== 404) console.error("Error discarding the older edit:", err);
+      });
+    }, [olderDraft, nodeId]);
 
     // A new entry is sent: the form is cleared before the caller moves on.
     // The page can stay on screen until the entry's node loads
@@ -718,11 +800,15 @@ const NodeForm = forwardRef(
         }
       }
 
-      // Replying under a PUBLIC node: the reply is public (#228, enforced
-      // server-side too; the state is pinned public by the effect above).
-      // Make the consent felt once — the dialog offers don't-show-again.
+      // Replying under a PUBLIC node with a public reply: under someone
+      // else's node always (#228, enforced server-side too; the state is
+      // pinned public by the effect above), under the user's own when
+      // Public is chosen. Make the consent felt once — the dialog offers
+      // don't-show-again.
       if (
-        !editMode && parentPrivacy === "public" && !publicConfirmed
+        !editMode && parentPrivacy === "public"
+        && (publicParentLock || privacyLevel === "public")
+        && !publicConfirmed
         && localStorage.getItem(PUBLIC_REPLY_ACK_KEY) !== "true"
       ) {
         setShowPublicReplyDialog(true);
@@ -742,6 +828,7 @@ const NodeForm = forwardRef(
 
       setLoading(true);
       setError("");
+      setNewerVersion(false);
       try {
         let response;
 
@@ -859,6 +946,12 @@ const NodeForm = forwardRef(
               response.data.spend_cap_lifts_with_payment);
           }
           noteSkippedReply(response.data);
+          // Saved, but the reply was refused: say why, as the typed paths
+          // above do (#747). A thread too long for a reply shows the limit
+          // on the entry's page instead.
+          if (response.data.llm_error && !replySkippedForLength(response.data)) {
+            addToast(response.data.llm_error, 10000);
+          }
           // Land on the entry; ?awaitLlm hands a pending reply to NodeDetail.
           succeed({
             ...response.data,
@@ -872,6 +965,10 @@ const NodeForm = forwardRef(
           // Update (edit) existing node (text only)
           response = await api.put(`/nodes/${nodeId}`, {
             content,
+            // The text the form was opened on (#799): saved only while it is
+            // still the entry's text, so an older text never goes over a
+            // newer one. Untouched text saves only the settings.
+            ...(typeof initialContent === "string" && { base_content: initialContent }),
             privacy_level: privacyLevel,
             ai_usage: aiUsage,
             // Circles: who reads the entry (only when it is the author's
@@ -979,8 +1076,14 @@ const NodeForm = forwardRef(
             await shareCreated(response.data.id);
           }
         }
-        // Delete draft after successful save
-        deleteDraft();
+        // Delete draft after successful save. An edit deletes only the
+        // rows this form showed (its own, the older edit on offer): another
+        // device's unsaved edit of the entry stays (#799 review).
+        if (editMode) {
+          deleteDraft({ shownIds: olderDraft ? [olderDraft.id] : [] });
+        } else {
+          deleteDraft();
+        }
         setHasDraft(false);
 
         // Auto-generate path (without Agentic Reply): after creating
@@ -1013,8 +1116,11 @@ const NodeForm = forwardRef(
             return;
           } catch (llmErr) {
             // LLM trigger failed — still fall through to plain success
-            // so the user at least keeps their entry.
+            // so the user at least keeps their entry, and say why, as the
+            // thread page does (#747).
             console.error('Auto-generate LLM trigger failed:', llmErr);
+            const message = llmRequestErrorToast(llmErr);
+            if (message) addToast(message, 8000);
           }
         }
 
@@ -1026,6 +1132,20 @@ const NodeForm = forwardRef(
         if (quotesErr) {
           // Nothing was saved: the form keeps its text and settings.
           setQuotesRefusal(quotesErr);
+        } else if (editMode && isContentChanged(err)) {
+          // Nothing was saved: the entry changed since the form was opened
+          // (#799). The text stays in the form, and the notice says what
+          // to do with it. It is saved as a draft at once, with the form's
+          // base: another device's Save may have deleted this form's draft,
+          // and a reload must not lose it (#799 review). Reopened, the
+          // form offers it beside the entry's current text. Only typed
+          // text: a refused settings-only Save keeps no copy of the old
+          // text as "your unsaved edit" (#799 second review).
+          setNewerVersion(true);
+          if (content !== initialContent) {
+            saveDraftNow(content);
+            setHasDraft(true);
+          }
         } else if (uploadedFile && isSpendCapError(err)) {
           // The client-side cap flag was stale; the server refused the
           // upload before storing anything (#341). The banner is up; the
@@ -1142,17 +1262,26 @@ const NodeForm = forwardRef(
           disabled={!editMode && uploadedFile}
         />
 
+        {newerVersion && (
+          <NewerVersionNotice message={NEWER_ENTRY_EDIT_MESSAGE} text={content} />
+        )}
+        {olderDraft && (
+          <OlderDraftBox
+            draft={olderDraft}
+            formShowsNewerText={hasDraft}
+            onDiscard={handleDiscardOlderDraft}
+          />
+        )}
+
         {/* Privacy Settings */}
         {!hidePowerFeatures && (
           <PrivacySelector
-            privacyLevel={parentPrivacy === "public" && !editMode
-              ? "public" : privacyLevel}
+            privacyLevel={publicParentLock ? "public" : privacyLevel}
             aiUsage={aiUsage}
-            onPrivacyChange={setPrivacyLevel}
-            onAIUsageChange={setAiUsage}
+            onPrivacyChange={choosePrivacy}
+            onAIUsageChange={chooseAiUsage}
             disabled={loading}
-            lockPrivacy={(parentPrivacy === "public" || !!threadAudience)
-              && !editMode}
+            lockPrivacy={publicParentLock || (!!threadAudience && !editMode)}
             audience={audience}
             onAudienceChange={setAudience}
             onAudienceResolved={setAudienceInfo}

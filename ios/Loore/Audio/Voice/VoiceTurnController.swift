@@ -209,6 +209,8 @@ final class VoiceTurnController {
         var errorDot: Double = 3
         var tick: Double = 0.25
         var longRecording: Double = 59 * 60
+        /// Recorded audio past which the rest is not turned into text (#736).
+        var untranscribed: Double = RecordingLimits.transcribedSeconds
         /// No llm-status answer for this long ends the turn (M12; heuristic).
         var llmErrorGiveUp: Double = 2 * 60
         /// Most thinking-cue time in one wait (Stop → first chunk, or a drain); after
@@ -275,6 +277,8 @@ final class VoiceTurnController {
     /// The current hold left the microphone running (a lost headset mic, #423).
     @ObservationIgnored private var holdKeepsCapture = false
     @ObservationIgnored private var longRecordingWarned = false
+    /// This recording's two-hour message was shown (#736).
+    @ObservationIgnored private var untranscribedSaid = false
     @ObservationIgnored private var flowTask: Task<Void, Never>?
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var llmTask: Task<Void, Never>?
@@ -399,6 +403,7 @@ final class VoiceTurnController {
         isPaused = false
         isInterrupted = false
         longRecordingWarned = false
+        untranscribedSaid = false
         gleaningDone = false
         turnUserNodeId = nil
         elapsed = draft.map { Double($0.chunkCount) * 15 } ?? 0
@@ -645,6 +650,17 @@ final class VoiceTurnController {
                     self.notices.toast(RecordingLimits.longRecordingWarning, duration: 10)
                     self.notices.notify(.longRecording)
                 }
+                if !self.untranscribedSaid && self.elapsed >= self.timings.untranscribed {
+                    // Past two hours of audio the server keeps the rest without its
+                    // text (#736). Voice does not read the transcription stream that
+                    // says so in dictation and on the web, so it counts the audio
+                    // itself, as the server does. Not a failure, as there: no sound
+                    // and no notification; the message stays until dismissed, as the
+                    // four-hour one does. A continued recording past two hours says
+                    // it at once.
+                    self.untranscribedSaid = true
+                    self.notices.lastingToast(RecordingLimits.tooLongMessage)
+                }
                 let whole = Int(self.elapsed)
                 if whole != lastWhole {
                     lastWhole = whole
@@ -732,12 +748,18 @@ final class VoiceTurnController {
     }
 
     /// The server took no more of this recording (past what one recording may
-    /// hold, `ChunkUploader.onLimit`): said in its words, then the turn goes on
-    /// as after Stop, finalized with the chunks the server holds. Found at Stop,
-    /// it is only said.
+    /// hold, about four hours; `ChunkUploader.onLimit`): said in its words, then
+    /// the turn goes on as after Stop, finalized with the chunks the server
+    /// holds. Found at Stop, it is only said. Voice is used hands-free, often
+    /// with the screen off (#736, Peter 2026-11-21): the message stays until
+    /// dismissed, through the reply and the app's time in the background; the
+    /// error sound plays, as in dictation and on the web; and a notification
+    /// with the same words is posted, as at 59 minutes.
     private func reachedLimit(_ message: String) {
         guard state == .recording || state == .stopping else { return }
-        notices.toast(message, duration: 10)
+        notices.lastingToast(message)
+        audio.playErrorSound()
+        notices.notify(.recordingStopped, body: message)
         if state == .recording { stop() }
     }
 
@@ -1735,19 +1757,25 @@ final class VoiceTurnController {
     /// Leaving the Voice screen (the web's unmount cleanup).
     func tearDown() {
         timing.endTurn()
-        // Left before the first chunk: no audio will ever reach the session.
-        // Kept, it stayed in 'recording' on the server, where Text mode found
-        // it as a draft that no Send or Discard removed. Only while recording:
-        // in `.starting`, `sessionId` may still name the last turn's session
-        // (kept on the phone or the server after an error); a new session
-        // created meanwhile is discarded by the start flow.
-        let emptySession = state == .recording && !recorder.hasProducedChunks ? sessionId : nil
-        if state == .recording || state == .starting { recorder.cancel() }
-        resetTurn(keepQueue: false)
-        if let emptySession {
-            recorder.forget(sessionId: emptySession)
-            Task { [backend] in await backend.discard(sessionId: emptySession) }
+        // Left mid-recording (#753): the recorder queues the unfinished
+        // segment with the others, so the recovery banner has everything said,
+        // and is free at once (`resetTurn`'s cancel finds nothing running).
+        // Then a recording with no earlier piece and under
+        // `VoiceRecorder.shortestKeptRecording` (a Record tapped by accident)
+        // is discarded: kept, it stayed in 'recording' on the server, where
+        // Text mode found it as a draft that no Send or Discard removed. One
+        // whose chunks are all on the server is released, so the next Voice
+        // screen offers it at once instead of after the server's live window.
+        // One with chunks still on the phone is left as it is, and so is one
+        // this phone continued meanwhile. In `.starting` the recorder runs only
+        // for a continued session waiting for its claim, which sends nothing
+        // (#388); `sessionId` may still name the last turn's session, and a
+        // new session created meanwhile is discarded by the start flow.
+        if state == .recording || state == .starting {
+            recorder.leave(release: { [backend] sid in await backend.release(sessionId: sid) },
+                           discard: { [backend] sid in await backend.discard(sessionId: sid) })
         }
+        resetTurn(keepQueue: false)
         state = .idle
         aiBlock = nil
         lengthNotice = false

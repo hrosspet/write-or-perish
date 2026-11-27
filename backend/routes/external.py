@@ -15,6 +15,7 @@ import json
 import re
 import secrets
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 import requests
 from flask import (
@@ -42,6 +43,7 @@ from backend.utils.spend import require_spend_headroom
 from backend.utils.api_keys import get_openai_chat_key
 from backend.utils.audio_storage import clear_tts_artifacts
 from backend.utils.external_content import x_exchange_code
+from backend.utils.request_size import UPLOAD_MAX_BODY_BYTES, body_limit
 
 # Same root as the nodes blueprint and the TTS task.
 AUDIO_STORAGE_ROOT = pathlib.Path(
@@ -295,9 +297,17 @@ def generate_item_tts(item_id):
         return jsonify({"error": "TTS not configured (missing API key)"}), 500
 
     from backend.tasks.tts import generate_tts_audio_for_item
-    item.tts_task_status = "pending"
-    item.tts_task_progress = 0
-    db.session.commit()
+    # A conditional UPDATE: of requests at the same moment one queues the
+    # task, the others follow the run in progress.
+    from backend.utils.audio_storage import claim_tts_start
+    if not claim_tts_start(ExternalItem, item.id):
+        db.session.refresh(item)
+        if item.audio_tts_url:
+            return jsonify({"message": "TTS already available",
+                            "tts_url": item.audio_tts_url}), 200
+        return jsonify({"message": "TTS generation already in progress",
+                        "task_id": item.tts_task_id,
+                        "status": item.tts_task_status}), 202
     task = generate_tts_audio_for_item.delay(
         item.id, str(AUDIO_STORAGE_ROOT), requesting_user_id=current_user.id)
     item.tts_task_id = task.id
@@ -440,22 +450,159 @@ def set_item_feedback(item_id):
     }), 200
 
 
+# ── Community Archive fetches (heuristics, listed in the PR) ──────────────
+# One fetch of an account is queued or running at a time: the key (a run
+# lock, utils/run_locks) names its task and handle, and the job frees it
+# when it ends. The route takes it for CA_FETCH_QUEUED_TTL, while the job
+# waits on the background queue behind imports and profile jobs (a job
+# still waiting after it lets another fetch through). The job holds it
+# with CA_FETCH_RUNNING_TTL and refreshes it every CA_FETCH_BEAT_SECONDS
+# from a thread, through every page and the saving after them; a job that
+# was stopped frees the account CA_FETCH_RUNNING_TTL after its last beat,
+# and a new press frees it at once when Celery says the job ended, or when
+# it started and has not beaten for three beats (run_locks.job_over).
+CA_FETCH_LOCK_KEY = "loore:ca_fetch:{user_id}"
+CA_FETCH_QUEUED_TTL = 15 * 60
+CA_FETCH_RUNNING_TTL = 2 * 60
+CA_FETCH_BEAT_SECONDS = 20
+# Fetches one account may start a day: a person looks up several handles
+# in one sitting, and fetches one again later for its new tweets.
+CA_FETCHES_PER_DAY = 20
+CA_FETCH_COUNT_KEY = "loore:ca_fetch_count:{user_id}"
+CA_FETCH_DEFAULT_ITEMS = 2000
+CA_FETCH_MAX_ITEMS = 10000
+CA_FETCH_RUNNING_MESSAGE = (
+    "Loore is still fetching @{handle} from the Community Archive. Try "
+    "another handle when it has finished; its tweets appear below as they "
+    "arrive.")
+CA_FETCHES_PER_DAY_MESSAGE = (
+    "You fetched from the Community Archive many times today. Please try "
+    "again tomorrow.")
+
+
+def ca_fetch_token(task_id, username):
+    """The fetch key's value: the task and the handle it fetches."""
+    return f"{task_id}:{(username or '').strip().lstrip('@').lower()}"
+
+
+def ca_fetch_key(user_id, task_id, username):
+    """The account's fetch key as the job *task_id* holds it (from its
+    start on, with CA_FETCH_RUNNING_TTL)."""
+    from backend.utils import run_locks
+    lock = run_locks.RunLock(CA_FETCH_LOCK_KEY.format(user_id=user_id),
+                             ca_fetch_token(task_id, username),
+                             CA_FETCH_RUNNING_TTL)
+    lock.adopt()
+    return lock
+
+
+def release_ca_fetch(user_id, task_id, username):
+    """Free the account's fetch key, when it is this job's (another's
+    value stays). Without Redis there is nothing to free."""
+    ca_fetch_key(user_id, task_id, username).release()
+
+
+def _ca_fetch_running_response(held, username):
+    """A fetch while another of this account is queued or running: the
+    same handle answers as its first press did (the apps then show the
+    counts as they grow), another is refused."""
+    task_id, _, handle = held.partition(":")
+    if handle == username.lower():
+        return jsonify({"task_id": task_id, "status": "pending",
+                        "already_running": True}), 202
+    return jsonify({"error": CA_FETCH_RUNNING_MESSAGE.format(handle=handle),
+                    "code": "fetch_running"}), 409
+
+
 @external_bp.route("/community-archive/fetch", methods=["POST"])
 @login_required
 def fetch_community_archive_route():
-    data = request.get_json() or {}
-    username = (data.get("username") or "").strip().lstrip("@")
+    """Queue a fetch of a handle's tweets from the Community Archive.
+    One fetch of an account at a time, CA_FETCHES_PER_DAY a day;
+    max_items a whole number, at most CA_FETCH_MAX_ITEMS."""
+    import uuid
+    from backend.utils import run_locks
+
+    data = request.get_json(silent=True)
+    data = data if isinstance(data, dict) else {}
+    username = data.get("username")
+    username = (username if isinstance(username, str) else "")
+    username = username.strip().lstrip("@")
     if not username:
         return jsonify({"error": "username is required"}), 400
+    max_items = data.get("max_items", CA_FETCH_DEFAULT_ITEMS)
+    if (isinstance(max_items, bool) or not isinstance(max_items, int)
+            or max_items < 1):
+        return jsonify({"error": "max_items must be a whole number from 1 "
+                        f"to {CA_FETCH_MAX_ITEMS:,}"}), 400
+    max_items = min(max_items, CA_FETCH_MAX_ITEMS)
 
+    key = CA_FETCH_LOCK_KEY.format(user_id=current_user.id)
+    held = run_locks.holder(key)
+    if held and run_locks.job_over(key, held.partition(":")[0],
+                                   CA_FETCH_RUNNING_TTL,
+                                   3 * CA_FETCH_BEAT_SECONDS):
+        # Its job ended or was stopped without freeing it (a deploy).
+        run_locks.free_if_held_by(key, held)
+        held = None
+    if held:
+        return _ca_fetch_running_response(held, username)
+    started = run_locks.count(
+        CA_FETCH_COUNT_KEY.format(user_id=current_user.id), 24 * 3600)
+    if started is not None and started > CA_FETCHES_PER_DAY:
+        return jsonify({"error": CA_FETCHES_PER_DAY_MESSAGE,
+                        "code": "too_many_fetches"}), 429
+
+    task_id = str(uuid.uuid4())
+    lock = run_locks.RunLock(key, ca_fetch_token(task_id, username),
+                             CA_FETCH_QUEUED_TTL)
+    if not lock.acquire():  # another press got there first
+        held = run_locks.holder(key)
+        if held:
+            return _ca_fetch_running_response(held, username)
+        return jsonify({"error": CA_FETCH_RUNNING_MESSAGE.format(
+            handle=username.lower()), "code": "fetch_running"}), 409
     from backend.tasks.external_sync import fetch_community_archive
-    task = fetch_community_archive.delay(
-        current_user.id, username,
-        max_items=min(int(data.get("max_items", 2000)), 10000))
-    return jsonify({"task_id": task.id, "status": "pending"}), 202
+    try:
+        fetch_community_archive.apply_async(
+            args=(current_user.id, username),
+            kwargs={"max_items": max_items}, task_id=task_id)
+    except Exception as e:
+        lock.release()
+        current_app.logger.exception(
+            "Could not queue the Community Archive fetch: %s",
+            describe_exception(e))
+        return jsonify({"error": "Could not start the fetch. Please try "
+                        "again."}), 500
+    return jsonify({"task_id": task_id, "status": "pending"}), 202
+
+
+# The hosts a bookmarked tweet's own link is on (X and its old name).
+_TWEET_HOSTS = frozenset({
+    "twitter.com", "www.twitter.com", "mobile.twitter.com",
+    "x.com", "www.x.com", "mobile.x.com",
+})
+# ExternalItem.url's column size.
+_URL_MAX_CHARS = 512
+
+
+def _bookmark_link(url, tweet_id):
+    """The link a bookmarked tweet is stored with: the export's own when
+    it is an http(s) link to the tweet's site that fits the column, else
+    the tweet's link built from its id."""
+    if isinstance(url, str) and len(url) <= _URL_MAX_CHARS:
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            parts = None
+        if (parts is not None and parts.scheme in ("http", "https")
+                and (parts.hostname or "") in _TWEET_HOSTS):
+            return url
+    return f"https://twitter.com/i/status/{tweet_id}"
 
 
 @external_bp.route("/bookmarks/import", methods=["POST"])
+@body_limit(UPLOAD_MAX_BODY_BYTES)
 @login_required
 def import_bookmarks_json():
     """JSON import fallback for X bookmarks (no API credits needed).
@@ -544,7 +691,7 @@ def import_bookmarks_json():
             "external_id": str(tweet_id),
             "author_handle": handle,
             "content": text,
-            "url": url or f"https://twitter.com/i/status/{tweet_id}",
+            "url": _bookmark_link(url, tweet_id),
             "posted_at": posted_at,
         }
 
@@ -703,6 +850,15 @@ def twitter_sync():
         user_id=current_user.id, provider="twitter").first()
     if account is None or not account.get_access_token():
         return jsonify({"error": "X account not connected"}), 400
+    # Each sync reads from the paid X API: at most
+    # X_BOOKMARK_SYNCS_PER_DAY by hand (utils/billing_limits); the
+    # nightly sync is not counted.
+    from backend.utils import billing_limits
+    try:
+        billing_limits.check_and_count(current_user, "x_bookmark_sync")
+    except billing_limits.TooManyBillingRequests:
+        return jsonify({"error": billing_limits.TOO_MANY_X_SYNCS_MESSAGE,
+                        "code": "too_many_syncs"}), 429
     from backend.tasks.external_sync import sync_twitter_bookmarks
     task = sync_twitter_bookmarks.delay(current_user.id)
     return jsonify({"task_id": task.id, "status": "pending"}), 202
@@ -716,6 +872,26 @@ def twitter_sync():
 # which to negotiate.
 MAX_TOKENS_PER_USER = 10  # active tokens; a sanity bound, not a plan limit
 MAX_TITLE_CHARS = 512
+# New pages and posts one account may save through the clipper in a day
+# (a counter that begins with the day's first new clip). The extension
+# saves one page per key press: one a minute for eight hours is 480.
+# Saving a page again is not counted, and neither are the bookmark sync,
+# Community Archive fetches and document uploads.
+CLIPS_PER_DAY = 500
+CLIP_COUNT_KEY = "loore:clip_count:{user_id}"
+# The extension shows `error` after "Loore answered 429:".
+CLIPS_PER_DAY_MESSAGE = (
+    "You saved many pages today. Please try again tomorrow")
+
+
+def _clip_answer(payload, status):
+    """The clip route's answer. The extension reads `created`, `updated`,
+    `source` and `truncated`; a request made with a token gets those and
+    not the reference's id or its stored title."""
+    if g.api_token is not None:
+        payload.pop("id", None)
+        payload.pop("title", None)
+    return jsonify(payload), status
 
 
 def _parse_posted_at(value):
@@ -805,11 +981,11 @@ def clip():
             existing.public_source = False
         if updated or locked:
             db.session.commit()
-        return jsonify({
+        return _clip_answer({
             "created": False, "updated": updated, "id": existing.id,
             "source": source, "title": existing.title,
             "truncated": truncated if updated else False,
-        }), 200
+        }, 200)
 
     def lookup():
         return ExternalItem.query.filter_by(
@@ -818,6 +994,13 @@ def clip():
     existing = lookup()
     if existing is not None:
         return reclip(existing)
+
+    from backend.utils import run_locks
+    new_today = run_locks.count(
+        CLIP_COUNT_KEY.format(user_id=user.id), 24 * 3600)
+    if new_today is not None and new_today > CLIPS_PER_DAY:
+        return jsonify({"error": CLIPS_PER_DAY_MESSAGE,
+                        "code": "too_many_clips"}), 429
 
     if source in TWEET_SOURCES:
         # A tweet a Read picked becomes the saved reference in place, so
@@ -831,10 +1014,10 @@ def clip():
             if author_protected:
                 pick_row.public_source = False
             db.session.commit()
-            return jsonify({
+            return _clip_answer({
                 "created": True, "id": pick_row.id, "source": source,
                 "title": pick_row.title, "truncated": truncated,
-            }), 201
+            }, 201)
 
     item = ExternalItem(
         user_id=user.id, source=source, external_id=external_id,
@@ -859,22 +1042,26 @@ def clip():
         if existing is None:
             raise
         return reclip(existing)
-    return jsonify({
+    return _clip_answer({
         "created": True, "id": item.id, "source": source,
         "title": title, "truncated": truncated,
-    }), 201
+    }, 201)
 
 
 @external_bp.route("/clip/status", methods=["GET"])
 @token_or_login_required(SCOPE_EXTERNAL_WRITE)
 def clip_status():
-    """Connection check for the extension's options page."""
+    """Connection check for the extension's options page, which shows the
+    username and the number of clipped pages. A request made with a token
+    gets that one count; a session gets the count of every source."""
     user = g.api_user
     counts = dict(
         db.session.query(ExternalItem.source, db.func.count())
         .filter(ExternalItem.user_id == user.id, ExternalItem.saved())
         .group_by(ExternalItem.source).all()
     )
+    if g.api_token is not None:
+        counts = {SOURCE_WEB_CLIP: counts.get(SOURCE_WEB_CLIP, 0)}
     return jsonify({
         "ok": True, "username": user.username, "counts": counts,
         "token_name": g.api_token.name if g.api_token else None,

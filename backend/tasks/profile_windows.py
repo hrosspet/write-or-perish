@@ -94,6 +94,7 @@ from backend.utils.chunk_plan import (
     CHUNK_TARGET_UNITS, UPDATE_THRESHOLD_UNITS, max_units_for_cap,
     next_window_budget, plan_chunks)
 from backend.utils.api_keys import get_api_keys_for_usage
+from backend.utils.encryption import key_service_unavailable
 from backend.utils.error_privacy import describe_exception
 from backend.utils.heavy_slot import HeavyTask
 from backend.utils.hidden_rows import (
@@ -1162,14 +1163,15 @@ def _short_of_headroom(user, estimate):
     None. What is left is the limit less this month's spend and the carry
     from earlier months (#594). A user with no limit (0) is never short."""
     from backend.utils.spend import (
-        get_user_month_spend_microdollars, get_user_spend_limit_usd,
-        rolled_spend_carry)
+        carried_spend_microdollars, counted_spend_microdollars,
+        get_user_spend_limit_usd)
     config = current_app.config
     limit = get_user_spend_limit_usd(user, config) or 0
     if limit <= 0:
         return None
-    carried = rolled_spend_carry(user, config) / 1e6
-    counted = carried + get_user_month_spend_microdollars(user.id) / 1e6
+    # Of the paid period for an account counted per period.
+    carried = carried_spend_microdollars(user, config) / 1e6
+    counted = counted_spend_microdollars(user, config) / 1e6
     if estimate > limit - counted:
         return counted, limit, carried
     return None
@@ -1181,11 +1183,15 @@ def _request(models, model_id, custom_id, messages, merge=False):
     """A batch request. An OpenAI merge goes to the Responses endpoint,
     as the live call the merge experiments ran through, with the
     configured reasoning effort; a window stays on chat/completions, as
-    the Luna windows were tested."""
+    the Luna windows were tested.
+
+    One-shot, windows and merges alike: no request starts with a
+    window's prompt or with a whole merge, so neither writes a prompt
+    cache (#803)."""
     provider, api_model = _batch._provider_and_model(model_id)
     req = {"custom_id": custom_id, "model_id": model_id,
            "api_model": api_model, "messages": messages,
-           "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS}
+           "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS, "one_shot": True}
     if merge and provider == "openai":
         from backend.utils.llm_batch import RESPONSES_ENDPOINT
         req["endpoint"] = RESPONSES_ENDPOINT
@@ -2568,14 +2574,33 @@ def collect(job, items, results, queue_full=False):
             continue
         users.add(user_id)
         history = attempt_history(user_id)
-        template = _exports.window_generation_template(user_id)
-        gen_template = _exports._load_prompt(
-            "profile_generation.txt", user_id=user_id)
+        try:
+            template = _exports.window_generation_template(user_id)
+            gen_template = _exports._load_prompt(
+                "profile_generation.txt", user_id=user_id)
+            prompts_read = True
+        except Exception as e:
+            # One account's prompts that cannot be read fail that
+            # account's items (a counted, bounded outcome), not the
+            # pass for every account. A key-service outage is no fault of
+            # the account: it ends the pass, and the job waits for the
+            # next one with its results unused.
+            soft_limit.reraise(e)
+            if key_service_unavailable(e):
+                raise
+            db.session.rollback()
+            logger.error("Loading the profile prompts for user %s failed: "
+                         "%s", user_id, describe_exception(e))
+            template = gen_template = None
+            prompts_read = False
         notes = {"skipped": [], "stopped": [], "blocked": []}
         for item in user_items:
             if item["custom_id"] in blocked:
                 outcomes[item["custom_id"]] = POLICY_BLOCKED
                 notes["blocked"].append((item, blocked[item["custom_id"]]))
+                continue
+            if not prompts_read:
+                outcomes[item["custom_id"]] = "error"
                 continue
             result = results.get(item["custom_id"])
             try:

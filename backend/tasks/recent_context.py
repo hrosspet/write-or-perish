@@ -44,7 +44,7 @@ from backend.utils.llm_batch import (
     batch_submit, blocked_items, drop_openai_batch,
 )
 from backend.utils import anthropic_batch_deletion
-from backend.utils import refusal_backoff
+from backend.utils import refusal_backoff, soft_limit
 
 from backend.utils.hidden_rows import (
     account_on_hold, corpus_changed, item_read_at,
@@ -463,6 +463,9 @@ def _build_batch_request(user, profile, data_cutoff):
             "api_model": cfg["api_model"],
             "messages": messages,
             "max_tokens": max_tokens,
+            # One request per user, never followed by one with the same
+            # prefix: no prompt cache write (#803).
+            "one_shot": True,
         },
         "meta": {
             "custom_id": custom_id,
@@ -562,6 +565,17 @@ def _submit_due_users():
                    if should else None)
         except Exception as e:
             db.session.rollback()
+            if soft_limit.found_in(e) is not None:
+                # Past the task's soft time limit while one account was
+                # built: the requests built before it are submitted, then
+                # the task stops, instead of building on until the hard
+                # limit ends the pass with nothing submitted.
+                logger.warning(
+                    f"Recent context check reached its time limit at "
+                    f"user {user.id}; submitting the {len(built)} "
+                    f"request(s) built before it")
+                _submit_batch(built)
+                soft_limit.reraise(e)
             logger.warning(
                 f"Recent context check failed for user {user.id}: {e}"
             )
@@ -901,8 +915,10 @@ def _generate_recent_context_impl(user_id, profile_id=None,
             messages = _messages_for(prep, recent_data)
 
         try:
+            # One-shot: no prompt cache write (#803).
             response = LLMProvider.get_completion(
-                model_id, messages, api_keys, user_id=user_id
+                model_id, messages, api_keys, user_id=user_id,
+                one_shot=True
             )
             break
         except PromptTooLongError as e:

@@ -1,5 +1,11 @@
 import SwiftUI
 
+/// The waiting screen's text; the web copy is in `AlphaThankYouPage`. It names no
+/// opening date (the date is not final).
+enum BetaRelease {
+    static let waitingText = "Thank you for signing up for the Loore Beta. We're letting people in gradually — to keep things intimate and to give each person the attention they deserve as they begin."
+}
+
 /// The waitlist screen for signed-in users who are not approved yet
 /// (web `AlphaThankYouPage`, route `/alpha-thank-you`). Every other API is 403
 /// for them, so this screen is all they get, plus About and Logout in the ⋯ menu,
@@ -42,7 +48,7 @@ struct WaitlistView: View {
                         .padding(.bottom, 24)
                         .looreFadeIn(delay: 0.1)
                         .accessibilityAddTraits(.isHeader)
-                    Text("Thank you for signing up for the Loore Alpha. We're letting people in gradually — to keep things intimate and to give each person the attention they deserve as they begin.")
+                    Text(BetaRelease.waitingText)
                         .font(LooreFont.sans(16.8, .light))
                         .foregroundStyle(LooreColor.textSecondary)
                         .multilineTextAlignment(.center)
@@ -463,6 +469,7 @@ final class StartingPointModel {
 /// The ⋯ menu an unapproved user gets on the web: About links and Logout.
 struct AboutAndLogoutMenu: View {
     @Environment(AppState.self) private var app
+    @State private var signOutQuestion = false
 
     var body: some View {
         Menu {
@@ -471,7 +478,7 @@ struct AboutAndLogoutMenu: View {
                 Button("Vision") { app.open(.webPage(path: "/vision")) }
                 Button("How To") { app.open(.webPage(path: "/how-to")) }
             }
-            Button("Logout") { Task { await app.signOut() } }
+            Button("Logout") { app.requestSignOut(question: $signOutQuestion) }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 17, weight: .regular))
@@ -481,5 +488,6 @@ struct AboutAndLogoutMenu: View {
         }
         .accessibilityLabel("Menu")
         .accessibilityIdentifier("waitlist.menu")
+        .signOutQuestion($signOutQuestion, .logOut)
     }
 }

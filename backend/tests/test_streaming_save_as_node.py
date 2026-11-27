@@ -434,7 +434,34 @@ class TestSaveAsNodeTakesTheFormsSettings:
         assert Node.query.count() == 0
         assert Draft.query.count() == 1
 
-    def test_a_reply_under_a_public_post_stays_public(self, app):
+    @pytest.mark.parametrize("level", ["private", "circles"])
+    def test_a_reply_under_someone_elses_public_post_stays_public(
+            self, app, level):
+        client = app.test_client()
+        alice = _make_user("alice")
+        bob = _make_user("bob")
+        parent = _make_node(bob)
+        parent.privacy_level = "public"
+        draft = _make_completed_draft(alice, parent_id=parent.id)
+        draft.privacy_level = "public"
+        _db.session.commit()
+        _login(client, alice.id)
+
+        resp = client.post(_url(draft), json={
+            "content": "words", "privacy_level": level,
+            "ai_usage": "chat"})
+
+        assert resp.status_code == 400
+        assert resp.get_json()["code"] == "public_reply_required"
+        assert Node.query.count() == 1
+        # The recording stays, so it can be saved as Public.
+        assert Draft.query.count() == 1
+
+    @pytest.mark.parametrize("level", ["private", "circles"])
+    def test_a_reply_under_ones_own_public_post_takes_the_forms_level(
+            self, app, level):
+        """Peter, 2026-11-24: "they shouldn't be refused, they should
+        adhere to the form's selection"."""
         client = app.test_client()
         alice = _make_user("alice")
         parent = _make_node(alice)
@@ -445,12 +472,14 @@ class TestSaveAsNodeTakesTheFormsSettings:
         _login(client, alice.id)
 
         resp = client.post(_url(draft), json={
-            "content": "words", "privacy_level": "private",
+            "content": "words", "privacy_level": level,
             "ai_usage": "chat"})
 
-        assert resp.status_code == 400
-        assert resp.get_json()["code"] == "public_reply_required"
-        assert Node.query.count() == 1
+        assert resp.status_code == 201, resp.get_json()
+        node = Node.query.get(resp.get_json()["id"])
+        assert node.parent_id == parent.id
+        assert node.privacy_level == level
+        assert node.public_slug is None
 
     def test_a_reply_asked_with_none_is_refused_as_before(self, app):
         client, alice, draft = self._started(app, ai_usage="chat")

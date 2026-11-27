@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, redirect, url_for, current_app
 from dotenv import load_dotenv
+import logging
 import os
 
 # Load environment variables - check for .env.production first, then fall back to .env
@@ -47,6 +48,12 @@ PROFILE_CROSS_PROVIDER_KEYS = ("PROFILE_VERSION_MODEL_CROSS_PROVIDER",
                                "PROFILE_MERGE_MODEL_CROSS_PROVIDER")
 PROFILE_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high",
                              "xhigh")
+# The Saved References Digest's model per provider of the account's own
+# model (Peter, 2026-11-24: the middle model of that provider).
+DIGEST_MODEL_KEYS = (
+    ("DIGEST_MODEL_ANTHROPIC", "anthropic"),
+    ("DIGEST_MODEL_OPENAI", "openai"),
+)
 
 
 def validate_profile_models(config):
@@ -91,12 +98,210 @@ def validate_profile_models(config):
             f"PROFILE_MERGE_GROUP_SIZE={size!r} must be at least 2.")
 
 
-def validate_default_model(config):
+def validate_digest_settings(config):
+    """Refuse to boot on a digest model that is not an active
+    SUPPORTED_MODELS key of the provider its setting names, as for the
+    profile models: an account's references reach only models of its own
+    provider. No "chat" requirement: Sonnet 5.5 is read only in the
+    pickers and still runs background jobs. A cap below one token would
+    leave every digest empty."""
+    supported = config.get("SUPPORTED_MODELS") or {}
+    for key, provider in DIGEST_MODEL_KEYS:
+        model_id = config.get(key)
+        if not model_id:
+            continue
+        cfg = supported.get(model_id) or {}
+        if not cfg or cfg.get("deprecated") or cfg.get("provider") != provider:
+            raise RuntimeError(
+                f"{key}={model_id!r} is not an active {provider} model.")
+    tokens = config.get("DIGEST_MAX_PROMPT_TOKENS")
+    if tokens is not None and int(tokens) < 1:
+        raise RuntimeError(
+            f"DIGEST_MAX_PROMPT_TOKENS={tokens!r} must be at least 1.")
+
+
+_encryption_off_noted = False
+
+
+def note_encryption_off(environ=None):
+    """Write the line about encryption being off to the log, once per
+    process (a process builds the app more than once: the web app's
+    imports build the Celery app's). Nothing when this instance
+    encrypts."""
+    global _encryption_off_noted
+    from backend.utils.encryption import encryption_off_notice
+    notice = encryption_off_notice(environ)
+    if notice and not _encryption_off_noted:
+        _encryption_off_noted = True
+        logging.getLogger(__name__).warning(notice)
+
+
+def validate_keys(config, environ=None):
+    """Refuse to boot without the two keys the data depends on.
+
+    Encryption, in every environment: ENCRYPTION_DISABLED=true is the
+    only switch that turns it off (the local and staging Compose files
+    and the tests set it), with or without a key name beside it (a key
+    name then only serves reads of what was stored encrypted earlier). Where
+    it is not turned off, GCP_KMS_KEY_NAME names the key users' writing
+    is encrypted with, and the app does not start without it. The
+    rule is encryption_choice() in backend/utils/encryption.py, the same
+    one every write and read follows afterwards. An instance that starts
+    with encryption off writes one fixed line to its log saying so
+    (note_encryption_off).
+
+    SECRET_KEY, in production and on staging (DEPLOY_ENV: every
+    FLASK_ENV but "development" and "testing"): it signs the sign-in
+    cookies and links. It must be set in the env file and differ from
+    the placeholder in config.py.
+
+    A missing or placeholder value stops the start, as for LLM_NAME
+    below. The messages name the setting, never a value."""
+    from backend.config import PLACEHOLDER_SECRET_KEY
+    from backend.utils.encryption import encryption_choice
+    environ = os.environ if environ is None else environ
+    encryption_choice(environ)
+    env = (config.get("DEPLOY_ENV") or "production").lower()
+    if env in ("development", "testing"):
+        return
+    key = config.get("SECRET_KEY")
+    if not key or key == PLACEHOLDER_SECRET_KEY:
+        raise RuntimeError(
+            f"SECRET_KEY is not set (FLASK_ENV counts as {env!r}). Set it "
+            "in the env file this instance reads; an instance that had "
+            "one must get the same value back.")
+
+
+def validate_model_successors(supported):
+    """Refuse to boot on a ``replaced_by`` (the model that takes a retired
+    model's place) that does not lead to an active model of the retired
+    model's provider, or that is set on an active model: a typo would
+    move nobody and say nothing, and another provider's model would move
+    users to that provider, which is never acceptable. A replacement that
+    is retired itself is followed to its own replacement (as
+    llm_nodes.successor_model does). A retired model that could chat
+    needs a chat successor, one that could Read a Read successor."""
+    for model_id, cfg in supported.items():
+        successor = cfg.get("replaced_by")
+        if not successor:
+            continue
+        if not cfg.get("deprecated"):
+            raise RuntimeError(
+                f"{model_id!r} names replaced_by={successor!r} but is not "
+                f"deprecated.")
+        seen = {model_id}
+        target = supported.get(successor) or {}
+        while (target.get("deprecated") and target.get("replaced_by")
+               and successor not in seen
+               and target.get("provider") == cfg.get("provider")):
+            seen.add(successor)
+            successor = target["replaced_by"]
+            target = supported.get(successor) or {}
+        if (not target or target.get("deprecated")
+                or target.get("provider") != cfg.get("provider")):
+            raise RuntimeError(
+                f"{model_id!r}: replaced_by={successor!r} is not an active "
+                f"{cfg.get('provider')} model.")
+        if cfg.get("chat", True) and not target.get("chat", True):
+            raise RuntimeError(
+                f"{model_id!r}: replaced_by={successor!r} is read only, "
+                f"and {model_id!r} was a chat model.")
+        if cfg.get("read") and not target.get("read"):
+            raise RuntimeError(
+                f"{model_id!r}: replaced_by={successor!r} is not flagged "
+                f"'read', and {model_id!r} was a Read model.")
+
+
+# The settings that name a model: (config key, the variable to set, the
+# provider it must be of or None, what it must do: "chat", "read" or
+# None). The variable names the boot warning of replace_retired_settings.
+MODEL_SETTINGS = (
+    ("DEFAULT_LLM_MODEL", "LLM_NAME", None, "chat"),
+    ("CHAT_MODEL_ANTHROPIC", "CHAT_MODEL_ANTHROPIC", "anthropic", "chat"),
+    ("CHAT_MODEL_OPENAI", "CHAT_MODEL_OPENAI", "openai", "chat"),
+    ("READ_DEFAULT_MODEL", "READ_DEFAULT_MODEL", None, "read"),
+    ("GLEAN_MODEL_ANTHROPIC", "GLEAN_MODEL_ANTHROPIC", None, "read"),
+    ("GLEAN_MODEL_OPENAI", "GLEAN_MODEL_OPENAI", None, "read"),
+    *((key, key, provider, None) for key, provider in PROFILE_MODEL_KEYS),
+    *((key, key, None, None) for key in PROFILE_CROSS_PROVIDER_KEYS),
+    *((key, key, provider, None) for key, provider in DIGEST_MODEL_KEYS),
+)
+
+
+def retired_model_replacement(supported, model_id):
+    """The active model that replaces *model_id* when it is a retired
+    (deprecated) model naming one (``replaced_by``, followed while the
+    named model is retired too, within its provider); else None."""
+    cfg = supported.get(model_id) or {}
+    if not cfg.get("deprecated"):
+        return None
+    seen = {model_id}
+    successor = cfg.get("replaced_by")
+    while successor and successor not in seen:
+        target = supported.get(successor) or {}
+        if target.get("provider") != cfg.get("provider"):
+            return None
+        if not target.get("deprecated"):
+            return successor
+        seen.add(successor)
+        successor = target.get("replaced_by")
+    return None
+
+
+def replace_retired_settings(config, warn):
+    """A setting that names a retired model with a replacement runs on
+    the replacement, with one warning line naming the variable, the
+    retired id and the replacement: a server whose env file still names
+    GPT-6 Astra keeps serving (2026-11-24, #793 review). Before this, the
+    boot check refused it, and a graceful reload whose new workers refuse
+    to boot takes the site down. Only where the replacement fits the
+    setting (its provider, chat or Read); anything else is left for the
+    checks in validate_default_model to refuse, as before: an unknown id,
+    a model of another provider, a retired model without a replacement.
+    Returns {config key: (retired id, replacement)}."""
+    supported = config.get("SUPPORTED_MODELS") or {}
+    replaced = {}
+    for key, variable, provider, use in MODEL_SETTINGS:
+        model_id = config.get(key)
+        successor = retired_model_replacement(supported, model_id)
+        if not successor:
+            continue
+        cfg = supported[successor]
+        if ((provider and cfg.get("provider") != provider)
+                or (use == "chat" and not cfg.get("chat", True))
+                or (use == "read" and not cfg.get("read"))):
+            continue
+        config[key] = successor
+        replaced[key] = (model_id, successor)
+        warn(f"{variable}={model_id!r} names a retired model; running on "
+             f"its replacement {successor!r}. Set {variable}={successor} "
+             f"in the environment to silence this warning.")
+    return replaced
+
+
+# Boot warnings already written by this process: a web or Celery process
+# builds the app more than once (backend.celery_app builds its own when a
+# route first imports it), and one line per process is enough.
+_BOOT_WARNINGS_WRITTEN = set()
+
+
+def _warn_once(logger):
+    def warn(message):
+        if message not in _BOOT_WARNINGS_WRITTEN:
+            _BOOT_WARNINGS_WRITTEN.add(message)
+            logger.warning(message)
+    return warn
+
+
+def validate_default_model(config, warn=None):
     """Refuse to boot on an ``LLM_NAME`` that is not an active (non-
     deprecated) chat (not ``"chat": False``) SUPPORTED_MODELS key, on
     a READ_DEFAULT_MODEL that is not an active read model, or on a
     CHAT_MODEL_<PROVIDER> that is not an active chat model of that
-    provider.
+    provider, or on a retired model's replacement that does not fit
+    (validate_model_successors). A setting naming a retired model that
+    has a replacement is first moved to it, with a warning through *warn*
+    (replace_retired_settings), so it boots.
 
     The keys are the dotted display ids (``claude-opus-4.6``); the API ids
     use dashes (``claude-opus-4-6``). Setting the API id in the env file
@@ -105,8 +310,11 @@ def validate_default_model(config):
     context, digest) logs a per-user warning and skips — prod ran that way
     for five days on 2026-09-10..15 and once before in May. A boot failure
     turns the typo into a red deploy instead."""
-    model_id = config.get("DEFAULT_LLM_MODEL")
     supported = config.get("SUPPORTED_MODELS") or {}
+    validate_model_successors(supported)
+    replace_retired_settings(
+        config, warn or logging.getLogger("backend").warning)
+    model_id = config.get("DEFAULT_LLM_MODEL")
     if model_id in supported:
         # A deprecated default is in no picker and never inherited, so
         # every user without a preference would start on a model the UI
@@ -158,6 +366,7 @@ def validate_default_model(config):
                     f"{key}={chat_model!r} is not an active {provider} "
                     f"chat model. Active chat models: {chat_models}")
         validate_profile_models(config)
+        validate_digest_settings(config)
         return
     hint = ""
     dotted = (model_id or "").replace("-", ".")
@@ -284,7 +493,16 @@ def create_app():
 
     app = Flask(__name__)
     app.config.from_object(Config)
-    validate_default_model(app.config)
+    # Request bodies: DEFAULT_MAX_BODY_BYTES unless the route allows more
+    # (utils/request_size); a larger body gets a JSON 413 before it is
+    # read.
+    from backend.utils import request_size
+    app.request_class = request_size.SizedRequest
+    app.config["MAX_CONTENT_LENGTH"] = request_size.DEFAULT_MAX_BODY_BYTES
+    app.register_error_handler(413, request_size.too_large_response)
+    validate_keys(app.config)
+    note_encryption_off()
+    validate_default_model(app.config, warn=_warn_once(app.logger))
     # Payments (#438): never on in production with a sandbox key.
     from backend.utils.subscriptions import check_payments_config
     _payments_off = check_payments_config(app.config)
@@ -309,7 +527,10 @@ def create_app():
     @login_manager.unauthorized_handler
     def unauthorized():
         if request.path.startswith("/api"):
-            return jsonify({"error": "Unauthorized"}), 401
+            # A sign-in of a deleted account also says until when it can
+            # be restored (#777).
+            from backend.utils.account_deletion import unauthorized_answer
+            return unauthorized_answer()
         return redirect(url_for("auth_bp.login"))
 
     @login_manager.user_loader
@@ -357,8 +578,10 @@ def create_app():
         # An account never approved is approved on its first request and
         # goes on to the trial step (block_accounts_without_subscription
         # below); one the admin blocked or marked as spam is refused here,
-        # with its own text. No-op while payments are off.
-        if approval.let_in(current_user):
+        # with its own text. From a day's number of new accounts not
+        # prepared in advance, the next one waits for approval as before
+        # payments (approval.let_in_at_gate). No-op while payments are off.
+        if approval.let_in_at_gate(current_user):
             db.session.commit()
             return
 
@@ -634,6 +857,21 @@ def create_app():
         db.session.rollback()
         return thread_too_long_response(exc)
 
+    # A reply while the account already has MAX_REPLIES_IN_PROGRESS replies
+    # waiting or being written: create_llm_placeholder raises TooManyReplies
+    # before the reply is written. Routes that keep the user's entry answer
+    # it themselves; any that lets it escape gets 429 {"error", "code":
+    # "too_many_replies"}, and whatever it flushed before the call is not
+    # kept (a Glean's prompt node).
+    from backend.utils.llm_nodes import TooManyReplies
+
+    @app.errorhandler(TooManyReplies)
+    def _handle_too_many_replies(exc):
+        from backend.extensions import db
+        from backend.utils.llm_nodes import too_many_replies_response
+        db.session.rollback()
+        return too_many_replies_response(exc)
+
     # --------------------------------------------------------------------
     # Health checks – liveness/readiness for monitoring (no auth).
     # --------------------------------------------------------------------
@@ -662,6 +900,8 @@ def create_app():
     app.cli.add_command(stripe_forget_customer_command)
     from backend.unclaimed_cli import unclaimed_accounts_command
     app.cli.add_command(unclaimed_accounts_command)
+    from backend.activity_cli import artifact_names_cleanup_command
+    app.cli.add_command(artifact_names_cleanup_command)
 
     try:
         from experiments.prompt_rct.run_rct import rct_cli

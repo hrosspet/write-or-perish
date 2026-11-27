@@ -23,6 +23,9 @@ struct NodeFormConfig {
     /// The parent's privacy as the host shows it now (a reply). The form follows
     /// it when it changes (an edit of the parent above the form).
     var parentPrivacy: PrivacyLevel?
+    /// The parent is the viewer's own (they wrote it, or asked for the AI reply),
+    /// as the host knows it; the form's own request for the parent replaces it.
+    var parentOwned: Bool?
     var edit: Edit?
     var hidePowerFeatures = false
     var hideAudioUpload = false
@@ -114,7 +117,8 @@ final class NodeFormModel {
             }
         }
     }
-    /// The parent's privacy (replying): a public parent makes the reply public.
+    /// The parent's privacy (replying): a public parent of someone else's makes
+    /// the reply public.
     private(set) var parentPrivacy: PrivacyLevel?
     /// Circles. What the author picks for an entry of their own (circles and
     /// names for this entry only), and who that resolves to.
@@ -125,6 +129,14 @@ final class NodeFormModel {
     /// A reply under the user's own node that only they read, in a thread
     /// someone else shared (`reply_only_private`): Only me is the one choice.
     private(set) var replyOnlyPrivate = false
+    /// The parent is the viewer's own: under a public one the reply may be Private
+    /// or Circles (Peter, 2026-11-24: "they should adhere to the form's selection").
+    private(set) var parentOwned = false
+    /// The person changed the privacy / AI usage selector: the parent's settings
+    /// arriving later (the form's request for the parent, an edit of the parent)
+    /// leave that choice alone (the user's edit wins).
+    @ObservationIgnored private(set) var privacyChosen = false
+    @ObservationIgnored private(set) var aiUsageChosen = false
     var useAgenticPrompt: Bool {
         didSet { if config.allowAgenticPrompt { defaults.set(useAgenticPrompt, forKey: DefaultsKey.agenticReply) } }
     }
@@ -176,17 +188,50 @@ final class NodeFormModel {
 
     let drafts: DraftAutosaver
     @ObservationIgnored private var started = false
+    /// An edit draft last saved before the entry changed (#761): offered beside
+    /// the form's text (use, copy, discard) until the person chooses. The
+    /// server keeps it meanwhile, also when they type in the entry's text
+    /// (#766: that typing gets a row of its own).
+    private(set) var olderDraft: Draft.OlderEdit?
+    /// When the entry last changed (the box's words).
+    @ObservationIgnored private(set) var entryChangedAt: Date?
+    /// The edit's Save was refused: the entry changed since the form was opened
+    /// (#799). The form keeps its text; `error` says what to do and the view
+    /// offers "Copy my text".
+    private(set) var newerVersion = false
+    /// The entry's text this edit form works on: `initialContent`, then the
+    /// entry as the server has it, read when the form opens (#799 review: the
+    /// page that opened it may still show an older text). Its Save sends it
+    /// as `base_content`, and its draft is filed under it.
+    private(set) var base: String
+    /// False while an edit form reads the entry and its draft: the editor waits,
+    /// so no typing lands on the page's older text.
+    private(set) var ready: Bool
+    /// The privacy and AI usage the edit form opened on: the page's, then the
+    /// entry's as just read (#799 second review). A Save that changes either
+    /// asks whether replies follow.
+    private(set) var openedPrivacy: PrivacyLevel?
+    private(set) var openedAIUsage: AIUsage?
+
+    /// What the form says when its Save was refused for a newer version (#799).
+    static let newerEntryEditMessage =
+        "There's a newer version of this entry, so your edit wasn't saved. Your text is still here: copy it, go back and open the entry again, then apply your changes to the newer version."
 
     init(config: NodeFormConfig, app: AppState, defaults: UserDefaults = .standard) {
         self.config = config
         self.app = app
         self.defaults = defaults
         drafts = DraftAutosaver(api: app.api, nodeId: config.edit?.nodeId,
-                                parentId: config.isEdit ? nil : config.parentId)
+                                parentId: config.isEdit ? nil : config.parentId,
+                                base: config.edit?.initialContent)
         audience = CircleAudienceState(api: app.api)
         // Editing: the sentence names who can read this very entry.
         audience.entryId = config.edit?.nodeId
         content = config.edit?.initialContent ?? ""
+        base = config.edit?.initialContent ?? ""
+        ready = !config.isEdit
+        openedPrivacy = config.edit?.initialPrivacy
+        openedAIUsage = config.edit?.initialAIUsage
         let user = app.user
         let remembers = !config.isEdit && config.parentId == nil
         func remembered(_ key: String) -> String? { remembers ? defaults.string(forKey: key) : nil }
@@ -220,13 +265,23 @@ final class NodeFormModel {
         guard !started else { return }
         started = true
         async let draftLoad: Void = drafts.load()
+        if let edit = config.edit {
+            await readCurrentEntry(edit)
+        }
         if config.parentId != nil, !config.isEdit, let known = config.parentPrivacy {
             parentPrivacyChanged(known)
         }
+        if config.parentId != nil, !config.isEdit, let owned = config.parentOwned {
+            parentOwned = owned
+        }
         if let parentId = config.parentId, !config.isEdit {
             if let parent = try? await app.api.nodeDetail(parentId) {
+                // An AI reply belongs to the user who asked for it.
+                let ownerId = parent.nodeType == .llm ? parent.parentUserId : parent.user?.id
+                parentOwned = ownerId != nil && ownerId == app.user?.id
                 parentPrivacyChanged(parent.privacyLevel)
-                aiUsage = parent.replyAIUsage ?? parent.aiUsage
+                // A None picked before this answer arrived stays None.
+                if !aiUsageChosen { aiUsage = parent.replyAIUsage ?? parent.aiUsage }
                 // A shared thread (Circles): the reply is read by its people.
                 if circlesOn { threadAudience = parent.audience }
                 // Under the user's own Only-me node in someone else's shared
@@ -261,22 +316,77 @@ final class NodeFormModel {
         }
         await draftLoad
         if let draft = drafts.draft, !draft.content.isEmpty {
-            content = draft.content
-            hasDraft = true
+            if let edit = config.edit, draft.olderThanEntry {
+                // Saved before the entry changed (a ticked checkbox, an edit on
+                // another device): loaded in place of the entry's text, its
+                // Save would put the older text over the newer one (#761). The
+                // form keeps the entry's text and offers the draft; one with
+                // the entry's own text has nothing to offer.
+                if draft.content != base {
+                    olderDraft = .init(id: draft.id, content: draft.content, updatedAt: draft.updatedAt)
+                    entryChangedAt = draft.entryUpdatedAt
+                }
+            } else {
+                content = draft.content
+                hasDraft = true
+                // Typed after an older edit was offered, which is still kept.
+                if config.isEdit, let older = draft.olderDraft, older.content != draft.content {
+                    olderDraft = older
+                    entryChangedAt = draft.entryUpdatedAt
+                }
+            }
         }
+        ready = true
         if let draft = drafts.draft, let sid = draft.sessionId, draft.hasStoredChunks {
             await recoverAudio(sessionId: sid)
         }
     }
 
+    /// An edit form works on the entry as the server has it now (#799 review):
+    /// after a refused Save the thread page still shows the older text, and a
+    /// form opened on it would type into the older edit's draft. The editor
+    /// takes the current text (it is untouched: it waits until `ready`), and so
+    /// do the Save's base and the draft's. Offline: the page's copy (its Save is
+    /// still checked against the stored text).
+    private func readCurrentEntry(_ edit: NodeFormConfig.Edit) async {
+        guard let fresh = try? await app.api.nodeDetail(edit.nodeId) else { return }
+        if fresh.content != base {
+            if content == base { content = fresh.content }
+            base = fresh.content
+            drafts.base = fresh.content
+        }
+        // Its privacy and AI usage too (#799 second review): a page left open
+        // may still show Public after the entry was made Private elsewhere, and
+        // a Save from it would make the newer text public. A setting the person
+        // already changed here stays theirs, and so does one they picked in the
+        // selector (#797), even when it is the page's value again.
+        if !privacyChosen && privacy == openedPrivacy { privacy = fresh.privacyLevel }
+        openedPrivacy = fresh.privacyLevel
+        if !aiUsageChosen && aiUsage == openedAIUsage { aiUsage = fresh.aiUsage }
+        openedAIUsage = fresh.aiUsage
+    }
+
     /// The parent's privacy now (on load, and after it was edited while the form
-    /// was open): the reply takes it. A public parent pins the reply to public
-    /// (and the public-reply question comes back); a private one returns it to
-    /// private. The text typed so far stays.
+    /// was open): the reply takes it, unless the person chose the reply's level
+    /// themselves (a Private picked before the parent loaded must not turn Public).
+    /// A public parent of someone else's pins the reply to public whatever was
+    /// chosen (and the public-reply question comes back). The text typed so far stays.
     func parentPrivacyChanged(_ level: PrivacyLevel) {
         guard config.parentId != nil, !config.isEdit else { return }
         parentPrivacy = level
+        if !privacyChosen { privacy = level }
+    }
+
+    /// The person picked a level in the selector.
+    func choosePrivacy(_ level: PrivacyLevel) {
+        privacyChosen = true
         privacy = level
+    }
+
+    /// The person picked an AI usage in the selector.
+    func chooseAIUsage(_ usage: AIUsage) {
+        aiUsageChosen = true
+        aiUsage = usage
     }
 
     /// The form left the screen: save the pending draft now (the debounce and the
@@ -289,11 +399,16 @@ final class NodeFormModel {
         drafts.resume()
     }
 
-    /// Replying under a public node: the reply is public, whatever was remembered.
-    /// Replying in a shared thread (Circles): the reply is "circles", read by
-    /// the thread's people (the server enforces both).
+    /// Replying under someone else's public node: the reply is public (#228),
+    /// whatever was remembered. Under a public node of the viewer's own it starts
+    /// at Public (the parent's level) and the selector stays free.
+    var publicParentLock: Bool { !config.isEdit && parentPrivacy == .public && !parentOwned }
+
+    /// Replying under someone else's public node: public (above). Replying in a
+    /// shared thread (Circles): the reply is "circles", read by the thread's
+    /// people (the server enforces both).
     var effectivePrivacy: PrivacyLevel {
-        if !config.isEdit && parentPrivacy == .public { return .public }
+        if publicParentLock { return .public }
         if !config.isEdit && threadAudience != nil { return .circles }
         if !config.isEdit && replyOnlyPrivate { return .private }
         return privacy
@@ -311,7 +426,14 @@ final class NodeFormModel {
         return node.parentUserId == me.id
     }
 
-    var lockPrivacy: Bool { !config.isEdit && (parentPrivacy == .public || threadAudience != nil) }
+    /// The selector is fixed: under someone else's public node, and in a shared
+    /// thread (Circles).
+    var lockPrivacy: Bool { publicParentLock || (!config.isEdit && threadAudience != nil) }
+
+    /// "This reply will be public" asks first: a public reply under a public node.
+    var asksPublicReply: Bool {
+        !config.isEdit && parentPrivacy == .public && effectivePrivacy == .public
+    }
 
     // MARK: Circles
 
@@ -406,6 +528,8 @@ final class NodeFormModel {
             return
         }
         if !new.jsTrimmed.isEmpty {
+            // With an older edit on offer the server saves this in a row of
+            // its own and keeps the older one (#766).
             drafts.save(new)
             hasDraft = true
         }
@@ -413,9 +537,56 @@ final class NodeFormModel {
     }
 
     func discardDraft() {
-        Task { await drafts.delete() }
+        if let older = olderDraft {
+            // Only the text typed here; the older edit stays on offer (#766).
+            Task { await drafts.deleteOwn(keeping: older.id) }
+        } else {
+            Task { await drafts.delete() }
+        }
         hasDraft = false
-        content = config.edit?.initialContent ?? ""
+        content = config.isEdit ? base : ""
+    }
+
+    // MARK: An older edit draft (#761, #766)
+
+    /// The words above the older edit's text.
+    static func olderDraftNotice(_ older: Draft.OlderEdit, entryChangedAt: Date?, formShowsNewerText: Bool,
+                                 timeZone: TimeZone = .current) -> String {
+        let saved = LooreDateFormat.dateTime(older.updatedAt, timeZone: timeZone)
+        let changed = entryChangedAt.map { " (\(LooreDateFormat.dateTime($0, timeZone: timeZone)))" } ?? ""
+        return (saved.isEmpty ? "Your unsaved edit." : "Your unsaved edit from \(saved).")
+            + " The entry changed after it\(changed), so the form shows "
+            + (formShowsNewerText ? "what you typed since." : "the entry as it is now.")
+    }
+
+    /// "Use my edit" is offered while the form still shows the entry's text:
+    /// it never replaces text typed here.
+    var canUseOlderDraft: Bool {
+        olderDraft != nil && content == (config.isEdit ? base : "")
+    }
+
+    /// "Use my edit": the older unsaved edit becomes the form's text and the
+    /// entry's newest draft; Send saves it. Its older row is deleted once that
+    /// save landed, so the text is on the server throughout.
+    func useOlderDraft() {
+        guard canUseOlderDraft, let older = olderDraft else { return }
+        olderDraft = nil
+        content = older.content
+        drafts.save(older.content)
+        hasDraft = true
+        let drafts = drafts
+        Task {
+            await drafts.flush()
+            if !drafts.hasPendingChanges { await drafts.deleteRow(older.id) }
+        }
+    }
+
+    /// "Discard": only the older edit's row goes; the form's text stays.
+    func discardOlderDraft() {
+        guard let older = olderDraft else { return }
+        olderDraft = nil
+        let drafts = drafts
+        Task { await drafts.deleteRow(older.id) }
     }
 
     // MARK: Audio file
@@ -532,7 +703,7 @@ final class NodeFormModel {
             error = "Content is required."
             return
         }
-        if let edit, edit.hasGeneratedTTS, regenerateTts == nil, content != edit.initialContent {
+        if let edit, edit.hasGeneratedTTS, regenerateTts == nil, content != base {
             dialog = .tts
             return
         }
@@ -556,8 +727,8 @@ final class NodeFormModel {
             }
         }
         if let edit, edit.hasChildren, applyToReplies == nil,
-           (edit.initialPrivacy != nil && privacy != edit.initialPrivacy)
-            || (edit.initialAIUsage != nil && aiUsage != edit.initialAIUsage)
+           (openedPrivacy != nil && privacy != openedPrivacy)
+            || (openedAIUsage != nil && aiUsage != openedAIUsage)
             || audienceChanged {
             pendingRegenerateTts = regenerateTts
             dialog = .scope
@@ -574,7 +745,7 @@ final class NodeFormModel {
                 return
             }
         }
-        if edit == nil, parentPrivacy == .public, !publicConfirmed,
+        if asksPublicReply, !publicConfirmed,
            defaults.string(forKey: DefaultsKey.publicReplyAck) != "true" {
             dialog = .publicReply
             return
@@ -591,6 +762,7 @@ final class NodeFormModel {
         dialog = nil
         loading = true
         error = nil
+        newerVersion = false
         do {
             if let result = try await send(regenerateTts: regenerateTts, applyToReplies: applyToReplies) {
                 loading = false
@@ -603,6 +775,22 @@ final class NodeFormModel {
             if let refusal = QuotesNotPublic(error) {
                 // Nothing was saved: the form keeps its text and settings.
                 dialog = .quotesNotPublic(refusal)
+            } else if config.isEdit, ContentEditQueue.isContentChanged(error) {
+                // Nothing was saved: the entry changed since the form was opened
+                // (#799). The text stays in the form and on the server (its draft).
+                newerVersion = true
+                self.error = Self.newerEntryEditMessage
+                // Saved as a draft at once, with the form's base: another
+                // device's Save may have deleted this form's draft, and going
+                // back must not lose the text (#799 review). Reopened, the form
+                // offers it beside the entry's current text.
+                // Only typed text: a refused settings-only Save keeps no copy of
+                // the old text as "your unsaved edit" (#799 second review).
+                if content != base {
+                    drafts.save(content)
+                    await drafts.flush()
+                    hasDraft = true
+                }
             } else if uploadedFile != nil, SpendCap.isSpendCapError(error) {
                 app.toasts.show(SpendCap.toastMessage(.upload), duration: 8)
             } else if let apiError = error as? APIError {
@@ -673,6 +861,11 @@ final class NodeFormModel {
             streamingSessionId = nil
             if answer.spendCapped { app.notifySpendBlocked(liftsWithPayment: answer.spendCapLiftsWithPayment) }
             if let notice = answer.subscriptionNotice { app.notifySubscriptionRequired(notice) }
+            // Saved, but the reply was refused: say why, as the typed paths do (#747).
+            // A thread too long for a reply shows the limit on the entry's page.
+            if let llmError = answer.llmError, !ThreadLength.isRefusal(answer.llmErrorCode) {
+                app.toasts.show(llmError, duration: 10)
+            }
             return NodeFormResult(id: answer.id, awaitLLM: answer.llmNodeId, userNodeId: answer.userNodeId,
                                   llmNodeId: answer.llmNodeId, tipId: answer.tipId, spendCapped: answer.spendCapped,
                                   llmError: answer.llmError, llmErrorCode: answer.llmErrorCode)
@@ -682,8 +875,11 @@ final class NodeFormModel {
             var body: [String: JSONValue] = [
                 "content": .string(content), "privacy_level": .string(privacy.rawString),
                 "ai_usage": .string(aiUsage.rawString),
+                // The text the form was opened on (#799): saved only while it is
+                // still the entry's text; untouched text saves only the settings.
+                "base_content": .string(base),
             ]
-            if edit.detachPrompt && content != edit.initialContent { body["detach_prompt"] = .bool(true) }
+            if edit.detachPrompt && content != base { body["detach_prompt"] = .bool(true) }
             if regenerateTts == true { body["regenerate_tts"] = .bool(true) }
             if applyToReplies == true { body["apply_to_descendants"] = .bool(true) }
             // Circles: who reads the entry (only when it is the author's to
@@ -717,22 +913,43 @@ final class NodeFormModel {
         // Auto-generate without Agentic Reply (Write New Entry only). A long entry is
         // saved as a chain of parts: the reply goes under the last one so it reads all of it.
         // The request says it is automatic: the server refuses it (409
-        // `auto_generate_off`) under a shared entry, and a refusal just means no reply.
+        // `auto_generate_off`) under a shared entry, which just means no reply. Any
+        // other refusal or failure keeps the entry and says why, as the thread page
+        // does (#747); a thread too long for a reply shows on the entry's page.
         let entryPrivacy = created.privacyLevel ?? privacyLevel
         if autoGenerateOn && !entryPrivacy.isSharedWithOthers && config.allowAgenticPrompt && config.parentId == nil
             && aiUsage != .off && !useAgenticPrompt {
-            if let reply: LLMRequestResponse = try? await api.post(
-                APIPath.nodeLLM(created.tipId ?? created.id),
-                json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)])) {
+            do {
+                let reply: LLMRequestResponse = try await api.post(
+                    APIPath.nodeLLM(created.tipId ?? created.id),
+                    json: .object(["source_mode": .string("textmode"), "auto_generate": .bool(true)]))
                 return NodeFormResult(id: reply.nodeId, awaitLLM: reply.nodeId, tipId: created.tipId, privacy: entryPrivacy)
+            } catch {
+                switch error as? APIError {
+                case .subscriptionRequired?:
+                    // No subscription (#438): the banner says it, as on this form's
+                    // other paths and on the web, with no toast beside it.
+                    break
+                default:
+                    if let message = LLMRequestError.toastMessage(error) { app.toasts.show(message, duration: 8) }
+                }
             }
         }
         return NodeFormResult(id: created.id, tipId: created.tipId, privacy: entryPrivacy)
     }
 
+    /// A successful send deletes the place's drafts, an older edit on offer
+    /// included (#761: Save with it on screen keeps the form's text).
     private func clearAfterSend() async {
-        await drafts.delete()
+        if config.isEdit {
+            // Only the rows this form showed: another device's unsaved edit of
+            // the entry stays, to be offered next time (#799 review).
+            await drafts.deleteShown(also: olderDraft?.id)
+        } else {
+            await drafts.delete()
+        }
         hasDraft = false
+        olderDraft = nil
     }
 
     // MARK: Upload and transcription

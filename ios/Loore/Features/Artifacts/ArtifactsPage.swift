@@ -20,6 +20,15 @@ struct ArtifactsPage: View {
     @State private var showHistory = false
     @State private var pendingNav: WorkspaceDocument?
     @State private var saveError: String?
+    /// The text the edit form was opened on ("" for an artifact with no version
+    /// yet; nil while creating): its Save is refused when the artifact changed
+    /// since (#799), and the form keeps its text.
+    @State private var editBase: String?
+    @State private var newerVersion = false
+
+    /// What the form says when its Save was refused for a newer version (#799).
+    static let newerArtifactEditMessage =
+        "There's a newer version of this artifact, so your edit wasn't saved. Your text is still here: copy it, leave this artifact and open it again, then apply your changes to the newer version."
 
     static let kindBlurbs = [
         "memory": "Durable facts the AI remembers about you across sessions. It updates this on its own as you talk.",
@@ -192,6 +201,15 @@ struct ArtifactsPage: View {
                       identifier: "artifact.editor", label: "Artifact text")
             if let saveError {
                 Text(saveError).font(LooreFont.meta).foregroundStyle(LooreColor.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+                if newerVersion {
+                    Button("Copy my text") {
+                        UIPasteboard.general.string = editContent
+                        app.toasts.show("Copied your text")
+                    }
+                    .buttonStyle(.looreOutline)
+                    .accessibilityIdentifier("artifact.copyMine")
+                }
             }
             DocEditButtons(saving: saving,
                            saveDisabled: !saveEnabled || (creating && !ArtifactKinds.isValidKind(newKind)),
@@ -228,6 +246,9 @@ struct ArtifactsPage: View {
                 .foregroundStyle(LooreColor.textMuted)
             Button("Write \(active.title)") {
                 editContent = ""
+                editBase = ""
+                saveError = nil
+                newerVersion = false
                 editDescription = active.description ?? ""
                 editing = true
             }
@@ -268,6 +289,9 @@ struct ArtifactsPage: View {
 
     private func startEditing(_ active: ArtifactDoc) {
         editContent = active.content
+        editBase = active.content
+        saveError = nil
+        newerVersion = false
         editDescription = active.description ?? ""
         editing = true
     }
@@ -287,14 +311,12 @@ struct ArtifactsPage: View {
         guard saveEnabled, !target.isEmpty else { return }
         saving = true
         saveError = nil
+        newerVersion = false
         Task {
             defer { saving = false }
             do {
-                let body: [String: JSONValue] = [
-                    "content": .string(editContent),
-                    "description": .string(editDescription.jsTrimmed),
-                    "generated_by": "user",
-                ]
+                let body = Self.saveBody(content: editContent, description: editDescription,
+                                         base: creating ? nil : editBase)
                 let _: EmptyResponse = try await app.api.put(APIPath.artifact(target), json: .object(body))
                 await app.artifacts.refresh(api: app.api)
                 app.signals.post(.artifactsChanged)
@@ -305,10 +327,29 @@ struct ArtifactsPage: View {
                     await fetchVersionCount()
                 }
             } catch let error as APIError {
-                // The web only logs; the app shows the server's reason (a bad kind slug).
-                saveError = error.serverMessage
+                if ContentEditQueue.isContentChanged(error) {
+                    // Nothing saved: the artifact changed since the form was
+                    // opened (#799). The form stays open with the text.
+                    newerVersion = true
+                    saveError = Self.newerArtifactEditMessage
+                } else {
+                    // The web only logs; the app shows the server's reason (a bad kind slug).
+                    saveError = error.serverMessage
+                }
             } catch {}
         }
+    }
+
+    /// The Save's body: with `base` (the text the form was opened on, #799) the
+    /// server refuses it when the artifact changed since.
+    static func saveBody(content: String, description: String, base: String?) -> [String: JSONValue] {
+        var body: [String: JSONValue] = [
+            "content": .string(content),
+            "description": .string(description.jsTrimmed),
+            "generated_by": "user",
+        ]
+        if let base { body["base_content"] = .string(base) }
+        return body
     }
 
     private func historySource(_ active: ArtifactDoc) -> VersionHistorySource {

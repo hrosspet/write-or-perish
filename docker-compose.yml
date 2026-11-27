@@ -38,6 +38,12 @@ services:
       dockerfile: Dockerfile
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      # ENCRYPTION_DISABLED=true is the only switch that turns
+      # encryption off; without it the app starts only with the key
+      # name (encryption_choice() in backend/utils/encryption.py). The
+      # dev and staging files set the switch.
+      - GCP_KMS_KEY_NAME=${GCP_KMS_KEY_NAME:-}
+      - ENCRYPTION_DISABLED=${ENCRYPTION_DISABLED:-}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -55,7 +61,6 @@ services:
       - OPENAI_API_KEY_BATCH=${OPENAI_API_KEY_BATCH}
       - PROFILE_USE_BATCH=${PROFILE_USE_BATCH:-false}
       - PROFILE_BATCH_USER_IDS=${PROFILE_BATCH_USER_IDS:-}
-      - COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS=${COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS:-}
       - COMMUNITY_ARCHIVE_SNAPSHOT_DIR=${COMMUNITY_ARCHIVE_SNAPSHOT_DIR:-}
       # Pre-fill bundles from the lab (#698, docs/PREFILL-BUNDLES.md); off by default.
       - PREFILL_BUNDLE_LOCATION=${PREFILL_BUNDLE_LOCATION:-}
@@ -110,6 +115,12 @@ services:
     command: python backend/celery_queues.py interactive --loglevel=info --concurrency=2
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      # ENCRYPTION_DISABLED=true is the only switch that turns
+      # encryption off; without it the app starts only with the key
+      # name (encryption_choice() in backend/utils/encryption.py). The
+      # dev and staging files set the switch.
+      - GCP_KMS_KEY_NAME=${GCP_KMS_KEY_NAME:-}
+      - ENCRYPTION_DISABLED=${ENCRYPTION_DISABLED:-}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -126,7 +137,6 @@ services:
       - OPENAI_API_KEY_BATCH=${OPENAI_API_KEY_BATCH}
       - PROFILE_USE_BATCH=${PROFILE_USE_BATCH:-false}
       - PROFILE_BATCH_USER_IDS=${PROFILE_BATCH_USER_IDS:-}
-      - COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS=${COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS:-}
       - COMMUNITY_ARCHIVE_SNAPSHOT_DIR=${COMMUNITY_ARCHIVE_SNAPSHOT_DIR:-}
       # Pre-fill bundles from the lab (#698, docs/PREFILL-BUNDLES.md); off by default.
       - PREFILL_BUNDLE_LOCATION=${PREFILL_BUNDLE_LOCATION:-}
@@ -182,13 +192,18 @@ services:
     command: celery -A backend.celery_app.celery beat --loglevel=info
     environment:
       - SECRET_KEY=${SECRET_KEY}
+      # ENCRYPTION_DISABLED=true is the only switch that turns
+      # encryption off; without it the app starts only with the key
+      # name (encryption_choice() in backend/utils/encryption.py). The
+      # dev and staging files set the switch.
+      - GCP_KMS_KEY_NAME=${GCP_KMS_KEY_NAME:-}
+      - ENCRYPTION_DISABLED=${ENCRYPTION_DISABLED:-}
       - DATABASE_URL=postgresql://${POSTGRES_USER:-writeorperish}:${POSTGRES_PASSWORD:-writeorperish}@db:5432/${POSTGRES_DB:-writeorperish}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - CELERY_SPLIT_QUEUES=${CELERY_SPLIT_QUEUES:-}
       - PROFILE_USE_BATCH=${PROFILE_USE_BATCH:-false}
       - PROFILE_BATCH_USER_IDS=${PROFILE_BATCH_USER_IDS:-}
-      - COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS=${COMMUNITY_ARCHIVE_PARQUET_MIN_TWEETS:-}
       - COMMUNITY_ARCHIVE_SNAPSHOT_DIR=${COMMUNITY_ARCHIVE_SNAPSHOT_DIR:-}
       - PROFILE_UPDATES_PAUSED=${PROFILE_UPDATES_PAUSED:-false}
       - LLM_NAME=${LLM_NAME:-claude-opus-4.6}

@@ -8,6 +8,8 @@ from celery.utils.log import get_task_logger
 from backend.celery_app import celery, flask_app
 from backend.utils.spend import (
     check_and_alert, enforce_user_spend_cap, roll_spend_carries)
+from backend.utils.period_reread import reread_ended_periods
+from backend.utils.trial_alerts import check_trials_started
 
 logger = get_task_logger(__name__)
 
@@ -48,4 +50,38 @@ def roll_carries():
             logger.warning("Spend carry: %s", result)
         else:
             logger.info("Spend carry: %s", result)
+        return result
+
+
+@celery.task(name='backend.tasks.spend_monitor.check_trials')
+def check_trials():
+    """Hourly: email the admin, at most once a day, when more accounts
+    not prepared in advance started a trial in the last 24 hours than
+    OUTSIDE_TRIALS_EMAIL_PER_DAY (utils/trial_alerts).
+    Nothing while payments are off."""
+    with flask_app.app_context():
+        result = check_trials_started(flask_app.config)
+        if result.get("alerted"):
+            logger.warning("Trials started: %s", result)
+        else:
+            logger.info("Trials started: %s", result)
+        return result
+
+
+@celery.task(name='backend.tasks.spend_monitor.reread_periods')
+def reread_periods():
+    """Hourly: a subscription whose stored period has ended, or whose
+    renewal payment failed, is read again from Stripe and settled as its
+    event would be, so a renewal whose event is late still starts the
+    account's next period, and a late payment whose events were lost
+    still gives access again and, when it is the account's first, ends
+    the trial's usage ceiling (utils/period_reread). Not retried: the
+    next hour starts again. Nothing while payments are off."""
+    with flask_app.app_context():
+        result = reread_ended_periods(flask_app.config)
+        if result.get("status") not in ("ok", "off") \
+                or result.get("more_waiting"):
+            logger.warning("Periods read again: %s", result)
+        else:
+            logger.info("Periods read again: %s", result)
         return result

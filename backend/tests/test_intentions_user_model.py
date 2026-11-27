@@ -25,7 +25,7 @@ def it():
     return module
 
 
-def _openai_user(name, model="gpt-6-astra"):
+def _openai_user(name, model="gpt-6.2-astra"):
     u = _make_user(name)
     u.preferred_model = model
     _db.session.commit()
@@ -45,20 +45,20 @@ def test_an_openai_user_is_submitted_to_openai_on_their_model(app, wired, it):  
     assert kind == "batch"
     assert list(wired[0]) == ["openai"]
     req = wired[0]["openai"][0]
-    assert req["model_id"] == "gpt-6-astra" and req["api_model"] == "gpt-6-astra"
+    assert req["model_id"] == "gpt-6.2-astra" and req["api_model"] == "gpt-6.2-astra"
     # Room for reasoning and the answer, as the other background jobs.
     assert req["max_tokens"] == 32000
-    assert ref["provider_key"] == "openai:gpt-6-astra"
+    assert ref["provider_key"] == "openai:gpt-6.2-astra"
     job = ProfileBatchJob.query.filter_by(batch_id=ref["batch_id"]).one()
-    assert job.provider_key == "openai:gpt-6-astra"
-    assert job.items[0]["model_id"] == "gpt-6-astra"
+    assert job.provider_key == "openai:gpt-6.2-astra"
+    assert job.items[0]["model_id"] == "gpt-6.2-astra"
     # A 500k-token prompt is sent whole: the whole archive is read, over
     # the 272k price tier (no shrink, the full cap).
     assert ref["item"]["budget"] == 1_000_000
 
 
 def test_an_openai_prompt_is_sized_to_openais_input_ceiling(app, wired, it, monkeypatch):  # noqa: F811
-    """950k counted tokens fit Opus 5.5's window but not GPT-6 Astra's
+    """950k counted tokens fit Opus 5.5's window but not GPT-6.2 Astra's
     922k input ceiling, so only the OpenAI run shrinks."""
     import backend.llm_providers as lp
     import backend.tasks.recent_context as rc
@@ -71,7 +71,7 @@ def test_an_openai_prompt_is_sized_to_openais_input_ceiling(app, wired, it, monk
     monkeypatch.setattr(lp.LLMProvider, "count_tokens", staticmethod(count))
     u = _openai_user("oa_ceiling")
     _kind, ref = it.start_infer_intentions_impl(u.id)
-    assert counts == ["gpt-6-astra", "gpt-6-astra"]
+    assert counts == ["gpt-6.2-astra", "gpt-6.2-astra"]
     # min(1M, 900k corpus) * 922k / 950k * 0.99 ≈ 865k
     assert 850_000 < ref["item"]["budget"] < 880_000
 
@@ -100,7 +100,8 @@ def test_a_retired_anthropic_model_runs_on_llm_name(app, wired, it):  # noqa: F8
 
 # Provider of each test model (test_intentions_task.MODELS).
 MODEL_PROVIDER = {"claude-opus-5.5": "anthropic", "claude-opus-4.8": "anthropic",
-                  "gpt-6-astra": "openai", "gpt-5.5": "openai"}
+                  "gpt-6.2-astra": "openai", "gpt-6-astra": "openai",
+                  "gpt-5.5": "openai"}
 
 
 def test_a_retired_openai_model_never_moves_the_run_to_anthropic(app, wired, it, monkeypatch):  # noqa: F811
@@ -142,15 +143,16 @@ def test_sync_run_calls_and_prices_the_users_openai_model(app, wired, it, monkey
     u = _openai_user("oa_sync")
     stages = []
     saved = it.run_infer_intentions_sync_impl(u.id, progress=stages.append)
-    assert calls == [("gpt-6-astra", {"max_tokens": 32000, "user_id": u.id})]
-    assert "gpt-6-astra" in stages[0]
-    assert saved["model_id"] == "gpt-6-astra" and saved["version"] == 1
+    assert calls == [("gpt-6.2-astra", {"max_tokens": 32000, "user_id": u.id,
+                                        "one_shot": True})]
+    assert "gpt-6.2-astra" in stages[0]
+    assert saved["model_id"] == "gpt-6.2-astra" and saved["version"] == 1
     log = APICostLog.query.filter_by(user_id=u.id).one()
-    assert log.model_id == "gpt-6-astra"
+    assert log.model_id == "gpt-6.2-astra"
     # Over 272k input: the whole request at 2x input and 1.5x output.
-    assert log.cost_microdollars == int(500_000 * 20.0 + 2_000 * 75.0)
+    assert log.cost_microdollars == int(500_000 * 16.0 + 2_000 * 60.0)
     art = UserArtifact.query.filter_by(user_id=u.id, kind="intentions").one()
-    assert art.generated_by == "gpt-6-astra"
+    assert art.generated_by == "gpt-6.2-astra"
     assert wired == []
 
 
@@ -196,8 +198,8 @@ def test_a_resubmit_runs_on_the_users_model_now(app, wired, it, monkeypatch):  #
     it.handle_failed_intentions_item(u, job.items[0], job, {})
     assert list(wired[0]) == ["openai"]
     new = ProfileBatchJob.query.filter(ProfileBatchJob.batch_id != "b-old").one()
-    assert new.provider_key == "openai:gpt-6-astra"
-    assert new.items[0]["model_id"] == "gpt-6-astra"
+    assert new.provider_key == "openai:gpt-6.2-astra"
+    assert new.items[0]["model_id"] == "gpt-6.2-astra"
     assert new.items[0]["resubmitted"] is True
 
 
@@ -253,7 +255,7 @@ def test_backfill_resolves_the_users_model(app, wired, script, capsys):  # noqa:
     oa = _openai_user("bf_openai")
     plain = _make_user("bf_plain")
     old_gpt = _openai_user("bf_old_gpt", model="gpt-5.5")
-    assert script._resolve_model(app, oa, None) == "gpt-6-astra"
+    assert script._resolve_model(app, oa, None) == "gpt-6.2-astra"
     assert script._resolve_model(app, plain, None) == "claude-opus-5.5"
     # --model of the same provider replaces it; another provider's skips.
     assert script._resolve_model(app, plain, "claude-opus-4.8") == "claude-opus-4.8"
@@ -277,23 +279,24 @@ def test_backfill_sync_runs_and_prices_the_users_model(app, wired, script, monke
     u = _openai_user("bf_sync")
     template = "Read this.\n{user_export?keep=newest&max_export_tokens=1000000}"
     script.backfill_user(app, u, template, script._resolve_model(app, u, None))
-    assert calls == [("gpt-6-astra", {"max_tokens": 32000, "user_id": u.id})]
+    assert calls == [("gpt-6.2-astra", {"max_tokens": 32000, "user_id": u.id,
+                                        "one_shot": True})]
     log = APICostLog.query.filter_by(user_id=u.id).one()
-    assert log.model_id == "gpt-6-astra" and log.request_type == "intentions_backfill"
-    assert log.cost_microdollars == int(100_000 * 10.0 + 1_000 * 50.0)
+    assert log.model_id == "gpt-6.2-astra" and log.request_type == "intentions_backfill"
+    assert log.cost_microdollars == int(100_000 * 8.0 + 1_000 * 40.0)
 
 
 def test_backfill_batch_request_carries_the_output_cap(app, wired, script, monkeypatch):  # noqa: F811
     sent = []
     monkeypatch.setattr(script, "batch_submit", lambda by_provider, keys, kind: (
-        sent.append(by_provider) or {"openai:gpt-6-astra": "b-1"}))
+        sent.append(by_provider) or {"openai:gpt-6.2-astra": "b-1"}))
     monkeypatch.setattr(script, "build_user_export_content",
                         lambda user, **kw: "EXPORT")
     u = _openai_user("bf_batch")
     template = "Read this.\n{user_export?keep=newest&max_export_tokens=1000000}"
     pending = {}
-    script._submit_batch_for(app, u, template, "gpt-6-astra", 1000, False,
+    script._submit_batch_for(app, u, template, "gpt-6.2-astra", 1000, False,
                              {}, 1000, pending, "full-cap")
     req = sent[0]["openai"][0]
-    assert req["model_id"] == "gpt-6-astra" and req["max_tokens"] == 32000
-    assert pending[u.id]["model_id"] == "gpt-6-astra"
+    assert req["model_id"] == "gpt-6.2-astra" and req["max_tokens"] == 32000
+    assert pending[u.id]["model_id"] == "gpt-6.2-astra"

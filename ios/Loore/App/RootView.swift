@@ -26,7 +26,8 @@ struct RootView: View {
             BottomNotices()
         }
         .sheet(item: $router.presentedWeb) { presentation in
-            WebPresentationView(presentation: presentation, cookies: app.api.backendCookies())
+            WebPresentationView(presentation: presentation, cookies: app.api.backendCookies(),
+                                sessionHosts: app.environment.sessionHosts)
         }
         .sheet(isPresented: updatesBinding) {
             if let payload = app.pendingUpdates {
@@ -140,6 +141,7 @@ struct UnreachableView: View {
     let message: String
     @Environment(AppState.self) private var app
     @State private var retrying = false
+    @State private var signOutQuestion = false
 
     var body: some View {
         VStack(spacing: 20) {
@@ -158,12 +160,15 @@ struct UnreachableView: View {
             .buttonStyle(.loorePrimary)
             .disabled(retrying)
             Button("Sign out") {
-                Task { await app.signOut() }
+                app.requestSignOut(question: $signOutQuestion)
             }
             .buttonStyle(.looreQuiet)
         }
         .padding(LooreSpacing.xl)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .loorePageBackground()
+        // The user could not be loaded, so the sign-out deletes every account's
+        // unsent audio (`signOutDeletesUnsentAudio`), and the question says so.
+        .signOutQuestion($signOutQuestion, app.user == nil ? .everyAccount : .signOut)
     }
 }

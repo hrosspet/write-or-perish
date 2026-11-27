@@ -204,6 +204,8 @@ final class AccountModelTests: StubbedAppTestCase {
         XCTAssertEqual(message?.kind, .info)
         XCTAssertEqual(AccountModel.xLoginMessages["taken_placeholder"]?.text,
                        "An account was set up for that X account, but it can't be opened now. Write to info@loore.org.")
+        XCTAssertEqual(AccountModel.xLoginMessages["wait"]?.text,
+                       "Connect X was started many times from this network. Please wait a few minutes, then try again.")
     }
 
     func testDisconnectXCallsTheServerAndForgetsTheHandle() async throws {
@@ -266,6 +268,28 @@ final class StartingPointTests: StubbedAppTestCase {
         XCTAssertTrue(calls.contains("GET /api/dashboard/"))
         XCTAssertEqual(app.router.selectedTab, .artifacts)
         XCTAssertEqual(app.router.workspace, .profile, "their profile opens")
+    }
+
+    /// #731: let in while the final merge goes on, the person's profile
+    /// watcher follows the merge (and its version gets the usual toast).
+    func testLetInWhileTheMergeGoesOnTheWatcherFollowsIt() async throws {
+        try signIn(["starting_point": ["status": "preparing"]])
+        StubURLProtocol.install { request in
+            switch request.url?.path ?? "" {
+            case "/api/dashboard/starting-point":
+                return .json(200, #"{"starting_point":{"status":"ready","done":7,"total":7},"approved":true}"#)
+            case "/api/export/profile-progress":
+                return .json(200, #"{"running":true,"source":"merge","status":"progress","merge_id":7,"message":"Integrating profile versions"}"#)
+            default:
+                return .json(200, #"{"user":{"id":5,"username":"seowriter","approved":true,"terms_up_to_date":true,"twitter_login":true,"profile_merge_pending":true}}"#)
+            }
+        }
+        let model = StartingPointModel(app: app, initial: "preparing")
+        _ = await model.checkOnce()
+        XCTAssertTrue(app.profileWatcher.active)
+        app.profileWatcher.clearUserFlags()
+        XCTAssertEqual(app.user?.profileMergePending, false, "the watcher drops the flag when it ends")
+        app.profileWatcher.stop()
     }
 
     func testWhileLoadingItKeepsAskingAndANothingStops() async throws {
@@ -379,9 +403,80 @@ final class ProfileGenerationWatcherTests: XCTestCase {
         var cleared = 0
         w.showToast = { text, _ in toasts.append(text) }
         w.clearUserFlags = { cleared += 1 }
-        w.fetch = { _ in try await Task.sleep(nanoseconds: 60_000_000_000); throw CancellationError() }
+        w.fetch = { _, _ in try await Task.sleep(nanoseconds: 60_000_000_000); throw CancellationError() }
         w.start()
         return (w, { toasts }, { cleared })
+    }
+
+    private static let mergeRunning = ProfileProgress(
+        running: true, source: "merge", status: "progress", progress: 95, message: "Integrating profile versions",
+        mergeId: 7, latestProfile: .init(id: 1))
+
+    /// #731: the payload's `profile_merge_pending` starts the watcher, as the
+    /// build flags do; when the late merge saves its version, the usual toast.
+    func testALateMergeIsFollowedAndItsVersionSaysUpdated() throws {
+        let w = ProfileGenerationWatcher()
+        var toasts: [String] = []
+        w.showToast = { text, _ in toasts.append(text) }
+        w.fetch = { _, _ in try await Task.sleep(nanoseconds: 60_000_000_000); throw CancellationError() }
+        let user = try decode(CurrentUser.self, #"{"id":5,"approved":true,"profile_merge_pending":true}"#)
+        XCTAssertTrue(user.profileMergePending)
+        w.userLoaded(user)
+        XCTAssertTrue(w.active)
+        w.handle(Self.mergeRunning)
+        XCTAssertEqual(w.mergeId, 7, "the poll after it ends asks with its id")
+        XCTAssertEqual(ProfilePage.progressLabel(w.progress), "Integrating profile versions", "one call: no percentage")
+        XCTAssertEqual(w.handle(ProfileProgress(running: false, status: "completed", latestProfile: .init(id: 2))),
+                       .completed)
+        XCTAssertEqual(toasts, ["Your profile has been updated ✓"])
+        XCTAssertNil(w.mergeId)
+        w.stop()
+    }
+
+    func testALateMergeEndingWithoutAVersionSaysNothing() {
+        let (w, toasts, cleared) = watcher()
+        w.handle(Self.mergeRunning)
+        // Even when another version landed (the person's own edit won over the
+        // merge): the endpoint's `unchanged` decides.
+        XCTAssertNil(w.handle(ProfileProgress(running: false, status: "unchanged", latestProfile: .init(id: 2))))
+        XCTAssertTrue(toasts().isEmpty)
+        XCTAssertEqual(w.doneCount, 1)
+        XCTAssertEqual(cleared(), 1)
+        XCTAssertFalse(w.active)
+        w.stop()
+    }
+
+    /// A batch build saves its version while a late merge still runs, and the merge
+    /// then ends without one: the build's toast still comes, as when no merge runs.
+    func testABatchBuildSeenBeforeAnUnchangedMergeKeepsItsToast() {
+        let (w, toasts, _) = watcher()
+        w.handle(ProfileProgress(running: true, source: "batch", status: "progress", latestProfile: .init(id: 1)))
+        w.handle(ProfileProgress(running: true, source: "merge", status: "progress", message: "Integrating profile versions",
+                                 mergeId: 7, latestProfile: .init(id: 2)))
+        XCTAssertEqual(w.handle(ProfileProgress(running: false, status: "unchanged", latestProfile: .init(id: 2))),
+                       .completed)
+        XCTAssertEqual(toasts(), ["Your profile has been updated ✓"])
+        w.stop()
+    }
+
+    /// As after a usual build: an app opened once the merge has ended gets no
+    /// running flag, so nothing is followed and no toast comes.
+    func testNoRunningFlagStartsNothing() throws {
+        let w = ProfileGenerationWatcher()
+        let user = try decode(CurrentUser.self, #"{"id":5,"approved":true}"#)
+        XCTAssertFalse(user.profileMergePending)
+        w.userLoaded(user)
+        XCTAssertFalse(w.active)
+    }
+
+    func testThePollAsksWithTheTaskAndTheMerge() throws {
+        XCTAssertEqual(ProfileGenerationWatcher.query(taskId: nil, mergeId: nil), [])
+        XCTAssertEqual(ProfileGenerationWatcher.query(taskId: nil, mergeId: 7),
+                       [URLQueryItem(name: "merge_id", value: "7")])
+        XCTAssertEqual(ProfileGenerationWatcher.query(taskId: "t1", mergeId: 7),
+                       [URLQueryItem(name: "task_id", value: "t1"), URLQueryItem(name: "merge_id", value: "7")])
+        let answer = try decode(ProfileProgress.self, #"{"running":true,"source":"merge","status":"progress","merge_id":7}"#)
+        XCTAssertEqual(answer.mergeId, 7)
     }
 
     func testGivingUpOnErrorsWithStaleRunningDataIsQuiet() {
@@ -545,7 +640,8 @@ final class ReadReplyTests: StubbedAppTestCase {
     }
 }
 
-/// The todo save rule (design doc §10): re-fetch right before every PATCH.
+/// The todo save rules: a tick and the row "+" are saved on the version the
+/// page shows (#795); quick-add re-fetches right before its PATCH (design doc §10).
 @MainActor
 final class TodoModelTests: StubbedAppTestCase {
     private let shown = "## Today\n\n- [ ] water the plants\n"
@@ -571,14 +667,25 @@ final class TodoModelTests: StubbedAppTestCase {
         return m
     }
 
-    func testToggleRefetchesAndAppliesTheTickToTheFreshContent() async {
+    /// #795: no re-fetch; the tick is made on the list the page shows.
+    func testATickIsSavedOnTheShownListWithoutARefetch() async {
         let m = await model(serverContent: fresher)
         let item = TodoSections.parse(m.todo?.content).first!.items.first!
         await m.toggle(item)
+        // Requests since the page loaded (installing a stub starts the list).
+        XCTAssertEqual(calls, ["PATCH /api/todo/"])
+        XCTAssertEqual(body(of: "PATCH /api/todo/")?["content"] as? String,
+                       "## Today\n\n- [x] water the plants\n")
+    }
+
+    func testQuickAddRefetchesAndGoesOnTheFreshContent() async {
+        let m = await model(serverContent: fresher)
+        let ok = await m.quickAdd("buy bread")
+        XCTAssertTrue(ok)
         XCTAssertEqual(calls.suffix(2), ["GET /api/todo/", "PATCH /api/todo/"])
         XCTAssertEqual(body(of: "PATCH /api/todo/")?["content"] as? String,
-                       "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n", "the AI's item survives")
-        XCTAssertEqual(m.todo?.content, "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n")
+                       "## Today\n\n- [ ] water the plants\n- [ ] added by the AI\n- [ ] buy bread\n",
+                       "the AI's item survives")
     }
 
     func testQuickAddGoesToTheEndOfToday() async {
@@ -605,9 +712,47 @@ final class TodoModelTests: StubbedAppTestCase {
         }
     }
 
-    /// A merge saved a new version between the tick's GET and its PATCH: the
-    /// PATCH is refused, and the tick is applied to the newest list and saved.
-    func testATickRefusedForAStaleListIsAppliedToTheNewestList() async {
+    /// #795: a merge saved a new version after the page loaded. The tick's
+    /// PATCH (with the shown version's revision) is refused; the tick is undone,
+    /// nothing more is sent, and a toast says there is a newer version.
+    func testATickRefusedForAStaleListIsUndone() async {
+        let m = TodoModel(app: app)
+        StubURLProtocol.install { [shown] _ in .json(200, json(["todo": todoJSON(shown, "r1")])) }
+        await m.fetch()
+        StubURLProtocol.install { [fresher] request in
+            if request.httpMethod == "GET" { return .json(200, json(["todo": todoJSON(fresher, "r2", id: 2)])) }
+            return todoChanged(todoJSON(fresher, "r2", id: 2))
+        }
+        let item = TodoSections.parse(m.todo?.content).first!.items.first!
+        await m.toggle(item)
+        let bodies = sentBodies("PATCH")
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual(bodies.first?["base_revision"] as? String, "r1")
+        XCTAssertEqual(m.todo?.content, shown, "undone; the page keeps its list")
+        XCTAssertEqual(app.toasts.toasts.last?.message, TodoModel.newerTodoMessage)
+        XCTAssertEqual(calls, ["PATCH /api/todo/"], "no re-fetch")
+    }
+
+    /// Two quick ticks on a list that changed elsewhere: the first is refused,
+    /// the second (made on the same version) is undone with it, one toast.
+    func testTicksWaitingBehindARefusedOneAreUndoneWithIt() async {
+        let m = TodoModel(app: app)
+        let two = "## Today\n\n- [ ] water the plants\n- [ ] feed the cat\n"
+        StubURLProtocol.install { _ in .json(200, json(["todo": todoJSON(two, "r1")])) }
+        await m.fetch()
+        StubURLProtocol.install { [fresher] _ in todoChanged(todoJSON(fresher, "r2", id: 2)) }
+        let items = TodoSections.parse(m.todo?.content).first!.items
+        async let first: Void = m.toggle(items[0])
+        async let second: Void = m.toggle(items[1])
+        _ = await (first, second)
+        XCTAssertEqual(sentBodies("PATCH").count, 1)
+        XCTAssertEqual(m.todo?.content, two)
+        XCTAssertEqual(app.toasts.toasts.count, 1)
+    }
+
+    /// Quick-add keeps #430: refused for a stale list, it is added to the
+    /// newest list the 409 carries and saved again.
+    func testAQuickAddRefusedForAStaleListGoesOnTheNewestList() async {
         let m = TodoModel(app: app)
         StubURLProtocol.install { [shown] _ in .json(200, json(["todo": todoJSON(shown, "r1")])) }
         await m.fetch()
@@ -618,13 +763,12 @@ final class TodoModelTests: StubbedAppTestCase {
             let sent = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
             return .json(200, json(["todo": todoJSON(sent?["content"] as? String ?? "", "r3", id: 2)]))
         }
-        let item = TodoSections.parse(m.todo?.content).first!.items.first!
-        await m.toggle(item)
+        let ok = await m.quickAdd("buy bread")
+        XCTAssertTrue(ok)
         let bodies = sentBodies("PATCH")
         XCTAssertEqual(bodies.count, 2)
-        XCTAssertEqual(bodies.first?["base_revision"] as? String, "r1")
         XCTAssertEqual(bodies.last?["base_revision"] as? String, "r2")
-        let expected = "## Today\n\n- [x] water the plants\n- [ ] added by the AI\n"
+        let expected = "## Today\n\n- [ ] water the plants\n- [ ] added by the AI\n- [ ] buy bread\n"
         XCTAssertEqual(bodies.last?["content"] as? String, expected, "the merge's item survives")
         XCTAssertEqual(m.todo?.content, expected)
         XCTAssertTrue(app.toasts.toasts.isEmpty)
@@ -708,7 +852,7 @@ final class TodoModelTests: StubbedAppTestCase {
         let both = "## Today\n\n- [x] water the plants\n- [x] feed the cat\n"
         XCTAssertEqual(server.content, both, "the second tick's PATCH builds on the first one's")
         XCTAssertEqual(m.todo?.content, both)
-        XCTAssertEqual(calls.suffix(4), ["GET /api/todo/", "PATCH /api/todo/", "GET /api/todo/", "PATCH /api/todo/"])
+        XCTAssertEqual(calls, ["GET /api/todo/", "PATCH /api/todo/", "PATCH /api/todo/"])
     }
 
     func testAQuickAddThenATickKeepsTheNewTask() async {

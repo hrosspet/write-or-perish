@@ -23,9 +23,12 @@ services:
     ports:
       - "127.0.0.1:5011:5010"
     # Override gunicorn to 2 workers (saves ~150 MiB vs prod's 4 workers)
-    command: gunicorn --bind 0.0.0.0:5010 --workers 2 -k gevent --timeout 900 --access-logfile - --error-logfile - backend.app:app
+    command: gunicorn --access-logformat "%(h)s %(l)s %(u)s %(t)s %(m)s %(U)s %(H)s %(s)s %(b)s %(a)s" --bind 0.0.0.0:5010 --workers 2 -k gevent --timeout 900 --access-logfile - --error-logfile - backend.app:app
     environment:
       - FLASK_ENV=staging
+      # Staging holds test data only and has no KMS key: it runs without
+      # encryption, and says so (the app does not start otherwise).
+      - ENCRYPTION_DISABLED=true
       - FRONTEND_URL=${FRONTEND_URL:-https://staging.loore.org}
       # Dark features live on staging by design.
       - SHARE_V1=true
@@ -51,6 +54,8 @@ services:
       - SHARE_V1=true
       - STREAMING_VOICE_TTS=true
       - SEMANTIC_SEARCH_AGENTIC=true
+      # As the backend: no KMS key on staging.
+      - ENCRYPTION_DISABLED=true
     deploy:
       resources:
         limits:
@@ -68,6 +73,8 @@ services:
 
   celery-beat:
     command: celery -A backend.celery_app.celery beat --loglevel=warning
+    environment:
+      - ENCRYPTION_DISABLED=true
     deploy:
       resources:
         limits:
