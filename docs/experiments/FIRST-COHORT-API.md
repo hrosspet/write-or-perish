@@ -110,7 +110,8 @@ The account must be signed in. Before the claim, `POST /api/cohort/claim` and `G
     "drafted_at": "…Z",
     "sent_at": null,
     "skipped_at": null,
-    "shared_with_founder": false
+    "shared_with_founder": false,
+    "written_by_loore": true
   },
   "intro": {"node_id": null, "task_status": null, "shared_with_group": false}
 }
@@ -120,6 +121,7 @@ The account must be signed in. Before the claim, `POST /api/cohort/claim` and `G
 - `interview.node_id`: the interview thread's prompt node (root), or `null` before it starts. `tip_node_id`: the newest node of the person's own in that thread (`null` when there is none). `tip_is_ai`: the tip is an AI reply. `tip_status`: its `llm_task_status` (`"pending"`, `"processing"`, `"completed"`, `"failed"`), `null` for a person's message. `open`: where to send the person to continue (see section 5), or `null`.
 - `report.node_id` / `intro.node_id`: the person's own node, `null` when there is none (or it was deleted).
 - `report.shared_with_founder`: the founder can read the report right now (sent and not taken back).
+- `report.written_by_loore`: the report now on the invitation is a draft a model wrote (`false` for the headings of `{"blank": true}`, and when there is no report). Pages say "Loore wrote this draft" only when it is `true`.
 - `intro.shared_with_group`: the introduction is shared with the member's group circle.
 
 ### POST /api/cohort/claim
@@ -145,7 +147,7 @@ To send someone to X sign-in and back to `/cohort`: `GET /auth/login?next=/cohor
 
 Body: `{"mode": "text" | "voice"}` (default `"text"`).
 
-Starts the interview: a private thread of the person's own whose root is a prompt node with key `cohort_interview` (their own Voice or Text agentic prompt, then the interview section with the cohort's about, the founder's name and their letter filled in), and the AI writes the first message on the person's own model. Idempotent: once the thread has anything below its root, it answers that thread and writes nothing.
+Starts the interview: a private thread of the person's own whose root is a prompt node with key `cohort_interview` (their own Voice or Text agentic prompt, then the interview section with the cohort's name, its about, the founder's name and their letter filled in; the name is how the interviewer points to the web app's link back to `/cohort` at the end), and the AI writes the first message on the person's own model. Idempotent: once the thread has anything below its root, it answers that thread and writes nothing.
 
 202 (started now, or a failed opening asked again):
 
