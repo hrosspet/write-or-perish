@@ -120,9 +120,10 @@ The account must be signed in. Before the claim, `POST /api/cohort/claim` and `G
 ```
 
 - `booking_url`: the founder's calendar link, only once the report was sent or skipped; else `null`.
-- `interview.node_id`: the interview thread's prompt node (root), or `null` before it starts. `tip_node_id`: the newest node of the person's own in that thread (`null` when there is none). `tip_is_ai`: the tip is an AI reply. `tip_status`: its `llm_task_status` (`"pending"`, `"processing"`, `"completed"`, `"failed"`, `"cancelled"`), `null` for a person's message. `tip_error`: for a failed or cancelled AI tip, why (the text written for its owner), else `null`. `tip_is_opening`: the tip is the thread's first message (its parent is the root). `open`: where to send the person to continue (see section 5), or `null`. When the tip is a failed or cancelled AI reply, offer "Try again" through `POST /api/cohort/interview/start`, which asks for it again; do not send the person to the failed node.
+- `interview.node_id`: the interview thread's prompt node (root), or `null` before it starts. `tip_node_id`: the newest node of the person's own in that thread (`null` when there is none). `tip_is_ai`: the tip is an AI reply. `tip_status`: its `llm_task_status` (`"pending"`, `"processing"`, `"completed"`, `"failed"`, `"cancelled"`), `null` for a person's message. `tip_error`: for a failed or cancelled AI tip, why, when the text written for its owner says something of its own (a spend limit, the provider not answering); `null` for the generic "Loore couldn't write this reply" and for every other tip. `tip_is_opening`: the tip is the thread's first message (its parent is the root). `open`: where to send the person to continue (see section 5), or `null`. When the tip is a failed or cancelled AI reply, offer "Try again" through `POST /api/cohort/interview/start`, which asks for it again; do not send the person to the failed node.
 - `report.node_id` / `intro.node_id`: the person's own node, `null` when there is none (or it was deleted).
 - `report.shared_with_founder`: the founder can read the report right now (sent and not taken back).
+- `report.nothing_reason`: with `task_status` `"nothing_to_draft"`, `"no_ai"` when the person's messages in the interview are all set to No AI, else `"empty"` (they said nothing yet); `null` otherwise.
 - `report.written_by_loore`: the report now on the invitation is a draft a model wrote (`false` for the headings of `{"blank": true}`, and when there is no report). Pages say "Loore wrote this draft" only when it is `true`.
 - `intro.shared_with_group`: the introduction is shared with the member's group circle.
 
@@ -409,7 +410,7 @@ Errors: as `call_done`.
 
 ### POST /api/admin/cohorts/&lt;id&gt;/invitations/&lt;iid&gt;/close
 
-No body. Sets `closed_at` (once; a declined invitation stays declined). An admitted member leaves every circle of the group and their own group circle is deleted. Loore tells nobody. 200: `{"invitation": AdminInvitation}`.
+No body. Sets `closed_at` (once; a declined invitation stays declined). An admitted member leaves every circle of the group and their own group circle is deleted; each entry of theirs that only the group read goes back to Only me (one also shared with someone else keeps that audience). Loore tells nobody. 200: `{"invitation": AdminInvitation}`.
 
 ### POST /api/admin/cohorts/&lt;id&gt;/invitations/&lt;iid&gt;/reopen
 
