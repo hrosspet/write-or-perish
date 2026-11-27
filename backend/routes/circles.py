@@ -42,14 +42,41 @@ def _serialize_circles(circles):
     ids = [c.id for c in circles]
     members = cz.circle_members(ids)
     counts = cz.shared_entry_counts(ids)
-    return [{
-        "id": c.id,
-        "name": c.name,
-        "members": [{"username": u.username,
-                     "only_new": m.entries_from is not None}
-                    for m, u in members[c.id]],
-        "shared_count": counts.get(c.id, 0),
-    } for c in circles]
+    out = []
+    for c in circles:
+        row = {
+            "id": c.id,
+            "name": c.name,
+            "members": [{"username": u.username,
+                         "only_new": m.entries_from is not None}
+                        for m, u in members[c.id]],
+            "shared_count": counts.get(c.id, 0),
+        }
+        # The first cohort (COHORT_V1 only): the circle Loore keeps for
+        # the group, which its owner can't rename, delete or edit.
+        cohort = _cohort_of(c)
+        if cohort is not None:
+            row["cohort"] = {"name": cohort.name, "slug": cohort.slug}
+        out.append(row)
+    return out
+
+
+def _cohort_of(circle):
+    if not getattr(circle, "cohort_id", None):
+        return None
+    from backend.utils.cohort import cohort_of_circle
+    return cohort_of_circle(circle)
+
+
+def _kept_by_loore(circle):
+    """409 for a hand edit of a circle Loore keeps for a cohort (its name,
+    its deletion, its people), else None."""
+    cohort = _cohort_of(circle)
+    if cohort is None:
+        return None
+    from backend.utils.cohort import cohort_circle_text
+    return jsonify({"error": cohort_circle_text(cohort),
+                    "code": "cohort_circle"}), 409
 
 
 def _own_circles():
@@ -106,6 +133,9 @@ def rename_circle(circle_id):
     circle = cz.own_circle(circle_id, current_user.id)
     if circle is None:
         return jsonify({"error": "Not found"}), 404
+    kept = _kept_by_loore(circle)
+    if kept:
+        return kept
     name, err = _clean_circle_name(request.get_json(silent=True), circle.id)
     if err:
         return err
@@ -120,6 +150,9 @@ def delete_circle(circle_id):
     circle = cz.own_circle(circle_id, current_user.id)
     if circle is None:
         return jsonify({"error": "Not found"}), 404
+    kept = _kept_by_loore(circle)
+    if kept:
+        return kept
     cz.delete_circle(circle)
     db.session.commit()
     return jsonify({"deleted": True}), 200
@@ -152,6 +185,9 @@ def preview_member(circle_id):
     circle = cz.own_circle(circle_id, current_user.id)
     if circle is None:
         return jsonify({"error": "Not found"}), 404
+    kept = _kept_by_loore(circle)
+    if kept:
+        return kept
     data = request.get_json(silent=True) or {}
     person, err = _lookup(data.get("username"))
     if err:
@@ -175,6 +211,9 @@ def add_member(circle_id):
     circle = cz.own_circle(circle_id, current_user.id)
     if circle is None:
         return jsonify({"error": "Not found"}), 404
+    kept = _kept_by_loore(circle)
+    if kept:
+        return kept
     data = request.get_json(silent=True) or {}
     if not isinstance(data.get("include_existing"), bool):
         return jsonify({"error": "include_existing must be true or false"}), 400
@@ -190,23 +229,8 @@ def add_member(circle_id):
         return jsonify({
             "error": f"A circle can have up to {cz.MAX_MEMBERS_PER_CIRCLE} "
                      "people."}), 400
-    now = datetime.utcnow()
-    include = data["include_existing"]
-    db.session.add(CircleMember(
-        circle_id=circle.id, user_id=person.id, created_at=now,
-        entries_from=None if include else now))
-    db.session.flush()
-    cz.forget_circle_access()
-    if include:
-        # One note, for the newest entry now open to them: a note per
-        # entry would arrive as a pile for a circle with a history.
-        from backend.models import NodeCircle
-        newest = (Node.query.join(NodeCircle, NodeCircle.node_id == Node.id)
-                  .filter(NodeCircle.circle_id == circle.id,
-                          *cz._alive_shared_entry())
-                  .order_by(Node.created_at.desc(), Node.id.desc()).first())
-        if newest is not None:
-            cz.note_shared(newest, {person.id})
+    cz.add_circle_member(circle, person, data["include_existing"],
+                         now=datetime.utcnow())
     db.session.commit()
     return jsonify({"circle": _serialize_circles([circle])[0]}), 201
 
@@ -230,6 +254,9 @@ def remove_member(circle_id):
     circle = cz.own_circle(circle_id, current_user.id)
     if circle is None:
         return jsonify({"error": "Not found"}), 404
+    kept = _kept_by_loore(circle)
+    if kept:
+        return kept
     username = _name_in_body()
     if not username:
         return jsonify({"error": "Not found"}), 404
@@ -240,8 +267,7 @@ def remove_member(circle_id):
            .first())
     if row is None:
         return jsonify({"error": "Not found"}), 404
-    db.session.delete(row)
-    cz.forget_circle_access()
+    cz.remove_circle_member(row)
     db.session.commit()
     return jsonify({"circle": _serialize_circles([circle])[0]}), 200
 
@@ -532,6 +558,27 @@ def _leave_answer(author, plan):
     return {"author": author.username, "closes": plan.closes}
 
 
+def _cohort_leave_refusal(plan):
+    """409 when leaving would take the user out of a circle Loore keeps
+    for a cohort they are a member of (COHORT_V1 only): the group is left
+    by telling its founder, and a person's entries are hidden with the
+    mute."""
+    if not plan.member_ids:
+        return None
+    from backend.utils.cohort import cohort_enabled, cohort_leave_text
+    if not cohort_enabled():
+        return None
+    circle = (Circle.query.join(CircleMember,
+                                CircleMember.circle_id == Circle.id)
+              .filter(CircleMember.id.in_(plan.member_ids),
+                      Circle.cohort_id.isnot(None)).first())
+    cohort = _cohort_of(circle) if circle is not None else None
+    if cohort is None:
+        return None
+    return jsonify({"error": cohort_leave_text(cohort),
+                    "code": "cohort_circle"}), 409
+
+
 @circles_bp.route("/leave/preview", methods=["POST"])
 @login_required
 def leave_preview():
@@ -541,6 +588,9 @@ def leave_preview():
     if target is None:
         return jsonify({"error": "Not found"}), 404
     author, _entry, plan = target
+    refused = _cohort_leave_refusal(plan)
+    if refused:
+        return refused
     return jsonify(_leave_answer(author, plan)), 200
 
 
@@ -555,6 +605,9 @@ def leave():
     if target is None:
         return jsonify({"error": "Not found"}), 404
     author, _entry, plan = target
+    refused = _cohort_leave_refusal(plan)
+    if refused:
+        return refused
     cz.leave(plan)
     db.session.commit()
     return jsonify({"left": True, **_leave_answer(author, plan)}), 200

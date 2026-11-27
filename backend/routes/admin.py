@@ -1102,64 +1102,86 @@ _UNRESOLVED_STATUS = {
 }
 
 
-@admin_bp.route("/whitelist", methods=["POST"])
-@login_required
-@admin_required
-def whitelist_user():
-    """Create an account for an X handle ahead of its owner's first login.
+class WhitelistRefused(Exception):
+    """whitelist_x_handle could not prepare an account: ``body`` and
+    ``status`` are the whitelist route's answer. ``holder``: the account
+    that already holds the handle's X id, when that was the reason."""
+
+    def __init__(self, body, status, holder=None):
+        super().__init__(body.get("error"))
+        self.body = body
+        self.status = status
+        self.holder = holder
+
+
+def whitelist_x_handle(handle, x_lookup=False, payer_id=None,
+                       existing_ok=False):
+    """Create an account for an X handle ahead of its owner's first login
+    (the whitelist route's work, also used by a first-cohort invitation,
+    utils/cohort.prepare_invited_account). Returns (user, resolved);
+    raises WhitelistRefused. Commits the new account.
 
     The account carries the handle's numeric X id from creation, so the
     owner's X login finds it by id (X logins never match on handle — see
     auth.py). The id comes from ``resolve_x_id``: the Community Archive
-    (free, exact username match), or one paid X API user read when the
-    body sets ``x_lookup`` — which the admin panel only sends after the
-    admin confirmed the spend in a dialog, per whitelist. That read is
-    billed to the account it creates (the admin's ledger only when there
-    is no account to bill).
+    (free, exact username match), or one paid X API user read when
+    *x_lookup* is set — which the admin panel only sends after the admin
+    confirmed the spend in a dialog, per whitelist. That read is billed
+    to the account it creates (*payer_id*, the admin's ledger, only when
+    there is no account to bill).
     Created unapproved while payments are off: whitelisting starts the
     pre-fill workflow, not ends it — the account is pre-filled (and may be
     claimed by its owner meanwhile) before it is ready, and the admin
     approves it by hand once it is. While payments are on (#697),
     whitelisting counts as the approval: the account is ready at its
-    owner's first sign-in, at the trial step. Body: {"handle",
-    "x_lookup"?: bool}."""
+    owner's first sign-in, at the trial step.
+
+    *existing_ok* (the cohort invitation): a handle whose username is not
+    available still has its X id resolved, so that an account that
+    already holds that id is reported (WhitelistRefused.holder) rather
+    than the username's error. The route keeps its order."""
     from backend.utils.x_identity import resolve_x_id, XIdUnresolved, log_user_read
-    data = request.get_json() or {}
-    handle = (data.get("handle") or "").strip().lstrip("@")
+    handle = (handle or "").strip().lstrip("@")
     if not handle:
-        return jsonify({"error": "Handle is required."}), 400
+        raise WhitelistRefused({"error": "Handle is required."}, 400)
 
     # Full username validation: format, length, reserved/protected names
     # (brand/founder/system), and case-insensitive uniqueness.
     error = validate_username(handle)
-    if error:
-        return jsonify({"error": error}), 400
+    if error and not existing_ok:
+        raise WhitelistRefused({"error": error}, 400)
 
     try:
         # The paid read, if any, goes on the ledger of the account it finds
         # the id for (like that account's pre-fills) — which does not exist
         # yet, so the charge is deferred and billed below.
-        resolved = resolve_x_id(handle, x_lookup=bool(data.get("x_lookup")),
+        resolved = resolve_x_id(handle, x_lookup=bool(x_lookup),
                                 defer_cost=True)
     except XIdUnresolved as e:
         if e.paid_reads:
-            log_user_read(current_user.id, handle)  # no account to bill
+            log_user_read(payer_id, handle)  # no account to bill
+        if error:
+            raise WhitelistRefused({"error": error}, 400)
         body = {"error": e.message, "reason": e.reason}
         if e.reason in ("not-in-archive", "archive-error"):
             # The admin panel offers the paid X lookup in a dialog at this
             # point, with the price; the spend is decided per whitelist.
             from backend.utils import x_api
             body["x_lookup_cost_usd"] = x_api.COST_PER_USER_READ
-        return jsonify(body), _UNRESOLVED_STATUS[e.reason]
+        raise WhitelistRefused(body, _UNRESOLVED_STATUS[e.reason])
 
     holder = User.query.filter_by(twitter_id=resolved.x_id).first()
     if holder:
         if resolved.paid_reads:
             log_user_read(holder.id, handle)  # the read found their id
-        return jsonify({
+        raise WhitelistRefused({
             "error": f"That X account already has a Loore account: @{holder.username}.",
             "user_id": holder.id,
-        }), 409
+        }, 409, holder=holder)
+    if error:
+        if resolved.paid_reads:
+            log_user_read(payer_id, handle)  # no account of ours to bill
+        raise WhitelistRefused({"error": error}, 400)
 
     user = User(twitter_id=resolved.x_id, username=handle, approved=False)
     from backend.utils.approval import let_in
@@ -1173,11 +1195,27 @@ def whitelist_user():
         # or the X id between the checks above and this insert.
         db.session.rollback()
         if resolved.paid_reads:
-            log_user_read(current_user.id, handle)  # no account of ours to bill
-        return jsonify({
-            "error": "That handle or X account was just added by another request."}), 409
+            log_user_read(payer_id, handle)  # no account of ours to bill
+        raise WhitelistRefused({
+            "error": "That handle or X account was just added by another request."}, 409)
     if resolved.paid_reads:
         log_user_read(user.id, handle)
+    return user, resolved
+
+
+@admin_bp.route("/whitelist", methods=["POST"])
+@login_required
+@admin_required
+def whitelist_user():
+    """Create an account for an X handle ahead of its owner's first login
+    (whitelist_x_handle). Body: {"handle", "x_lookup"?: bool}."""
+    data = request.get_json() or {}
+    try:
+        user, resolved = whitelist_x_handle(
+            data.get("handle"), x_lookup=data.get("x_lookup"),
+            payer_id=current_user.id)
+    except WhitelistRefused as e:
+        return jsonify(e.body), e.status
     return jsonify({
         "message": "User whitelisted successfully.",
         "source": resolved.source,

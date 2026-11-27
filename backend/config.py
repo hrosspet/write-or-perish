@@ -518,6 +518,14 @@ class Config:
         if x
     }
 
+    # --- The first cohort (experiment, docs/experiments/FIRST-COHORT*.md) ---
+    # Dark, default off. Off: every /api/cohort, /api/invitation and
+    # /api/admin/cohorts route answers 404 and no cohort rule changes
+    # anything else. On: Circles is also on for a cohort's founder and for
+    # every account bound to a live invitation (utils/cohort.py).
+    COHORT_V1 = os.environ.get(
+        "COHORT_V1", "false").lower() in ("1", "true", "yes")
+
     # --- Replies while they are written (#367) ---
     # STREAMING_REPLIES: an LLM reply's text shows on its node as it
     # arrives (Node.streaming_content + the llm-stream SSE). On by

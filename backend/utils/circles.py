@@ -285,6 +285,35 @@ def shared_entry_counts(circle_ids):
         .group_by(NodeCircle.circle_id).all())
 
 
+def add_circle_member(circle, person, include_existing, now=None):
+    """Put *person* in *circle*. ``include_existing`` True ("Add
+    <name>"): they also read the entries already shared with the circle,
+    and get one note, for the newest of them (a note per entry would
+    arrive as a pile for a circle with a history). False ("Only new
+    entries"): only what is shared with it from now on, and no note. The
+    caller has checked the person may be added; it commits."""
+    now = now or datetime.utcnow()
+    db.session.add(CircleMember(
+        circle_id=circle.id, user_id=person.id, created_at=now,
+        entries_from=None if include_existing else now))
+    db.session.flush()
+    forget_circle_access()
+    if include_existing:
+        newest = (Node.query.join(NodeCircle, NodeCircle.node_id == Node.id)
+                  .filter(NodeCircle.circle_id == circle.id,
+                          *_alive_shared_entry())
+                  .order_by(Node.created_at.desc(), Node.id.desc()).first())
+        if newest is not None:
+            note_shared(newest, {person.id})
+
+
+def remove_circle_member(member):
+    """Take a person out of a circle (a CircleMember row): the circle's
+    entries are closed to them from this moment. The caller commits."""
+    db.session.delete(member)
+    forget_circle_access()
+
+
 def delete_circle(circle):
     """Delete a circle: its members and its shares go with it. An entry
     shared only with this circle is then read by nobody but its author."""

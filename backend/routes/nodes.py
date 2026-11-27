@@ -1496,7 +1496,17 @@ def set_node_audience(node_id):
             or (is_others_thread_answer(node)
                 and not answer_open_to_owner(node, current_user.id))):
         return _node_not_found()
-    data = request.get_json(silent=True) or {}
+    return share_entry(node, current_user, request.get_json(silent=True) or {})
+
+
+def share_entry(node, user, data):
+    """The share step of PUT /<id>/audience for *node*, which the caller
+    found the user may edit: the audience in *data* replaces the node's,
+    the quote rule is checked, and it is committed. Returns the route's
+    answer (body, status). Also the first cohort's "Send to <founder>"
+    (routes/cohort.py), so that sending a report is the same act as any
+    share."""
+    from backend.utils import circles as cz
     old_privacy = node.privacy_level
     # An AI reply is shared by its owner once it is written, after they
     # have read it (Peter, 2026-11-12): not while it is.
@@ -1507,11 +1517,11 @@ def set_node_audience(node_id):
         }), 409
     from backend.utils.publish_quotes import circle_readers
     old_readers = circle_readers(node) if old_privacy == "circles" else set()
-    old_path_ids = (_shared_path_ids(node, current_user.id)
+    old_path_ids = (_shared_path_ids(node, user.id)
                     if data.get("share_path") else None)
     try:
         node.set_privacy_level("circles")
-        cz.apply_requested_sharing(node, current_user, {
+        cz.apply_requested_sharing(node, user, {
             "circle_ids": data.get("circle_ids") or [],
             "circle_usernames": data.get("circle_usernames") or [],
             # The names the form started with (circles.names_not_taken_off).
@@ -1526,7 +1536,7 @@ def set_node_audience(node_id):
     if data.get("apply_to_descendants"):
         from backend.utils.node_settings import apply_settings_to_descendants
         cascaded = apply_settings_to_descendants(
-            node, current_user.id, privacy_level="circles",
+            node, user.id, privacy_level="circles",
             audience_from=node)
     # Its text, the discussion shared with it and the replies carried
     # along quote only nodes all its readers can read (Peter,
@@ -1534,7 +1544,7 @@ def set_node_audience(node_id):
     # was.
     text = node.get_content()
     refusal = _circle_quote_refusal(
-        node, current_user.id, text, text, old_readers, cascaded,
+        node, user.id, text, text, old_readers, cascaded,
         old_path_ids)
     if refusal is not None:
         db.session.rollback()
@@ -1550,7 +1560,7 @@ def set_node_audience(node_id):
     return jsonify({
         "id": node.id,
         "privacy_level": node.privacy_level,
-        "audience": cz.audience_for_viewer(node, current_user.id),
+        "audience": cz.audience_for_viewer(node, user.id),
     }), 200
 
 

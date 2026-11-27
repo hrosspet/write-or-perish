@@ -31,6 +31,10 @@ def _is_default_updated(prompt):
     """
     if prompt.generated_by == "default":
         return False
+    # A fixed prompt has no versions of the user's own to fall behind (the
+    # first cohort's interview thread keeps the text it started with).
+    if PROMPT_DEFAULTS.get(prompt.prompt_key, {}).get('fixed'):
+        return False
     current = default_prompt_hash(prompt.prompt_key)
     if current is None:
         return False
@@ -46,6 +50,29 @@ def _auto_upgraded_content(prompt):
     return prompt.get_content()
 
 
+def _editable(prompt_key):
+    """Whether the current user may change this prompt: not a fixed one
+    (the first cohort's), not an admin one for anyone but an admin."""
+    meta = PROMPT_DEFAULTS.get(prompt_key) or {}
+    if meta.get('fixed'):
+        return False
+    return not meta.get('admin') or getattr(current_user, "is_admin", False) is True
+
+
+def _listed_for_current_user(meta):
+    """A prompt the Prompts page lists for the current user: admin ones
+    for admins, the first cohort's for its founder and invited people
+    while COHORT_V1 is on."""
+    if meta.get('hidden'):
+        return False
+    if meta.get('admin') and not getattr(current_user, "is_admin", False):
+        return False
+    if meta.get('cohort'):
+        from backend.utils.cohort import cohort_enabled, is_cohort_person
+        return cohort_enabled() and is_cohort_person(current_user.id)
+    return True
+
+
 def _serialize_prompt(prompt, version_number):
     return {
         "id": prompt.id,
@@ -56,6 +83,7 @@ def _serialize_prompt(prompt, version_number):
         "created_at": iso_utc(prompt.created_at),
         "version_number": version_number,
         "default_updated": _is_default_updated(prompt),
+        "editable": _editable(prompt.prompt_key),
     }
 
 
@@ -65,9 +93,7 @@ def list_prompts():
     """List all prompt keys with their latest version for the current user."""
     prompts = []
     for key, meta in PROMPT_DEFAULTS.items():
-        if meta.get('hidden'):
-            continue
-        if meta.get('admin') and not getattr(current_user, "is_admin", False):
+        if not _listed_for_current_user(meta):
             continue
         latest = UserPrompt.query.filter_by(
             user_id=current_user.id, prompt_key=key
@@ -83,6 +109,7 @@ def list_prompts():
                 "generated_by": latest.generated_by,
                 "created_at": iso_utc(latest.created_at),
                 "default_updated": _is_default_updated(latest),
+                "editable": _editable(key),
             })
         else:
             content = load_default_prompt(key)
@@ -94,6 +121,7 @@ def list_prompts():
                 "generated_by": "default",
                 "created_at": None,
                 "default_updated": False,
+                "editable": _editable(key),
             })
 
     return jsonify({"prompts": prompts}), 200
@@ -127,6 +155,7 @@ def get_prompt(prompt_key):
                 "created_at": None,
                 "version_number": 0,
                 "default_updated": False,
+                "editable": _editable(prompt_key),
             }
         }), 200
 
@@ -140,6 +169,10 @@ def _admin_prompt_refused(prompt_key):
     meta = PROMPT_DEFAULTS.get(prompt_key) or {}
     if meta.get('admin', False) is not False and (
             getattr(current_user, "is_admin", False) is not True):
+        return jsonify({"error": "This prompt can't be changed."}), 403
+    # The first cohort's prompts are read, never changed (the drafts and
+    # every interview run on Loore's text).
+    if meta.get('fixed'):
         return jsonify({"error": "This prompt can't be changed."}), 403
     return None
 

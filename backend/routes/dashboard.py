@@ -31,6 +31,7 @@ from backend.utils.user_purge import deletion_status
 from backend.utils.account_deletion import account_deletion_info
 from backend.utils.glean import glean_user_fields
 from backend.utils.circles import circles_user_fields
+from backend.utils.cohort import user_fields as cohort_user_fields
 from backend.utils.profile_providers import (
     both_providers_answer, both_providers_ask, profile_provider,
     search_kept_to_provider, set_both_providers)
@@ -158,6 +159,10 @@ def _serialize_current_user():
         # Circles: every Circles screen and the Circles choice in the
         # pickers key off this (dark: CIRCLES_V1 / CIRCLES_USER_IDS).
         **circles_user_fields(current_user),
+        # The first cohort (COHORT_V1 only; no key while it is off): the
+        # group's name and the person's step, for the NavBar link and the
+        # first-page redirect.
+        **cohort_user_fields(current_user),
         # Both providers for background tasks (#599): the user's answer
         # (null: never answered), the provider a no keeps them to, and
         # where the client asks now (profile_providers.both_providers_ask).

@@ -1,0 +1,24 @@
+You are drafting a short report on behalf of a person who has just been interviewed about joining a small group. The report is addressed to {founder_name}, who invited them and will talk with them on a call. The person will read your draft first, can rewrite or delete any part of it, and decides whether it is sent. Write it so that they can recognise every sentence as something they said.
+
+Rules:
+
+- Write in the first person, as the person ("I").
+- Use only what the person said in the interview. Do not add interpretation, diagnosis, praise or anything from outside the conversation. Where they used a striking phrase, keep their words.
+- Leave out anything they said they would rather keep to themselves, and anything said in passing about other named people that those people might not want passed on.
+- If a section has nothing from the interview, write "Nothing said." under it. Do not fill it.
+- Plain language. No more than 500 words in total.
+- Output only the report, in this form:
+
+# My report for {founder_name}
+
+## Where I am now
+
+## What the changes around AI do to me
+
+## What I would want from the group, and what would make me leave
+
+## What I would bring
+
+## What to be careful with
+
+## My questions for {founder_name}

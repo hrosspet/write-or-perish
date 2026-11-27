@@ -129,6 +129,11 @@ TASK_QUEUES = {
     "backend.tasks.anthropic_batch_deletion.sweep_anthropic_batches": _B,
     # An unused invite's end (#439).
     "backend.tasks.invites.expire_invites": _B,
+
+    # The first cohort (experiment): the report and introduction drafts
+    # the person waits for on the page.
+    "backend.tasks.cohort_report.draft_cohort_report": _I,
+    "backend.tasks.cohort_report.draft_cohort_intro": _I,
 }
 
 # The queues each worker reads while the split is on.

@@ -483,9 +483,20 @@ class User(db.Model, UserMixin):
         """A plan that gives the paid feature set by itself (alpha, pro):
         a subscription neither adds to it nor takes from it (#438). An alpha
         tester whose free month is still to come keeps the alpha plan's
-        access until it starts."""
+        access until it starts. An account bound to a live invitation of
+        the first cohort, while its cohort is free (COHORT_V1 only,
+        utils/cohort.free_access), counts as set by hand too: let in with
+        full access, AI included, without a card."""
         return ((self.plan or "free") in self.VOICE_MODE_PLANS
-                or self.alpha_free_month_upcoming)
+                or self.alpha_free_month_upcoming
+                or self.cohort_free_access)
+
+    @property
+    def cohort_free_access(self):
+        """Inside a first-cohort free period (utils/cohort.free_access).
+        Always False while COHORT_V1 is off, with no query."""
+        from backend.utils.cohort import free_access
+        return free_access(self)
 
     @property
     def subscription_grants_access(self):
@@ -583,14 +594,22 @@ class User(db.Model, UserMixin):
                     cls.alpha_free_until > datetime.utcnow())
 
     @classmethod
+    def cohort_free_clause(cls):
+        """In SQL: inside a first-cohort free period (cohort_free_access).
+        Always false while COHORT_V1 is off."""
+        from backend.utils.cohort import free_access_user_ids
+        return cls.id.in_(free_access_user_ids())
+
+    @classmethod
     def paid_features_clause(cls):
         """In SQL: the account may start model calls (an admin, a plan set
-        by hand, a subscription that gives access, or an alpha tester's
-        free month)."""
+        by hand, a subscription that gives access, an alpha tester's free
+        month, or a first-cohort free period)."""
         return or_(cls.is_admin.is_(True),
                    cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
                    cls.subscription_grants_access_clause(),
-                   cls.alpha_free_month_clause())
+                   cls.alpha_free_month_clause(),
+                   cls.cohort_free_clause())
 
     def get_id(self):
         return str(self.id)
@@ -653,11 +672,12 @@ class User(db.Model, UserMixin):
         return cls.query.filter(
             cls.approved.is_(True),
             # on_paid_plan in SQL: a plan set by hand, a subscription that
-            # grants the paid feature set (#438), or an alpha tester's free
-            # month.
+            # grants the paid feature set (#438), an alpha tester's free
+            # month, or a first-cohort free period.
             or_(cls.plan.in_(list(cls.VOICE_MODE_PLANS)),
                 cls.subscription_grants_access_clause(),
-                cls.alpha_free_month_clause()),
+                cls.alpha_free_month_clause(),
+                cls.cohort_free_clause()),
             cls.default_ai_usage.in_(list(AI_ALLOWED)),
             ~cls.id.in_(llm_authors),
             ~cls.id.in_(purging),
@@ -1272,6 +1292,89 @@ class Circle(db.Model):
     name = db.Column(db.String(80), nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow,
                            nullable=False)
+    # The first cohort (experiment): the circle Loore keeps for one member
+    # of a cohort, holding every other member (utils/cohort.py
+    # sync_cohort_circles). Its owner can't rename or delete it or change
+    # its people by hand. NULL for every circle a person made.
+    cohort_id = db.Column(db.Integer, db.ForeignKey("cohort.id"),
+                          nullable=True, index=True)
+
+
+class Cohort(db.Model):
+    """The first cohort (experiment, COHORT_V1): a small group a founder
+    invites in person. Plaintext fields are the founder's own public
+    words (shown on invitation pages) and dates; no user content."""
+    __tablename__ = "cohort"
+    id = db.Column(db.Integer, primary_key=True)
+    slug = db.Column(db.String(64), unique=True, nullable=False)
+    name = db.Column(db.String(80), nullable=False)
+    about = db.Column(db.Text, nullable=True)
+    # The name the founder signs with in letters and prompts ("Peter");
+    # the owner's username when unset (accounts have no display name).
+    founder_name = db.Column(db.String(64), nullable=True)
+    # Nullable only so that a deleted founder account leaves the row
+    # (account_deletion.delete_identity).
+    owner_user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                              nullable=True, index=True)
+    booking_url = db.Column(db.String(512), nullable=True)
+    call_url = db.Column(db.String(512), nullable=True)
+    next_call_at = db.Column(db.DateTime, nullable=True)
+    question = db.Column(db.Text, nullable=True)
+    question_set_at = db.Column(db.DateTime, nullable=True)
+    # Last day (UTC) of the free period; NULL: no free period.
+    free_until = db.Column(db.Date, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+
+
+class CohortInvitation(db.Model):
+    """One person's invitation to a cohort. States are timestamps
+    (utils/cohort.invitation_state). The founder sees these and the
+    letter, never anything the person wrote. The node ids carry no
+    foreign key on purpose: the person's "Delete all my content" deletes
+    those nodes, and an id that no longer resolves reads as none."""
+    __tablename__ = "cohort_invitation"
+    id = db.Column(db.Integer, primary_key=True)
+    cohort_id = db.Column(db.Integer, db.ForeignKey("cohort.id"),
+                          nullable=False, index=True)
+    code = db.Column(db.String(64), unique=True, nullable=False)
+    # Stored lowercased, without @; NULL for an invitation any signed-in
+    # account may accept with its code (local testing).
+    x_handle = db.Column(db.String(64), nullable=True)
+    # The X account id the handle resolved to when the invitation was
+    # made: compared at claim when known (a handle can change hands).
+    x_id = db.Column(db.String(64), nullable=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"),
+                        nullable=True, index=True)
+    # The founder's letter to this person, encrypted like node content.
+    letter = db.Column(db.Text, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow,
+                           nullable=False)
+    first_opened_at = db.Column(db.DateTime, nullable=True)
+    claimed_at = db.Column(db.DateTime, nullable=True)
+    interview_started_at = db.Column(db.DateTime, nullable=True)
+    report_drafted_at = db.Column(db.DateTime, nullable=True)
+    report_sent_at = db.Column(db.DateTime, nullable=True)
+    report_skipped_at = db.Column(db.DateTime, nullable=True)
+    call_done_at = db.Column(db.DateTime, nullable=True)
+    admitted_at = db.Column(db.DateTime, nullable=True)
+    declined_at = db.Column(db.DateTime, nullable=True)
+    closed_at = db.Column(db.DateTime, nullable=True)
+    interview_node_id = db.Column(db.Integer, nullable=True)
+    report_node_id = db.Column(db.Integer, nullable=True)
+    intro_node_id = db.Column(db.Integer, nullable=True)
+    report_task_status = db.Column(db.String(32), nullable=True)
+    intro_task_status = db.Column(db.String(32), nullable=True)
+    __table_args__ = (
+        db.UniqueConstraint("cohort_id", "x_handle",
+                            name="uq_cohort_invitation_cohort_handle"),
+    )
+
+    def set_letter(self, plaintext):
+        self.letter = encrypt_content(plaintext) if plaintext else None
+
+    def get_letter(self):
+        return decrypt_content(self.letter) if self.letter else ""
 
 
 class CircleMember(db.Model):

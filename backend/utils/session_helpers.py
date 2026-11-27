@@ -7,8 +7,10 @@ from backend.utils.llm_nodes import create_llm_placeholder
 # Keys that share the unified agentic.txt template. Any of these means "an
 # agentic session": tools, proposal parsing and mode notes switch on. Read
 # through Node.get_prompt_key(), which survives a per-thread prompt edit
-# detaching the prompt reference.
-AGENTIC_PROMPT_KEYS = ('voice', 'textmode')
+# detaching the prompt reference. 'cohort_interview' (the first cohort's
+# interview, utils/cohort.py) is the person's own agentic prompt with the
+# interview section after it: a normal agentic session in Voice or Text.
+AGENTIC_PROMPT_KEYS = ('voice', 'textmode', 'cohort_interview')
 
 
 def chain_has_agentic_prompt(node_chain):

@@ -123,8 +123,16 @@ def circles_enabled_for(user_id) -> bool:
         return False
     if config.get("CIRCLES_V1", False):
         return True
-    return user_id is not None and user_id in (
-        config.get("CIRCLES_USER_IDS") or set())
+    if user_id is not None and user_id in (
+            config.get("CIRCLES_USER_IDS") or set()):
+        return True
+    # The first cohort (experiment): also a cohort's founder and every
+    # account bound to a live invitation, so a person can send their
+    # report to the founder before they are admitted.
+    if user_id is not None and config.get("COHORT_V1", False):
+        from backend.utils.cohort import cohort_circle_user_ids
+        return user_id in cohort_circle_user_ids()
+    return False
 
 
 def circles_on_anywhere() -> bool:
@@ -135,7 +143,8 @@ def circles_on_anywhere() -> bool:
     except RuntimeError:
         return False
     return bool(config.get("CIRCLES_V1", False)
-                or config.get("CIRCLES_USER_IDS"))
+                or config.get("CIRCLES_USER_IDS")
+                or config.get("COHORT_V1", False))
 
 
 # How long "no node points at a shared entry" is believed while Circles

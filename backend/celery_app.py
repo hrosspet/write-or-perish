@@ -312,3 +312,4 @@ from backend.tasks import prefill_bundles  # noqa: F401
 from backend.tasks import unclaimed_accounts  # noqa: F401
 from backend.tasks import anthropic_batch_deletion  # noqa: F401
 from backend.tasks import invites  # noqa: F401
+from backend.tasks import cohort_report  # noqa: F401
