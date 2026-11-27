@@ -1,7 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../api';
-import { RECORDING_SHARED_NOTE, readersSentence, splitNames } from '../utils/circles';
+import {
+  RECORDING_SHARED_NOTE, groupReadersSentence, readersSentence, splitNames,
+} from '../utils/circles';
 
 /**
  * The panel under "Who can read this" when Circles is chosen: the
@@ -125,6 +127,11 @@ function CircleAudiencePicker({
   });
 
   const nothingChosen = (circleIds || []).length === 0 && committed.length === 0;
+  // Chosen circles Loore keeps for a group of the first cohort: people who
+  // join the group later read the entry too, and the sentence says so.
+  const groups = (circles || [])
+    .filter((c) => c.cohort && (circleIds || []).includes(c.id))
+    .map((c) => c.cohort.name);
 
   return (
     <div style={{
@@ -214,7 +221,7 @@ function CircleAudiencePicker({
           || (nothingChosen
             ? 'Choose a circle or name a person. Until then nobody but you can read this entry.'
             : readers.length > 0
-              ? readersSentence(readers)
+              ? (groups.length > 0 ? groupReadersSentence(readers, groups) : readersSentence(readers))
               : pending
                 ? 'Looking up who can read this…'
                 : 'Nobody is in this circle yet. Add a person to it, or name someone.')}
@@ -247,17 +254,6 @@ function CircleAudiencePicker({
           </div>
         </div>
       )}
-      {/* A circle Loore keeps for a group of the first cohort: a person
-          who joins the group later also reads what was shared with it. */}
-      {(circles || []).filter((c) => c.cohort && (circleIds || []).includes(c.id))
-        .map((c) => (
-          <div key={`later-${c.id}`} style={{
-            fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',
-            fontFamily: 'var(--sans)', fontWeight: 300,
-          }}>
-            People who join {c.cohort.name} later will also be able to read it.
-          </div>
-        ))}
       {hasRecording && (
         <div style={{
           fontSize: '0.8rem', lineHeight: 1.5, color: 'var(--text-secondary)',

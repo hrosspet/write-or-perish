@@ -76,6 +76,15 @@ export function readersSentence(readers, what = 'entry') {
     + 'Nobody else can.';
 }
 
+// The same for an entry shared with a group of the first cohort, whose
+// circle gains everyone who joins the group later: "Nobody else can" would
+// not be true. `groups`: the names of the chosen group circles.
+export function groupReadersSentence(readers, groups, what = 'entry') {
+  if (!readers || readers.length === 0 || !groups || groups.length === 0) return '';
+  return `${joinNames(readers)} can read this ${what} and reply to it, and so `
+    + `will people who join ${joinPlain(groups)} later.`;
+}
+
 // The save button: "Share with Close friends" for one circle and no
 // extra names, else "Share with 5 people".
 export function shareButtonLabel({ circles, circleIds, names, readers }) {

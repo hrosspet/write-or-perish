@@ -33,6 +33,8 @@ export const COHORT_TEXT = {
   claiming: 'Opening your invitation…',
   claimNotFound: 'This invitation link does not work. Open the link you were sent again.',
   loadFailed: 'This page could not be loaded. Reload it to try again.',
+  // The routes answer 404 while the experiment is switched off.
+  unavailable: 'This page is not available.',
 };
 
 // The claim refusals that a sign-in with another X account can answer.
@@ -84,7 +86,8 @@ export default function CohortPage({ bare = false }) {
 
   const load = useCallback(() => api.get('/cohort/me')
     .then((res) => { setMe(res.data); })
-    .catch(() => setLoadError(COHORT_TEXT.loadFailed)), []);
+    .catch((err) => setLoadError(err && err.response && err.response.status === 404
+      ? COHORT_TEXT.unavailable : COHORT_TEXT.loadFailed)), []);
 
   useEffect(() => { load(); }, [load]);
 

@@ -149,7 +149,10 @@ function personOf(inv) {
   }
   if (inv.x_handle) return `@${inv.x_handle}`;
   if (inv.username) return `@${inv.username}`;
-  return 'No handle';
+  // No handle (a local test server): the start of the founder's own letter
+  // tells the rows apart.
+  const opening = (inv.letter || '').replace(/[#*_>`]/g, '').trim().split('\n')[0].slice(0, 32);
+  return opening ? `No handle: "${opening}…"` : 'No handle';
 }
 
 function CohortForm({ cohort, onSaved }) {
@@ -309,9 +312,8 @@ function NewInvitation({ cohort, onAdded }) {
           onChange={(e) => setHandle(e.target.value)} style={{ ...inputStyle, maxWidth: '320px' }} />
         <p style={hintStyle}>
           Approves the handle as the whitelist does; only that X account can accept
-          the invitation. An invitation without a handle, which any signed-in account
-          holding the link can accept, is made only where COHORT_ALLOW_OPEN_INVITATIONS
-          is on (for trying it locally).
+          the invitation. Leave it empty only on a local test server, where any
+          signed-in account holding the link can accept it.
         </p>
       </div>
       <MarkdownEditor id="invitation-letter" label="Letter"
@@ -561,6 +563,20 @@ export default function AdminCohorts() {
   }, [cohortId]);
 
   useEffect(() => { loadInvitations(); }, [loadInvitations]);
+
+  // States change in other browsers too (a "Not for me", a claim): the
+  // table is read again whenever the founder comes back to this window.
+  useEffect(() => {
+    const again = () => {
+      if (document.visibilityState === 'visible') loadInvitations();
+    };
+    window.addEventListener('focus', again);
+    document.addEventListener('visibilitychange', again);
+    return () => {
+      window.removeEventListener('focus', again);
+      document.removeEventListener('visibilitychange', again);
+    };
+  }, [loadInvitations]);
 
   // Invitations change the counts on the cohort.
   const refresh = useCallback(async () => {

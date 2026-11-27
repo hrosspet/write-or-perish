@@ -296,12 +296,12 @@ export default function InvitationPage() {
     <Frame>
       <h1>A letter from {founder}</h1>
       <div className="loore-invitation-letter">
-        <MarkdownBody paragraphMargin="0 0 1.05em">{letter || ''}</MarkdownBody>
+        <MarkdownBody paragraphMargin="0.9em 0">{letter || ''}</MarkdownBody>
       </div>
       {cohort && cohort.about && (
         <section className="loore-invitation-about" aria-labelledby="invitation-about">
           <h2 id="invitation-about">What this is</h2>
-          <MarkdownBody paragraphMargin="0 0 0.9em">{cohort.about}</MarkdownBody>
+          <MarkdownBody paragraphMargin="0.8em 0">{cohort.about}</MarkdownBody>
         </section>
       )}
       <div className="loore-invitation-actions">

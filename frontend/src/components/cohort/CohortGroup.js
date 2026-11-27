@@ -1,12 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { FaSpinner } from 'react-icons/fa';
 import { Link } from 'react-router-dom';
 import api from '../../api';
 import MarkdownBody from '../MarkdownBody';
+import NodeFormModal from '../NodeFormModal';
+import { CircleConfirmDialog } from '../CircleDialogs';
 import MarkdownEditor from './MarkdownEditor';
 import useNodeText from './useNodeText';
 import { DRAFT_POLL_MS } from './CohortSteps';
 import {
-  Section, accentButton, plainButton, h1Style, textStyle, smallStyle,
+  Section, accentButton, plainButton, quietButton, h1Style, textStyle, smallStyle,
   errorStyle, readersStyle, rowStyle, accentLinkStyle, linkStyle,
 } from './cohortUi';
 import {
@@ -20,6 +23,11 @@ import { atName } from '../../utils/circles';
 // call in the viewer's own time zone, and what members shared with the
 // group, newest first, each opening the normal entry page. A member
 // without an introduction is offered one drafted from their report.
+
+// Where the control for sharing with the group is: the button above, or
+// the entry's own sharing choice (also when editing an entry).
+export const WRITE_TO_GROUP_TEXT = (name) =>
+  `"Write to the group" opens a new entry shared with ${name}. To share an entry you wrote elsewhere, open it, choose Edit, then Circles under "Who can read this", then ${name}.`;
 
 export const laterReadersSentence = (name) =>
   `Everyone in ${name} can read it, including people who join the group later.`;
@@ -67,10 +75,21 @@ export function IntroStep({ cohortName, user, onShared }) {
     setBusy(false);
   };
 
+  const [askNew, setAskNew] = useState(false);
   const draft = () => run(async () => {
     const res = await api.post('/cohort/intro/draft');
     setIntro(res.data.intro);
   });
+  // A new draft over the one in the editor: the editor's changes are
+  // saved into that entry first; it stays among the member's entries.
+  const redraft = () => {
+    setAskNew(false);
+    run(async () => {
+      await nodeText.save();
+      const res = await api.post('/cohort/intro/draft');
+      setIntro(res.data.intro);
+    });
+  };
 
   const share = () => run(async () => {
     let nodeId = intro && intro.node_id;
@@ -125,8 +144,9 @@ export function IntroStep({ cohortName, user, onShared }) {
     );
   } else if (drafting) {
     body = (
-      <p role="status" style={textStyle}>
-        Loore is writing a draft of your introduction from your report. It appears here when it is ready.
+      <p role="status" style={{ ...textStyle, display: 'flex', gap: '10px', alignItems: 'baseline' }}>
+        <FaSpinner className="spin" aria-hidden="true" style={{ flexShrink: 0 }} />
+        <span>Loore is writing a draft of your introduction from your report. It appears here when it is ready.</span>
       </p>
     );
   } else if (intro.node_id) {
@@ -135,6 +155,9 @@ export function IntroStep({ cohortName, user, onShared }) {
         <p style={textStyle}>
           Loore drafted this from your report. Change it as you like before you share it.
         </p>
+        {intro.task_status === 'failed' && (
+          <p style={smallStyle}>Loore could not write a new draft. This is your earlier one.</p>
+        )}
         {nodeText.loadError && <p role="alert" style={errorStyle}>{nodeText.loadError}</p>}
         {nodeText.loaded && (
           <MarkdownEditor id="cohort-intro-text" label="Your introduction"
@@ -143,6 +166,20 @@ export function IntroStep({ cohortName, user, onShared }) {
         )}
         {readers}
         {shareButton(nodeText.loaded && nodeText.text.trim().length > 0)}
+        <button type="button" disabled={busy}
+          style={{ ...quietButton, alignSelf: 'flex-start', border: 0, padding: 0 }}
+          onClick={() => setAskNew(true)}>
+          Ask Loore for a new draft
+        </button>
+        <CircleConfirmDialog
+          open={askNew}
+          title="Ask Loore for a new draft?"
+          body="Loore writes a new introduction from your report as it is now. This draft stays among your entries in the Log, with your changes."
+          confirmLabel="Write a new draft"
+          busy={busy}
+          onClose={() => setAskNew(false)}
+          onConfirm={redraft}
+        />
       </>
     );
   } else {
@@ -189,6 +226,8 @@ const entryMeta = (entry) => {
 export default function CohortGroup({ user, slug = null }) {
   const [page, setPage] = useState(null);
   const [error, setError] = useState('');
+  // The new-entry form, opened by "Write to the group".
+  const [writing, setWriting] = useState(false);
 
   const load = useCallback(() => api.get('/cohort/page', { params: slug ? { cohort: slug } : {} })
     .then((res) => setPage(res.data))
@@ -205,7 +244,23 @@ export default function CohortGroup({ user, slug = null }) {
   if (error) return <p role="alert" style={errorStyle}>{error}</p>;
   if (!page) return <p style={smallStyle}>Loading…</p>;
 
+
   const { cohort, members, entries, is_founder: isFounder } = page;
+  const writeModal = writing && page.circle_id && (
+    <NodeFormModal
+      title={`Write to ${cohort.name}`}
+      onClose={() => setWriting(false)}
+      nodeFormProps={{
+        parentId: null,
+        initialPrivacyLevel: 'circles',
+        initialCircleIds: [page.circle_id],
+        onSuccess: () => {
+          setWriting(false);
+          load();
+        },
+      }}
+    />
+  );
   const me = members.find((m) => m.username === (user && user.username));
   const callText = callTimeText(cohort.next_call_at);
 
@@ -272,7 +327,8 @@ export default function CohortGroup({ user, slug = null }) {
               borderBottom: i === members.length - 1 ? '1px solid var(--border)' : 'none',
             }}>
               <span style={{ fontSize: '1rem', fontWeight: 400 }}>
-                {atName(m.username)}
+                {m.is_founder && cohort.founder && cohort.founder !== m.username
+                  ? `${cohort.founder} (${atName(m.username)})` : atName(m.username)}
                 {m.is_founder && (
                   <span style={{ ...smallStyle, marginLeft: '10px' }}>started the group</span>
                 )}
@@ -282,7 +338,7 @@ export default function CohortGroup({ user, slug = null }) {
               </span>
               {m.intro_node_id ? (
                 <Link to={`/node/${m.intro_node_id}`} style={linkStyle}>Introduction</Link>
-              ) : (
+              ) : !m.is_founder && (
                 <span style={smallStyle}>No introduction yet</span>
               )}
             </li>
@@ -291,10 +347,15 @@ export default function CohortGroup({ user, slug = null }) {
       </Section>
 
       <Section title="Shared in the group" labelledBy="cohort-entries">
+        {page.circle_id && (
+          <div style={rowStyle}>
+            <button type="button" style={plainButton} onClick={() => setWriting(true)}>
+              Write to the group
+            </button>
+          </div>
+        )}
         <p style={smallStyle}>
-          To share an entry with the group, choose Circles under "Who can read
-          this" when you write or edit it, then {cohort.name}.{' '}
-          {laterReadersSentence(cohort.name)}
+          {WRITE_TO_GROUP_TEXT(cohort.name)} {laterReadersSentence(cohort.name)}
         </p>
         {entries.length === 0 ? (
           <p style={textStyle}>Nothing is shared in the group yet.</p>
@@ -324,6 +385,7 @@ export default function CohortGroup({ user, slug = null }) {
           Invitations, the question and the call are set in <Link to="/admin" style={linkStyle}>Admin</Link>, under Cohorts.
         </p>
       )}
+      {writeModal}
     </>
   );
 }

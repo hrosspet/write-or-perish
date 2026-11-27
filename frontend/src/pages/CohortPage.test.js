@@ -19,6 +19,17 @@ jest.mock('../contexts/UserContext', () => ({
   useUser: () => ({ user: mockUser, loading: false, setUser: mockSetUser }),
 }));
 jest.mock('./SubscribePage', () => () => <div>SUBSCRIBE PAGE</div>);
+// The new-entry form itself is tested in components/cohort/CohortSharing.test.js.
+jest.mock('../components/NodeFormModal', () => (props) => (
+  <div role="dialog" aria-label={props.title}>
+    <span data-testid="form-props">{JSON.stringify({
+      privacy: props.nodeFormProps.initialPrivacyLevel,
+      circles: props.nodeFormProps.initialCircleIds,
+      parent: props.nodeFormProps.parentId,
+    })}</span>
+    <button type="button" onClick={() => props.nodeFormProps.onSuccess({ id: 99 })}>MOCK SENT</button>
+  </div>
+));
 
 import React from 'react';
 import { render, screen, act, fireEvent, within } from '@testing-library/react';
@@ -509,7 +520,9 @@ test('the start step says how to come back, and opening the interview marks it f
     open: { text: '/node/124?awaitLlm=124', voice: '/voice?resume=124' },
   };
   await renderPage();
-  expect(screen.getByText(INTERVIEW_TEXT.comeBack('First Eight'))).toBeInTheDocument();
+  expect(screen.getByText(INTERVIEW_TEXT.comeBack('First Eight'), { exact: false })).toBeInTheDocument();
+  // One paragraph about the end, not two that begin alike.
+  expect(screen.getAllByText(/When you are done/)).toHaveLength(1);
   expect(INTERVIEW_TEXT.comeBack('First Eight')).toBe(
     'When you are done, come back to this page with the "First Eight" link at the top of the page, and press "I\'m done: write the report".');
   await act(async () => {
@@ -582,4 +595,107 @@ test('retrying "Write it myself" after a refused share makes no second entry', a
   expect(mockPost.mock.calls.filter(([u]) => u === '/nodes/')).toHaveLength(1);
   expect(mockPut).toHaveBeenCalledWith('/nodes/170', { content: 'I am Mara, again.', base_content: 'I am Mara.' });
   expect(mockPost).toHaveBeenLastCalledWith('/cohort/intro', { node_id: 170, share: true });
+});
+
+// ── From the browser walk-through ───────────────────────────────────────
+
+const groupPage = (extra = {}) => ({
+  cohort: { ...COHORT, id: 1, question: null, next_call_at: null, call_url: null },
+  is_founder: false, circle_id: 33,
+  members: [
+    { username: 'hrosspet', intro_node_id: null, is_founder: true },
+    { username: 'mara', intro_node_id: null, is_founder: false },
+  ],
+  entries: [],
+  ...extra,
+});
+
+test('a failed opening is shown as failed, with its reason and Try again', async () => {
+  setMe(invitation({
+    state: 'interview_started',
+    interview: {
+      node_id: 1, tip_node_id: 2, tip_is_ai: true, tip_status: 'failed', tip_is_opening: true,
+      tip_error: 'Loore couldn\'t write this reply. Try again in a moment.',
+      open: { text: '/node/2', voice: '/voice?parent=2' },
+    },
+  }));
+  routes.post['/cohort/interview/start'] = {
+    created: false, interview_node_id: 1, opening_node_id: 3,
+    open: { text: '/node/3?awaitLlm=3', voice: '/voice?resume=3' },
+  };
+  await renderPage();
+  expect(screen.getByRole('alert')).toHaveTextContent(
+    "Loore could not write its first message. Loore couldn't write this reply. Try again in a moment.");
+  expect(screen.queryByText(/Continue where you left off/)).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Continue in text' })).toBeNull();
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Try again in text' }));
+  });
+  // Asked for again through the start route, never by opening the failed node.
+  expect(mockPost).toHaveBeenCalledWith('/cohort/interview/start', { mode: 'text' });
+  expect(screen.getByTestId('where')).toHaveTextContent('/node/3?awaitLlm=3');
+});
+
+test('a later reply that failed says so too', async () => {
+  setMe(invitation({
+    state: 'interview_started',
+    interview: { node_id: 1, tip_node_id: 9, tip_is_ai: true, tip_status: 'failed', tip_is_opening: false, tip_error: null, open: { text: '/node/9', voice: '/voice?parent=9' } },
+  }));
+  await renderPage();
+  expect(screen.getByRole('alert')).toHaveTextContent(INTERVIEW_TEXT.replyFailed);
+  expect(screen.getByRole('button', { name: 'Try again in text' })).toBeInTheDocument();
+});
+
+test('the introduction can be drafted again, behind a dialog, after its edits are saved', async () => {
+  setMe(invitation({ state: 'admitted', admitted_at: '2026-11-29T10:00:00Z', report: { node_id: 140 } }));
+  routes.get['/cohort/page'] = groupPage();
+  routes.get['/cohort/intro'] = { intro: { node_id: 150, task_status: 'done', shared_with_group: false } };
+  routes.get['/nodes/150'] = { id: 150, content: 'I teach drawing.' };
+  routes.put['/nodes/150'] = { id: 150 };
+  routes.post['/cohort/intro/draft'] = { intro: { node_id: 150, task_status: 'pending', shared_with_group: false } };
+  await renderPage();
+  fireEvent.change(screen.getByRole('textbox', { name: 'Your introduction' }), { target: { value: 'I teach drawing in Malmö.' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Ask Loore for a new draft' }));
+  const dialog = screen.getByRole('dialog');
+  expect(mockPost).not.toHaveBeenCalledWith('/cohort/intro/draft');
+  await act(async () => {
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Write a new draft' }));
+  });
+  expect(mockPut).toHaveBeenCalledWith('/nodes/150', { content: 'I teach drawing in Malmö.', base_content: 'I teach drawing.' });
+  expect(mockPost).toHaveBeenCalledWith('/cohort/intro/draft');
+  expect(screen.getByText(/Loore is writing a draft of your introduction/)).toBeInTheDocument();
+});
+
+test('Write to the group opens the new-entry form shared with the group\'s circle', async () => {
+  setMe(invitation({ state: 'admitted', admitted_at: '2026-11-29T10:00:00Z', report: { node_id: 140 } }));
+  routes.get['/cohort/page'] = groupPage();
+  routes.get['/cohort/intro'] = { intro: { node_id: null, task_status: null, shared_with_group: true } };
+  await renderPage();
+  expect(screen.getByText(/To share an entry you wrote elsewhere, open it, choose Edit/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Write to the group' }));
+  expect(screen.getByRole('dialog', { name: 'Write to First Eight' })).toBeInTheDocument();
+  expect(JSON.parse(screen.getByTestId('form-props').textContent)).toEqual(
+    { privacy: 'circles', circles: [33], parent: null });
+  const before = mockGet.mock.calls.filter(([u]) => u === '/cohort/page').length;
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'MOCK SENT' }));
+  });
+  // Closed, and the group page read again (the new entry shows).
+  expect(screen.queryByRole('dialog', { name: 'Write to First Eight' })).toBeNull();
+  expect(mockGet.mock.calls.filter(([u]) => u === '/cohort/page').length).toBe(before + 1);
+});
+
+test('the founder\'s row shows his name, and no "No introduction yet"', async () => {
+  setMe(invitation({ state: 'admitted', admitted_at: '2026-11-29T10:00:00Z', report: { node_id: 140 } }));
+  routes.get['/cohort/page'] = groupPage();
+  routes.get['/cohort/intro'] = { intro: { node_id: null, task_status: null, shared_with_group: true } };
+  await renderPage();
+  expect(screen.getByText('Peter (@hrosspet)')).toBeInTheDocument();
+  expect(screen.getAllByText('No introduction yet')).toHaveLength(1);   // Mara's only
+});
+
+test('with the experiment switched off, /cohort says the page is not available', async () => {
+  routes.get['/cohort/me'] = { response: { status: 404, data: { error: 'Not found' } } };
+  await renderPage();
+  expect(screen.getByRole('alert')).toHaveTextContent(COHORT_TEXT.unavailable);
 });

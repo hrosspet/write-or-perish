@@ -240,7 +240,10 @@ function NotificationItem({ notification, onDone, onCloseModal }) {
 // note; "Don't show <name>'s entries" stops both the notes and the
 // entries from that person (the server settles their waiting notes),
 // and the sender is never told. Closing the modal leaves the note for
-// the next visit, like every other item.
+// the next visit, like every other item. A note about an entry shared with
+// a first-cohort group the reader belongs to (`group`) names the group and
+// offers only "Read it": the group is an audience its members joined, and
+// hiding a person stays on the Shared with you page.
 function CircleShareItem({ notification, onDone, onDoneFrom, onCloseModal }) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
@@ -267,14 +270,18 @@ function CircleShareItem({ notification, onDone, onDoneFrom, onCloseModal }) {
       }}>
         {notification.body}
       </p>
-      <p style={{ ...mutedNoteStyle, fontSize: "0.875rem", margin: "0.6rem 0 0",
-                  color: "var(--text-secondary)" }}>
-        {atName(name)} is not told what you choose.
-      </p>
+      {!notification.group && (
+        <p style={{ ...mutedNoteStyle, fontSize: "0.875rem", margin: "0.6rem 0 0",
+                    color: "var(--text-secondary)" }}>
+          {atName(name)} is not told what you choose.
+        </p>
+      )}
       <div style={buttonRowStyle}>
-        <button style={ghostButtonStyle} onClick={hide} disabled={busy}>
-          Don't show {possessive(name)} entries
-        </button>
+        {!notification.group && (
+          <button style={ghostButtonStyle} onClick={hide} disabled={busy}>
+            Don't show {possessive(name)} entries
+          </button>
+        )}
         <button style={accentButtonStyle} onClick={readIt} disabled={busy}>
           Read it
         </button>

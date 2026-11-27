@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { FaSpinner } from 'react-icons/fa';
 import { Link, useNavigate } from 'react-router-dom';
 import api from '../../api';
 import { CircleConfirmDialog } from '../CircleDialogs';
@@ -76,7 +77,18 @@ export const INTERVIEW_TEXT = {
   // After the reason: the buttons above are the way to try again.
   tryAgain: 'You can try again with the buttons above.',
   comeBack: (name) => `When you are done, come back to this page with the "${name}" link at the top of the page, and press "I'm done: write the report".`,
+  // The thread ends in an AI reply that will not come (interview.tip_status).
+  openingFailed: 'Loore could not write its first message.',
+  replyFailed: 'Loore\'s last reply did not come through.',
 };
+
+// The thread's last AI reply failed (the opening, or a later one): /cohort
+// says so and asks for it again, so nobody has to find a retry inside the
+// thread page.
+export function interviewReplyFailed(interview) {
+  return !!interview && !!interview.tip_is_ai
+    && ['failed', 'cancelled'].includes(interview.tip_status);
+}
 
 // Start (or continue) the interview in the existing Voice or Text page,
 // which then shows a link back here (InterviewBackLink). Why an opening
@@ -154,10 +166,10 @@ export function StartStep({ inv, user, onChanged, openError, onOpenFailed }) {
           The conversation stays yours: nobody else reads it, {founder} included.
         </p>
         <p style={textStyle}>
-          When you are done, Loore drafts a report for {founder}. You can change
-          it or empty it, and nothing is sent until you choose to send it.
+          {INTERVIEW_TEXT.comeBack(inv.cohort.name)} Loore then drafts a report
+          for {founder}. You can change it or empty it, and nothing is sent
+          until you choose to send it.
         </p>
-        <p style={textStyle}>{INTERVIEW_TEXT.comeBack(inv.cohort.name)}</p>
         <ModeButtons verb="Start" voice={!!user?.voice_mode_enabled} busy={busy}
           primary onOpen={(mode) => open(mode)} />
         {noAi ? <p role="alert" style={errorStyle}>{error}</p>
@@ -190,16 +202,27 @@ export function InterviewStep({ inv, user, onChanged, openError, onOpenFailed })
   };
 
   const started = onDayText(interview.started_at);
+  // A failed last reply: its reason, and Try again (the start route asks
+  // for it again under the same parent) instead of Continue.
+  const failed = interviewReplyFailed(interview);
   return (
     <>
       <Section title="The interview" labelledBy="cohort-interview">
-        <p style={textStyle}>
-          {started ? `You started the interview ${started}. ` : ''}
-          Continue where you left off. When you have said what you want to say,
-          Loore writes the report from it.
-        </p>
-        <ModeButtons verb="Continue" voice={!!user?.voice_mode_enabled} busy={busy}
-          onOpen={(mode) => open(mode, paths && paths[mode])} />
+        {failed ? (
+          <p role="alert" style={{ ...textStyle, color: 'var(--text-primary)' }}>
+            {interview.tip_is_opening ? INTERVIEW_TEXT.openingFailed : INTERVIEW_TEXT.replyFailed}
+            {interview.tip_error ? ` ${interview.tip_error}` : ''}
+          </p>
+        ) : (
+          <p style={textStyle}>
+            {started ? `You started the interview ${started}. ` : ''}
+            Continue where you left off. When you have said what you want to say,
+            Loore writes the report from it.
+          </p>
+        )}
+        <ModeButtons verb={failed ? 'Try again' : 'Continue'}
+          voice={!!user?.voice_mode_enabled} busy={busy} primary={failed}
+          onOpen={(mode) => open(mode, failed ? null : paths && paths[mode])} />
         {noAi ? <p role="alert" style={errorStyle}>{error}</p>
           : <OpenError text={error || openError} />}
         {noAi && <NoAiChoices founder={founder} onChanged={onChanged} />}
@@ -306,7 +329,10 @@ export function ReportStep({ inv, user, onChanged, onSent, onBack, openError, on
   if (DRAFTING.has(status)) {
     return (
       <Section title="Your report" labelledBy="cohort-report">
-        <p role="status" style={textStyle}>{REPORT_TEXT.drafting}</p>
+        <p role="status" style={{ ...textStyle, display: 'flex', gap: '10px', alignItems: 'baseline' }}>
+          <FaSpinner className="spin" aria-hidden="true" style={{ flexShrink: 0 }} />
+          <span>{REPORT_TEXT.drafting}</span>
+        </p>
       </Section>
     );
   }

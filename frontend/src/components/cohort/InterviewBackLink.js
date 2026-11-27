@@ -17,9 +17,12 @@ export default function InterviewBackLink() {
   const name = interviewBackLinkName(pathname, user);
   if (!name) return null;
   return (
+    // Kept under the fixed NavBar when the page scrolls, and aligned with
+    // the thread page's left edge.
     <div style={{
-      maxWidth: '760px', margin: '0 auto', boxSizing: 'border-box',
-      padding: '10px clamp(14px, 4vw, 24px) 0',
+      position: 'sticky', top: '56px', zIndex: 5,
+      background: 'var(--bg-deep)', boxSizing: 'border-box',
+      padding: '4px 12px', borderBottom: '1px solid var(--border)',
       fontFamily: 'var(--sans)', fontWeight: 300, fontSize: '0.9rem',
     }}>
       <Link to="/cohort" style={{

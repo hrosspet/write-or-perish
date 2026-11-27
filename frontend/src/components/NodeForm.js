@@ -35,7 +35,7 @@ import { NewerVersionNotice, OlderDraftBox } from "./NewerVersionNotice";
 
 const NodeForm = forwardRef(
   (
-    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, aiReply = false, parentPrivacyLevel, parentOwnedByViewer, trainRefused = false },
+    { parentId, onSuccess, hideSubmit, initialContent, editMode = false, nodeId, initialPrivacyLevel, initialAiUsage, detachPrompt, hidePowerFeatures = false, placeholder, onSubmitOverride, uploadReplyOptions, compact = false, hideAudioUpload = false, allowAgenticPrompt = false, hasGeneratedTts = false, aiUsageFromGlobalDefault = false, hasChildren = false, aiReply = false, parentPrivacyLevel, parentOwnedByViewer, trainRefused = false, initialCircleIds },
     ref
   ) => {
     const { user } = useUser();
@@ -91,7 +91,11 @@ const NodeForm = forwardRef(
     // `threadAudience` is set instead when the node is a reply in a
     // shared thread: its readers are the thread's, named before sending.
     const circlesOn = !!user?.circles_enabled;
-    const [audience, setAudience] = useState({ circleIds: [], namesText: '' });
+    // initialCircleIds: a new entry that starts shared with these circles
+    // (with initialPrivacyLevel "circles"; the first cohort's "Write to the
+    // group"). The author can still change it before sending.
+    const [audience, setAudience] = useState(
+      { circleIds: initialCircleIds || [], namesText: '' });
     const [savedAudienceKey, setSavedAudienceKey] = useState(null);
     // Editing: the names the entry was shared with when the form opened.
     // The save sends them, so a person who left since is not named again

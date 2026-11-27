@@ -164,3 +164,31 @@ test('Call done acts at once, and the copy-link button holds the full link', asy
   });
   expect(mockPost).toHaveBeenCalledWith('/admin/cohorts/1/invitations/7/call_done');
 });
+
+test('the invitations table is read again when the founder comes back to the window', async () => {
+  let invitations = [row()];
+  mockGet.mockImplementation((url) => {
+    if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+    if (url === '/admin/cohorts/1/invitations') return Promise.resolve({ data: { invitations } });
+    return Promise.reject(new Error(url));
+  });
+  await act(async () => { render(<AdminCohorts />); });
+  expect(screen.getByText('Invited', { selector: 'td' })).toBeInTheDocument();
+  // Declined in another browser meanwhile.
+  invitations = [row({ declined_at: '2026-11-27T12:00:00Z', state: 'declined' })];
+  await act(async () => { window.dispatchEvent(new Event('focus')); });
+  expect(screen.getByText('Declined', { selector: 'td' })).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+});
+
+test('a row without a handle is told apart by the start of its letter', async () => {
+  mockGet.mockImplementation((url) => {
+    if (url === '/admin/cohorts') return Promise.resolve({ data: { cohorts: [COHORT] } });
+    if (url === '/admin/cohorts/1/invitations') {
+      return Promise.resolve({ data: { invitations: [row({ x_handle: null, letter: '**Dear Mara,**\n\nI read your thread.' })] } });
+    }
+    return Promise.reject(new Error(url));
+  });
+  await act(async () => { render(<AdminCohorts />); });
+  expect(screen.getByText('No handle: "Dear Mara,…"')).toBeInTheDocument();
+});
