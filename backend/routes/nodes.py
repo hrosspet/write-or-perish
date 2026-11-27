@@ -1487,26 +1487,38 @@ def set_node_audience(node_id):
     made when the entry was written does not, unless
     ``apply_to_descendants`` asks for the user's replies below it too.
     Editing an entry's audience otherwise goes through PUT /<id>."""
+    return share_entry(Node.query.get(node_id), current_user,
+                       request.get_json(silent=True) or {})
+
+
+def _share_refusal(node, user):
+    """The 404 for a node *user* may not share, else None: none, deleted,
+    Circles off for the user, not theirs to edit, or an AI reply they
+    asked for in someone else's thread while that thread is closed to
+    them. Checked inside share_entry, so no caller can skip it."""
     from backend.utils import circles as cz
-    node = Node.query.get(node_id)
     from backend.utils.privacy import answer_open_to_owner, is_others_thread_answer
     if (node is None or node.deleted_at is not None
-            or not cz.circles_enabled(current_user)
-            or not can_user_edit_node(node, current_user.id)
+            or not cz.circles_enabled(user)
+            or not can_user_edit_node(node, user.id)
             or (is_others_thread_answer(node)
-                and not answer_open_to_owner(node, current_user.id))):
+                and not answer_open_to_owner(node, user.id))):
         return _node_not_found()
-    return share_entry(node, current_user, request.get_json(silent=True) or {})
+    return None
 
 
 def share_entry(node, user, data):
-    """The share step of PUT /<id>/audience for *node*, which the caller
-    found the user may edit: the audience in *data* replaces the node's,
-    the quote rule is checked, and it is committed. Returns the route's
-    answer (body, status). Also the first cohort's "Send to <founder>"
-    (routes/cohort.py), so that sending a report is the same act as any
-    share."""
+    """The share step of PUT /<id>/audience for *node*: refused as a node
+    that does not exist when *user* may not share it (_share_refusal);
+    otherwise the audience in *data* replaces the node's, the quote rule
+    is checked, and it is committed. Returns the route's answer (body,
+    status). Also the first cohort's "Send to <founder>" and "share my
+    introduction with the group" (routes/cohort.py), so that each is the
+    same act as any share, behind the same gate."""
     from backend.utils import circles as cz
+    refused = _share_refusal(node, user)
+    if refused is not None:
+        return refused
     old_privacy = node.privacy_level
     # An AI reply is shared by its owner once it is written, after they
     # have read it (Peter, 2026-11-12): not while it is.

@@ -1007,3 +1007,69 @@ def test_a_deleted_account_leaves_the_invitation_without_it(app):
     inv = _inv(code)
     assert inv.user_id is None and inv.claimed_at is not None
     assert NodeCircle.query.count() == 0
+
+
+# ── Every share passes the audience route's own gate ────────────────────
+
+def test_share_entry_refuses_what_the_audience_route_refuses(app):
+    """share_entry (the audience route's step, also Send and the
+    introduction's share) checks the route's gate itself: an account
+    without Circles shares nothing, and nothing is written."""
+    from backend.routes.nodes import share_entry
+    eve = _user("eve")
+    nid = _answer(app, "eve", None, "eve's own words")
+    with app.test_request_context():
+        answer, status = share_entry(_db.session.get(Node, nid), eve, {
+            "circle_ids": [], "circle_usernames": ["peter"]})
+    assert status == 404
+    _db.session.expire_all()
+    assert _db.session.get(Node, nid).privacy_level == "private"
+    assert answer.get_json() == {"error": "Node not found"}
+    with app.test_request_context():
+        assert share_entry(None, eve, {})[1] == 404
+
+
+def test_an_introduction_cannot_share_an_ai_reply_from_anothers_thread(app):
+    """mara's AI reply under ben's group entry is hers, but it is written
+    in ben's thread: as an introduction it is never shared with her
+    group, while the thread is open (the Circles reply rule) and after
+    ben took the entry back (the audience route's 404, the same answer
+    as for a node that does not exist)."""
+    cid, _codes = _admitted_group(app)
+    ben_circle, _ = _members_of("ben", cid)
+    r = _client(app, "ben").post("/api/nodes/", json={
+        "content": "BEN-GROUP-ENTRY", "privacy_level": "circles",
+        "ai_usage": "chat", "circle_ids": [ben_circle.id]})
+    entry = r.get_json()["id"]
+    r = _client(app, "mara").post("/api/nodes/", json={
+        "content": "mara replies", "privacy_level": "circles",
+        "ai_usage": "chat", "parent_id": entry})
+    assert r.status_code == 201, r.get_json()
+    reply = r.get_json()["id"]
+    r = _client(app, "mara").post(f"/api/nodes/{reply}/llm", json={})
+    assert r.status_code == 202, r.get_json()
+    answer = _db.session.get(Node, r.get_json()["node_id"])
+    answer.set_content("An answer written from ben's entry.")
+    answer.llm_task_status = "completed"
+    _db.session.commit()
+    mara = _client(app, "mara")
+
+    r = mara.post("/api/cohort/intro", json={"node_id": answer.id,
+                                             "share": True})
+    assert r.status_code == 400
+    assert r.get_json()["code"] == "circle_reply_audience"
+
+    entry_node = _db.session.get(Node, entry)
+    assert _client(app, "ben").put(f"/api/nodes/{entry}", json={
+        "content": entry_node.get_content(),
+        "privacy_level": "private"}).status_code == 200
+    r = mara.post("/api/cohort/intro", json={"node_id": answer.id,
+                                             "share": True})
+    assert r.status_code == 404
+    assert r.get_json() == {"error": "Node not found"}
+    _db.session.expire_all()
+    answer = _db.session.get(Node, answer.id)
+    assert answer.privacy_level == "private"
+    assert NodeCircle.query.filter_by(node_id=answer.id).count() == 0
+    assert CohortInvitation.query.filter_by(
+        user_id=_user("mara").id).one().intro_node_id is None
