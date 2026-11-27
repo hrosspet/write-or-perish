@@ -389,11 +389,12 @@ def test_a_shared_prompt_is_filled_with_the_requesters_artifacts(
     stored = {}
     monkeypatch.setattr(
         pc, "get_cached_render",
-        lambda config, node, variant: stored.get((node.id, variant)))
+        lambda config, node, variant, user_id=None: stored.get(
+            (node.id, variant)))
     monkeypatch.setattr(
         pc, "store_render",
         lambda config, node, text, variant, unlicensed=None, rows=None,
-        references=(), inputs=(): stored.__setitem__(
+        references=(), inputs=(), user_id=None: stored.__setitem__(
             (node.id, variant), pc.CachedRender(text, unlicensed,
                                                 tuple(references),
                                                 tuple(inputs))))

@@ -1021,9 +1021,11 @@ function NodeDetail({ nodeId: id, openNode, moving }) {
   // auto_generate_off); LLM Response is the user's own request.
   // *ack*: the key of the list the user agreed to (confirmAiReply).
   const requestLlmFor = async (parentNodeId, { sourceMode = 'textmode', auto = false, ack = null } = {}) => {
-    // The same request in every thread. The model is the requester's own
-    // (the picker's default comes from /suggested-model, which never
-    // suggests the model of another member's reply).
+    // The same request in every thread. The model is the one picked on
+    // this page (chatModel, #791), else none: the server continues on the
+    // thread's model, and in someone else's shared thread on the
+    // requester's own (resolve_chat_model: no reply made for another
+    // person sets it).
     const response = await api.post(`/nodes/${parentNodeId}/llm`, {
       ...(chatModel && { model: chatModel }),
       source_mode: sourceMode,

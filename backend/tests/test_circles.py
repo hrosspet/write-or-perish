@@ -2008,9 +2008,10 @@ def _ai_reply(parent_id, owner, model, privacy, pointer=None):
 
 def test_a_public_or_private_thread_resolves_the_model_as_before(app):
     """Outside a circle-shared thread the default model of a reply is
-    resolved exactly as before this feature: the closest earlier AI
-    reply in the thread decides, whoever it was made for, then the
-    user's own model, then the server default. With the flag on or off."""
+    resolved as without this feature: the closest earlier AI reply in
+    the thread that Loore made for the user decides (since #784 a reply
+    made for someone else never does, in any thread), then the user's
+    own model, then the server default. With the flag on or off."""
     from backend.utils.llm_nodes import resolve_chat_model
     anna, ben = _user("anna"), _user("ben")
     ben.preferred_model = "gpt-5"
@@ -2022,13 +2023,18 @@ def test_a_public_or_private_thread_resolves_the_model_as_before(app):
     bens = _client(app, "ben").post("/api/nodes/", json={
         "content": "ben in public", "privacy_level": "public",
         "ai_usage": "chat", "parent_id": annas_ai.id}).get_json()["id"]
+    bens_ai = _ai_reply(bens, ben, "claude-x", "public")
     own_root = _client(app, "ben").post("/api/nodes/", json={
         "content": "ben private", "ai_usage": "chat"}).get_json()["id"]
     for config in ({"CIRCLES_V1": True}, {"CIRCLES_V1": False,
                                           "CIRCLES_USER_IDS": set()}):
         app.config.update(config)
+        # anna's AI reply above is not ben's (#784): his own model.
         assert resolve_chat_model(_db.session.get(Node, bens), ben) == (
-            "claude-x", "predecessor")
+            "gpt-5", "user_preference")
+        # His own AI reply in the public thread does decide.
+        assert resolve_chat_model(_db.session.get(Node, bens_ai.id),
+                                  ben) == ("claude-x", "predecessor")
         assert resolve_chat_model(_db.session.get(Node, own_root), ben) == (
             "gpt-5", "user_preference")
         assert resolve_chat_model(_db.session.get(Node, root), anna) == (

@@ -1023,7 +1023,9 @@ final class CirclesFormTests: StubbedAppTestCase {
         XCTAssertFalse(model.showAIReplyDialog)
         let sent = body(of: "POST /api/nodes/31/llm")
         XCTAssertNil(sent?["circle_ask"], "the normal request: no circle_ask")
-        XCTAssertEqual(sent?["model"] as? String, "gpt-6-luna", "the requester's own model")
+        // No model unless one was picked on the page (#791): the server runs the
+        // reply on the requester's own (`resolve_chat_model`).
+        XCTAssertNil(sent?["model"], "no model picked: the server uses the requester's own")
         XCTAssertEqual(sent?["source_mode"] as? String, "textmode")
         XCTAssertNil(sent?["privacy_level"], "the server makes every AI reply private")
         XCTAssertNil(sent?["ai_reads_ack"], "the thread has no ai_reads_key: nothing to acknowledge")

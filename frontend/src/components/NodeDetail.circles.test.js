@@ -156,9 +156,10 @@ describe('a reader in someone else\'s shared thread', () => {
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     const [url, body] = mockPost.mock.calls[0];
     expect(url).toBe('/nodes/11/llm');
-    // The requester's own model, and nothing that marks the request as
-    // different from one in a private thread.
-    expect(body).toEqual({ model: 'ben-model', source_mode: 'textmode' });
+    // No model unless one was picked on the page (#791): the server runs
+    // the reply on the requester's own (resolve_chat_model), and nothing
+    // marks the request as different from one in a private thread.
+    expect(body).toEqual({ source_mode: 'textmode' });
     expect(body).not.toHaveProperty('circle_ask');
     expect(body).not.toHaveProperty('privacy_level');
   });
@@ -217,7 +218,7 @@ describe('a reader in someone else\'s shared thread', () => {
     expect(screen.queryByRole('button', { name: 'Shared with this thread' })).toBeNull();
     await press('LLM Response');
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
-    expect(mockPost.mock.calls[0][1]).toEqual({ model: 'ben-model', source_mode: 'textmode' });
+    expect(mockPost.mock.calls[0][1]).toEqual({ source_mode: 'textmode' });
   });
 });
 
@@ -249,7 +250,7 @@ describe('what the reply reads is agreed to exactly (ai_reads_key)', () => {
     await press('Generate');
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost.mock.calls[0]).toEqual(['/nodes/11/llm', {
-      model: 'ben-model', source_mode: 'textmode', ai_reads_ack: 'private:key-1',
+      source_mode: 'textmode', ai_reads_ack: 'private:key-1',
     }]);
     expect(localStorage.getItem('loore_circle_ai_reply_ack_2_10')).toBe('private:key-1');
   });
@@ -384,7 +385,7 @@ describe('what the reply reads is agreed to exactly (ai_reads_key)', () => {
     await press('Generate');
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(2));
     expect(mockPost.mock.calls[1]).toEqual(['/nodes/11/llm', {
-      model: 'ben-model', source_mode: 'textmode', ai_reads_ack: 'private:key-2',
+      source_mode: 'textmode', ai_reads_ack: 'private:key-2',
     }]);
   });
 
@@ -443,7 +444,7 @@ describe('the author in her own shared thread', () => {
     expect(screen.queryByRole('heading', { name: 'Generate an AI reply?' })).toBeNull();
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost.mock.calls[0]).toEqual(['/nodes/10/llm', {
-      model: 'anna-model', source_mode: 'textmode',
+      source_mode: 'textmode',
     }]);
   });
 

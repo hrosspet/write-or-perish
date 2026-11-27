@@ -323,10 +323,12 @@ def test_a_message_quoting_what_the_circle_cannot_read_is_refused(
 
 def test_with_circles_off_the_route_is_as_before(app, asked, monkeypatch):  # noqa: F811
     """CIRCLES_V1 off (and nobody on the list): the nodes and the answer
-    are those of the route before Circles. The Text-mode prompt goes
-    under the node at the node's level and the message under it; inside
-    an agentic thread the message goes directly under the node; a public
-    thread gets no automatic reply; nothing carries a thread pointer."""
+    are those of the route without Circles. The Text-mode prompt goes
+    under the node at the level prompt_entry_privacy gives it (Public
+    only for a Public message of an account whose default is Public,
+    2026-11-24) and the message under it; inside an agentic thread the
+    message goes directly under the node; a public thread gets no
+    automatic reply; nothing carries a thread pointer."""
     from backend.utils import privacy
     monkeypatch.setitem(privacy._pointers_seen, "at", 0.0)
     monkeypatch.setitem(privacy._pointers_seen, "any", False)
@@ -349,8 +351,11 @@ def test_with_circles_off_the_route_is_as_before(app, asked, monkeypatch):  # no
         assert set(out) == {"prompt_node_id", "user_node_id"}
         prompt = _db.session.get(Node, out["prompt_node_id"])
         msg = _db.session.get(Node, out["user_node_id"])
+        # anna's default level is not Public: her prompt entry is Private
+        # under either message (session_helpers.prompt_entry_privacy).
+        assert _user("anna").default_privacy_level != "public"
         assert (prompt.parent_id, prompt.privacy_level,
-                prompt.get_prompt_key()) == (nid, level, "textmode")
+                prompt.get_prompt_key()) == (nid, "private", "textmode")
         assert (msg.parent_id, msg.privacy_level) == (prompt.id, level)
 
     # The automatic reply: made in a private thread, not in a public one.
@@ -517,6 +522,8 @@ def test_with_circles_off_a_recorded_reply_keeps_its_prompt(
         out = r.get_json()
         prompt = _db.session.get(Node, out["conversation_id"])
         node = _db.session.get(Node, out["id"])
-        assert (prompt.parent_id, prompt.privacy_level) == (nid, level)
+        # anna's default level is not Public: her prompt entry is Private
+        # under either message (session_helpers.prompt_entry_privacy).
+        assert (prompt.parent_id, prompt.privacy_level) == (nid, "private")
         assert (node.parent_id, node.privacy_level,
                 node.audience_root_id) == (prompt.id, level, None)
